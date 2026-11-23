@@ -11,6 +11,7 @@ pub mod archive;
 pub mod backend;
 pub mod client;
 pub mod error;
+pub(crate) mod fsx;
 pub mod manager;
 pub mod mounts;
 pub mod policy;

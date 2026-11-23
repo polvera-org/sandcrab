@@ -299,8 +299,13 @@ async fn host_side_path_safety() {
         let err = ws.list_files(name.as_str(), "evil").unwrap_err();
         assert!(matches!(err, SandboxError::PathEscape(_)), "{err}");
 
-        // A symlink that stays inside the workspace is fine.
-        assert_eq!(ws.read_file(name.as_str(), "inside").unwrap(), b"fine\n");
+        // Host-side ops never follow symlinks, even one that stays inside the workspace.
+        let err = ws.read_file(name.as_str(), "inside").unwrap_err();
+        assert!(matches!(err, SandboxError::PathEscape(_)), "{err}");
+        assert_eq!(
+            ws.read_file(name.as_str(), "ok/real.txt").unwrap(),
+            b"fine\n"
+        );
 
         // delete_file removes the link itself, never its target.
         ws.delete_file(name.as_str(), "canary").unwrap();

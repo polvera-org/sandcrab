@@ -9,10 +9,13 @@
 //! <root>/workspaces/<id>/...      # per-workspace backend state (ro image cache, staging, recovery)
 //! ```
 //!
-//! Host-side file operations resolve every path component under the canonical workspace
-//! root and refuse `..`, absolute paths, and any symlink (existing or dangling) whose
-//! target is outside the root. They are refused while a sandbox holds a read-write lease,
-//! so a running guest cannot race them by swapping in symlinks.
+//! Host-side file operations (`put_file` / `read_file` / `delete_file` / `list_files`)
+//! treat the workspace contents as hostile (a sandbox may be rewriting them concurrently).
+//! They refuse `..` and absolute paths, and walk fd-relative from an opened root handle
+//! without following any symlink (see [`crate::fsx`]): a symlink anywhere on the path —
+//! even one pointing inside the workspace — is refused with [`SandboxError::PathEscape`].
+//! `list_files` reports symlinks and `delete_file` removes the link itself. Mutation is
+//! refused while a sandbox holds a read-write lease.
 //!
 //! Leases (`lease()`) are tracked in-process; the registry file itself is safe to share
 //! between processes (CLI + SDK), but two processes leasing the same workspace read-write
@@ -27,6 +30,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
+use crate::fsx;
 use crate::workspace::validate_workspace_name;
 use crate::{
     MountMode, Result, SafeRelPath, SandboxError, SandboxId, Workspace, WorkspaceBacking,
@@ -284,66 +288,6 @@ fn dir_root(ws: &Workspace) -> Result<PathBuf> {
     }
 }
 
-/// Resolve `rel` beneath the canonical `root`, refusing any escape.
-///
-/// Every existing component is inspected with `lstat`. A symlink is followed only if its
-/// fully resolved target stays inside `root`; dangling symlinks are refused (writing
-/// through one would create its target wherever it points). With `follow_final = false`
-/// the last component is returned unresolved, so callers can unlink a symlink itself.
-/// Components that do not exist yet are appended verbatim (they are created fresh).
-fn resolve_beneath(root: &Path, rel: &SafeRelPath, follow_final: bool) -> Result<PathBuf> {
-    let components: Vec<_> = rel.as_path().components().collect();
-    let mut cur = root.to_path_buf();
-    for (i, component) in components.iter().enumerate() {
-        let last = i + 1 == components.len();
-        let next = cur.join(component);
-        match fs::symlink_metadata(&next) {
-            Ok(meta) if meta.file_type().is_symlink() => {
-                if last && !follow_final {
-                    return Ok(next);
-                }
-                match fs::canonicalize(&next) {
-                    Ok(target) if target.starts_with(root) => cur = target,
-                    Ok(target) => {
-                        return Err(SandboxError::PathEscape(format!(
-                            "`{rel}`: symlink `{}` points to `{}`, outside the workspace",
-                            next.strip_prefix(root).unwrap_or(&next).display(),
-                            target.display()
-                        )));
-                    }
-                    Err(_) => {
-                        return Err(SandboxError::PathEscape(format!(
-                            "`{rel}`: symlink `{}` is dangling or unresolvable",
-                            next.strip_prefix(root).unwrap_or(&next).display()
-                        )));
-                    }
-                }
-            }
-            Ok(_) => cur = next,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                cur = next;
-                for rest in &components[i + 1..] {
-                    cur.push(rest);
-                }
-                return Ok(cur);
-            }
-            Err(e) => return Err(SandboxError::io_at(&next, e)),
-        }
-    }
-    Ok(cur)
-}
-
-fn ensure_beneath(root: &Path, path: &Path, rel: &SafeRelPath) -> Result<()> {
-    let canon = fs::canonicalize(path).map_err(|e| SandboxError::io_at(path, e))?;
-    if canon.starts_with(root) {
-        Ok(())
-    } else {
-        Err(SandboxError::PathEscape(format!(
-            "`{rel}` resolves outside the workspace"
-        )))
-    }
-}
-
 /// Persistent registry of workspaces. Cheap to clone (shared state).
 #[derive(Debug, Clone)]
 pub struct WorkspaceRegistry {
@@ -541,6 +485,8 @@ impl WorkspaceRegistry {
     }
 
     /// Write `bytes` to `rel_path`, creating parent directories. Bumps the generation.
+    /// The write is atomic (temp file + rename in the target directory) and never follows
+    /// a symlink.
     pub fn put_file(
         &self,
         r: &WorkspaceRef,
@@ -551,25 +497,22 @@ impl WorkspaceRegistry {
         self.inner.with_db(true, |db| {
             let ws = find(db, r)?;
             self.inner.ensure_mutable(ws)?;
-            let root = dir_root(ws)?;
-            let target = resolve_beneath(&root, &rel, true)?;
-            let parent = target.parent().unwrap_or(&root);
-            fs::create_dir_all(parent).map_err(|e| SandboxError::io_at(parent, e))?;
-            ensure_beneath(&root, parent, &rel)?;
-            fs::write(&target, bytes).map_err(|e| SandboxError::io_at(&target, e))?;
+            let root = fsx::open_root(&dir_root(ws)?)?;
+            fsx::write_file(&root, &rel, bytes)?;
             touch(ws);
             Ok(())
         })
     }
 
+    /// Read a regular file. Allowed under any lease; a symlink anywhere on the path is
+    /// refused with [`SandboxError::PathEscape`].
     pub fn read_file(&self, r: &WorkspaceRef, rel_path: impl AsRef<Path>) -> Result<Vec<u8>> {
         let rel = file_path(rel_path)?;
-        self.inner.with_db(false, |db| {
-            let ws = find(db, r)?;
-            let root = dir_root(ws)?;
-            let target = resolve_beneath(&root, &rel, true)?;
-            fs::read(&target).map_err(|e| map_io(&rel, &target, e))
-        })
+        let ws = self
+            .inner
+            .with_db(false, |db| find(db, r).map(|w| w.clone()))?;
+        let root = fsx::open_root(&dir_root(&ws)?)?;
+        fsx::read_file(&root, &rel)
     }
 
     /// Delete a file, symlink (the link itself, never its target) or directory (recursively).
@@ -578,55 +521,35 @@ impl WorkspaceRegistry {
         self.inner.with_db(true, |db| {
             let ws = find(db, r)?;
             self.inner.ensure_mutable(ws)?;
-            let root = dir_root(ws)?;
-            let target = resolve_beneath(&root, &rel, false)?;
-            let meta = fs::symlink_metadata(&target).map_err(|e| map_io(&rel, &target, e))?;
-            if meta.is_dir() {
-                fs::remove_dir_all(&target)
-            } else {
-                fs::remove_file(&target)
-            }
-            .map_err(|e| SandboxError::io_at(&target, e))?;
+            let root = fsx::open_root(&dir_root(ws)?)?;
+            fsx::delete(&root, &rel)?;
             touch(ws);
             Ok(())
         })
     }
 
     /// List one directory (non-recursive), sorted by path. Paths are relative to the root.
+    /// Symlinks are listed as [`FileKind::Symlink`]; listing through one is refused.
     pub fn list_files(
         &self,
         r: &WorkspaceRef,
         rel_dir: impl AsRef<Path>,
     ) -> Result<Vec<FileEntry>> {
         let rel = SafeRelPath::new(rel_dir)?;
-        self.inner.with_db(false, |db| {
-            let ws = find(db, r)?;
-            let root = dir_root(ws)?;
-            let dir = resolve_beneath(&root, &rel, true)?;
-            let mut out = Vec::new();
-            for entry in fs::read_dir(&dir).map_err(|e| map_io(&rel, &dir, e))? {
-                let entry = entry.map_err(|e| SandboxError::io_at(&dir, e))?;
-                let meta = fs::symlink_metadata(entry.path())
-                    .map_err(|e| SandboxError::io_at(&entry.path(), e))?;
-                let ft = meta.file_type();
-                let kind = if ft.is_symlink() {
-                    FileKind::Symlink
-                } else if ft.is_dir() {
-                    FileKind::Dir
-                } else if ft.is_file() {
-                    FileKind::File
-                } else {
-                    FileKind::Other
-                };
-                out.push(FileEntry {
-                    path: rel.as_path().join(entry.file_name()),
-                    kind,
-                    size: meta.len(),
-                });
-            }
-            out.sort_by(|a, b| a.path.cmp(&b.path));
-            Ok(out)
-        })
+        let ws = self
+            .inner
+            .with_db(false, |db| find(db, r).map(|w| w.clone()))?;
+        let root = fsx::open_root(&dir_root(&ws)?)?;
+        let mut out: Vec<_> = fsx::list_dir(&root, &rel)?
+            .into_iter()
+            .map(|(name, kind, size)| FileEntry {
+                path: rel.as_path().join(name),
+                kind,
+                size,
+            })
+            .collect();
+        out.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(out)
     }
 
     /// Take a mount lease for sandbox `by`: read-write is exclusive (no other rw or ro
@@ -728,14 +651,6 @@ fn file_path(rel: impl AsRef<Path>) -> Result<SafeRelPath> {
         ));
     }
     Ok(rel)
-}
-
-fn map_io(rel: &SafeRelPath, path: &Path, e: io::Error) -> SandboxError {
-    if e.kind() == io::ErrorKind::NotFound {
-        SandboxError::not_found("workspace path", rel)
-    } else {
-        SandboxError::io_at(path, e)
-    }
 }
 
 /// A mount lease on a workspace held by one sandbox. Dropping it releases the lease.
@@ -1077,20 +992,45 @@ mod tests {
     }
 
     #[test]
-    fn internal_symlinks_allowed() {
+    fn internal_symlinks_refused() {
         let f = fixture();
         fs::create_dir_all(f.host.join("real")).unwrap();
+        fs::write(f.host.join("real/x.txt"), b"1").unwrap();
         symlink("real", f.host.join("alias")).unwrap();
         symlink(f.host.join("real"), f.host.join("abs_alias")).unwrap();
-        f.reg.put_file(&proj(), "alias/x.txt", b"1").unwrap();
+        symlink("real/x.txt", f.host.join("x_link")).unwrap();
+        // Host-side ops never follow symlinks, even ones that stay inside the workspace.
+        for bad in ["alias/y.txt", "abs_alias/x.txt", "x_link"] {
+            assert!(
+                matches!(
+                    f.reg.put_file(&proj(), bad, b"2"),
+                    Err(SandboxError::PathEscape(_))
+                ),
+                "{bad}"
+            );
+            assert!(
+                matches!(
+                    f.reg.read_file(&proj(), bad),
+                    Err(SandboxError::PathEscape(_))
+                ),
+                "{bad}"
+            );
+        }
+        assert!(matches!(
+            f.reg.list_files(&proj(), "alias"),
+            Err(SandboxError::PathEscape(_))
+        ));
+        assert!(!f.host.join("real/y.txt").exists());
         assert_eq!(fs::read(f.host.join("real/x.txt")).unwrap(), b"1");
-        assert_eq!(f.reg.read_file(&proj(), "abs_alias/x.txt").unwrap(), b"1");
         let listed = f.reg.list_files(&proj(), "").unwrap();
         assert!(
             listed
                 .iter()
                 .any(|e| e.path == Path::new("alias") && e.kind == FileKind::Symlink)
         );
+        // Deleting a symlinked directory removes the link, not the directory.
+        f.reg.delete_file(&proj(), "alias").unwrap();
+        assert!(f.host.join("real/x.txt").exists());
     }
 
     #[test]

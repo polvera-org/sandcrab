@@ -1655,6 +1655,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "rustix",
  "sandcrab-guest",
  "sandcrab-protocol",
  "serde",
