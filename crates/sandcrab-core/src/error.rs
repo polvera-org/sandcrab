@@ -81,6 +81,51 @@ pub enum SandboxError {
     Unimplemented(&'static str),
 }
 
+/// Manual impl because `std::io::Error` is not `Clone`: the copy keeps its kind and message.
+/// Needed so every caller awaiting one shared teardown gets the same outcome.
+impl Clone for SandboxError {
+    fn clone(&self) -> Self {
+        match self {
+            Self::NotFound { kind, id } => Self::NotFound {
+                kind,
+                id: id.clone(),
+            },
+            Self::AlreadyExists { kind, id } => Self::AlreadyExists {
+                kind,
+                id: id.clone(),
+            },
+            Self::InvalidConfig(s) => Self::InvalidConfig(s.clone()),
+            Self::Template(s) => Self::Template(s.clone()),
+            Self::Workspace(s) => Self::Workspace(s.clone()),
+            Self::PathEscape(s) => Self::PathEscape(s.clone()),
+            Self::WorkspaceBusy(s) => Self::WorkspaceBusy(s.clone()),
+            Self::Backend { backend, message } => Self::Backend {
+                backend: backend.clone(),
+                message: message.clone(),
+            },
+            Self::InsecureBackendRejected(s) => Self::InsecureBackendRejected(s.clone()),
+            Self::PolicyUnenforceable(s) => Self::PolicyUnenforceable(s.clone()),
+            Self::DigestMismatch {
+                image,
+                expected,
+                actual,
+            } => Self::DigestMismatch {
+                image: image.clone(),
+                expected: expected.clone(),
+                actual: actual.clone(),
+            },
+            Self::Transport(s) => Self::Transport(s.clone()),
+            Self::Timeout { what, after } => Self::Timeout {
+                what: what.clone(),
+                after: *after,
+            },
+            Self::Protocol(e) => Self::Protocol(e.clone()),
+            Self::Io(e) => Self::Io(std::io::Error::new(e.kind(), e.to_string())),
+            Self::Unimplemented(s) => Self::Unimplemented(s),
+        }
+    }
+}
+
 impl SandboxError {
     pub(crate) fn not_found(kind: &'static str, id: impl ToString) -> Self {
         Self::NotFound {
