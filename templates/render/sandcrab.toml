@@ -1,0 +1,19 @@
+[template]
+name = "render"
+version = "0.1.0"
+description = "Headless Chromium, Playwright, ffmpeg, ImageMagick, and Typst rendering sandbox"
+image = "sandcrab/render:0.1.0"
+
+[resources]
+vcpu = 2
+memory_mb = 2048
+disk_mb = 6144
+
+[workspace]
+workdir = "/workspace"
+
+[network]
+default_policy = "egress_restricted"
+
+[tools]
+tiers = ["core", "process", "browser"]

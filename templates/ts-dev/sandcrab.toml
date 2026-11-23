@@ -1,0 +1,19 @@
+[template]
+name = "ts-dev"
+version = "0.1.0"
+description = "Node.js 26 Active LTS + pnpm + bun + TypeScript + vitest + biome sandbox for JS/TS agents"
+image = "sandcrab/ts-dev:0.1.0"
+
+[resources]
+vcpu = 2
+memory_mb = 1536
+disk_mb = 4096
+
+[workspace]
+workdir = "/workspace"
+
+[network]
+default_policy = "egress_restricted"
+
+[tools]
+tiers = ["core", "process"]

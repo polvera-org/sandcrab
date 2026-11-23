@@ -1,0 +1,19 @@
+[template]
+name = "base"
+version = "0.1.0"
+description = "Minimal Debian 13 (trixie-slim) base image with core CLI utilities and crabd guest daemon"
+image = "sandcrab/base:0.1.0"
+
+[resources]
+vcpu = 1
+memory_mb = 512
+disk_mb = 2048
+
+[workspace]
+workdir = "/workspace"
+
+[network]
+default_policy = "egress_restricted"
+
+[tools]
+tiers = ["core", "process"]
