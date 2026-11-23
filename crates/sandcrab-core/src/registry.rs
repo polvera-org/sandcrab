@@ -6,10 +6,14 @@
 //! <root>/registry.json            # all workspaces (atomic write: tmp + fsync + rename)
 //! <root>/registry.lock            # flock held for every registry read-modify-write
 //! <root>/workspaces/<id>/data/    # ManagedDir contents
-//! <root>/workspaces/<id>/mount.lock  # flock: rw lease exclusive, ro leases shared
-//! <root>/workspaces/<id>/rw.lock     # flock: held exclusive by the rw lease
 //! <root>/workspaces/<id>/...      # per-workspace backend state (ro image cache, staging, recovery)
+//! <root>/locks/<id>.mount.lock    # flock: rw lease exclusive, ro leases shared
+//! <root>/locks/<id>.rw.lock       # flock: held exclusive by the rw lease
 //! ```
+//!
+//! Lease lock files live in `locks/`, not in the workspace dir, so leasing a registered
+//! host directory (DockerDev bind-mounts it in place) creates no `workspaces/<id>/` dir.
+//! [`WorkspaceRegistry::remove`] deletes them.
 //!
 //! # Host-side file operations
 //!
@@ -70,6 +74,8 @@ const REGISTRY_VERSION: u32 = 1;
 const MOUNT_LOCK: &str = "mount.lock";
 /// Per-workspace flock held exclusively by a rw lease; host mutation probes it.
 const RW_LOCK: &str = "rw.lock";
+/// Lease lock files: `<root>/locks/<id>.{mount,rw}.lock`.
+const LOCKS_DIR: &str = "locks";
 /// `ManagedDir` contents under `<root>/workspaces/<id>/`.
 const MANAGED_DATA: &str = "data";
 
@@ -290,15 +296,18 @@ impl Inner {
         Ok(Some(file))
     }
 
+    fn lock_dir(&self) -> PathBuf {
+        self.root.join(LOCKS_DIR)
+    }
+
     fn lock_path(&self, id: WorkspaceId, name: &str) -> PathBuf {
-        self.workspace_dir(id).join(name)
+        self.lock_dir().join(format!("{id}.{name}"))
     }
 
     /// Open (creating) a per-workspace lock file.
     fn lock_file(&self, id: WorkspaceId, name: &str) -> Result<File> {
-        let dir = self.workspace_dir(id);
-        create_private_dir_all(&dir)?;
-        let path = dir.join(name);
+        create_private_dir_all(&self.lock_dir())?;
+        let path = self.lock_path(id, name);
         OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -653,6 +662,16 @@ impl WorkspaceRegistry {
                     "workspace `{}` is mounted by a running sandbox",
                     db.workspaces[idx].name
                 )));
+            }
+            // Under the exclusive registry lock, and the workspace is not leased: nobody
+            // holds these locks, and nobody can lease it once it is unregistered.
+            for name in [MOUNT_LOCK, RW_LOCK] {
+                let path = self.inner.lock_path(id, name);
+                match fs::remove_file(&path) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(SandboxError::io_at(&path, e)),
+                }
             }
             Ok(db.workspaces.remove(idx))
         })?;
@@ -1155,8 +1174,11 @@ mod tests {
                 .unwrap(),
         );
         let dir = f.reg.workspace_dir(ws.id);
-        assert!(dir.join(MOUNT_LOCK).exists());
+        let lock = f.reg.inner.lock_path(ws.id, MOUNT_LOCK);
+        assert!(lock.exists());
+        fs::write(dir.join("cache"), b"state").unwrap();
         f.reg.remove(&"keepme".into(), false).unwrap();
+        assert!(!lock.exists());
         assert!(ws.backing.path().join("file").is_file());
         // Sandcrab's own state (lock files, caches) is cleaned; only `data/` stays.
         let left: Vec<_> = fs::read_dir(&dir)
@@ -1176,9 +1198,21 @@ mod tests {
                 .lease(&proj(), MountMode::ReadWrite, SandboxId::new())
                 .unwrap(),
         );
-        assert!(f.reg.workspace_dir(id).join(RW_LOCK).exists());
+        // Leasing a host dir creates no per-workspace dir: its locks live in `locks/`.
+        assert!(!f.reg.workspace_dir(id).exists());
+        let locks = [MOUNT_LOCK, RW_LOCK].map(|n| f.reg.inner.lock_path(id, n));
+        assert!(locks.iter().all(|l| l.exists()), "{locks:?}");
+        // A ro lease and a host write do not create it either.
+        drop(
+            f.reg
+                .lease(&proj(), MountMode::ReadOnly, SandboxId::new())
+                .unwrap(),
+        );
+        f.reg.put_file(&proj(), "new", b"y").unwrap();
+        assert!(!f.reg.workspace_dir(id).exists());
         f.reg.remove(&proj(), false).unwrap();
         assert!(!f.reg.workspace_dir(id).exists());
+        assert!(locks.iter().all(|l| !l.exists()), "{locks:?}");
         assert_eq!(fs::read(f.host.join("keep")).unwrap(), b"x");
     }
 

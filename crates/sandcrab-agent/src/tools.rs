@@ -6,6 +6,8 @@ use std::time::Duration;
 use sandcrab_sdk::{ToolDefinition, is_tool_error};
 use serde_json::{Value, json};
 
+use crate::media::{self, ImageAttachment};
+
 /// Map Sandcrab tool definitions 1:1 to Anthropic client tools (`name`, `description`,
 /// `input_schema`). Requests are streamed, so `eager_input_streaming` is on: large file
 /// bodies stream as generated; inputs are then validated by the strict JSON parse in the
@@ -36,6 +38,8 @@ pub struct ToolOutcome {
     /// The sandbox is unusable (destroyed / transport lost).
     pub fatal: bool,
     pub elapsed: Duration,
+    /// An image sent to the model as an `image` block next to `output` (see [`media`]).
+    pub image: Option<ImageAttachment>,
 }
 
 impl ToolOutcome {
@@ -64,6 +68,7 @@ impl ToolOutcome {
             is_error,
             fatal,
             elapsed,
+            image: None,
         }
     }
 
@@ -78,16 +83,36 @@ impl ToolOutcome {
             is_error: true,
             fatal: false,
             elapsed: Duration::ZERO,
+            image: None,
         }
     }
 
-    /// The `tool_result` content block (JSON string content).
+    /// Strip the base64 from a successful `download` result: images become an attachment,
+    /// small text is inlined, anything else is summarised (see [`media`]).
+    pub fn shape_download(&mut self) {
+        if self.is_error || self.name != "download" {
+            return;
+        }
+        let (out, img) = media::shape_download(&self.output);
+        self.output = out;
+        self.image = img;
+    }
+
+    /// The `tool_result` content block: JSON string content, or `[text, image]` blocks when
+    /// an image is attached.
     #[must_use]
     pub fn result_block(&self) -> Value {
+        let content = match &self.image {
+            None => Value::String(self.output.to_string()),
+            Some(img) => json!([
+                {"type": "text", "text": self.output.to_string()},
+                img.block(),
+            ]),
+        };
         let mut b = json!({
             "type": "tool_result",
             "tool_use_id": self.id,
-            "content": self.output.to_string(),
+            "content": content,
         });
         if self.is_error {
             b["is_error"] = Value::Bool(true);
@@ -154,6 +179,18 @@ pub fn summarize_result(name: &str, output: &Value, is_error: bool) -> String {
         },
         "file_write" => n("bytes_written").map_or("ok".into(), |b| format!("{b} bytes")),
         "file_edit" => n("replacements").map_or("ok".into(), |r| format!("{r} replaced")),
+        "download" | "file_read" if output.get("mime").is_some() => {
+            let mime = output["mime"].as_str().unwrap_or("");
+            let size = n("size").map_or(String::new(), |b| format!(", {b} bytes"));
+            if output["note"]
+                .as_str()
+                .is_some_and(|t| t.contains("attached"))
+            {
+                format!("{mime} attached{size}")
+            } else {
+                format!("{mime}{size}")
+            }
+        }
         "file_read" => output["content"]
             .as_str()
             .map_or("ok".into(), |c| format!("{} lines", c.lines().count())),
@@ -313,6 +350,70 @@ mod tests {
 
         let h = ToolOutcome::harness_error("t5", "bash", json!({}), "INVALID_JSON", "bad");
         assert_eq!(h.result_block()["is_error"], true);
+    }
+
+    #[test]
+    fn image_download_is_sent_as_an_image_block() {
+        use base64::Engine as _;
+        let png = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR";
+        let b64 = base64::engine::general_purpose::STANDARD.encode(png);
+        let mut o = ToolOutcome::from_dispatch(
+            "t9",
+            "download",
+            json!({"path": "/tmp/h1.png"}),
+            Ok(json!({"path": "/tmp/h1.png", "content_base64": b64, "size": 16, "mode": 420})),
+            Duration::ZERO,
+        );
+        o.shape_download();
+        assert_eq!(
+            summarize_result(&o.name, &o.output, false),
+            "image/png attached, 16 bytes"
+        );
+        let block = o.result_block();
+
+        // The exact request body the Anthropic client sends.
+        let client = crate::llm::anthropic::AnthropicClient::new(
+            crate::llm::anthropic::AnthropicConfig::new("sk-test", "claude-sonnet-5-5"),
+        )
+        .unwrap();
+        let msgs = [json!({"role": "user", "content": [block]})];
+        let body = client.build_body(&crate::llm::Request {
+            system: "s",
+            tools: &[],
+            messages: &msgs,
+        });
+        let tr = &body["messages"][0]["content"][0];
+        assert_eq!(tr["type"], "tool_result");
+        assert_eq!(tr["tool_use_id"], "t9");
+        let parts = tr["content"].as_array().unwrap();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0]["type"], "text");
+        let note: Value = serde_json::from_str(parts[0]["text"].as_str().unwrap()).unwrap();
+        assert!(note.get("content_base64").is_none());
+        assert_eq!(note["mime"], "image/png");
+        assert_eq!(parts[1]["type"], "image");
+        assert_eq!(parts[1]["source"]["type"], "base64");
+        assert_eq!(parts[1]["source"]["media_type"], "image/png");
+        assert_eq!(parts[1]["source"]["data"], b64);
+        // No base64 anywhere in text form.
+        assert!(!parts[0]["text"].as_str().unwrap().contains(&b64));
+
+        // A non-image binary never reaches the model as base64.
+        let blob = base64::engine::general_purpose::STANDARD.encode([0u8, 0xFF, 1, 0xFE]);
+        let mut o = ToolOutcome::from_dispatch(
+            "t10",
+            "download",
+            json!({"path": "a.bin"}),
+            Ok(json!({"path": "/w/a.bin", "content_base64": blob, "size": 4, "mode": 420})),
+            Duration::ZERO,
+        );
+        o.shape_download();
+        assert!(o.image.is_none());
+        let b = o.result_block();
+        let c: Value = serde_json::from_str(b["content"].as_str().unwrap()).unwrap();
+        assert!(c.get("content_base64").is_none());
+        assert_eq!(c["mime"], "application/octet-stream");
+        assert!(c["sha256"].is_string());
     }
 
     #[test]

@@ -15,6 +15,7 @@ use tokio::task::JoinSet;
 
 use crate::cost::UsageTotals;
 use crate::llm::{LlmClient, Request};
+use crate::media;
 use crate::tools::ToolOutcome;
 use crate::transcript::Transcript;
 use crate::ui::Ui;
@@ -266,7 +267,7 @@ impl Agent {
                     "step": step,
                     "model": model,
                     "n_messages": self.messages.len(),
-                    "new_messages": new_msgs,
+                    "new_messages": media::redact_images(&Value::Array(new_msgs)),
                 }),
             );
 
@@ -452,10 +453,10 @@ impl Agent {
             set.spawn(async move {
                 let t = Instant::now();
                 let reply = sb.tool_dispatch(&name, input.clone()).await;
-                (
-                    i,
-                    ToolOutcome::from_dispatch(&id, &name, input, reply, t.elapsed()),
-                )
+                let mut o = ToolOutcome::from_dispatch(&id, &name, input, reply, t.elapsed());
+                attach_media(&sb, &mut o).await;
+                o.elapsed = t.elapsed();
+                (i, o)
             });
         }
 
@@ -505,9 +506,35 @@ impl Agent {
                 "input": o.input,
                 "output": o.output,
                 "is_error": o.is_error,
+                "image": o.image.as_ref().map(|i| json!({"media_type": i.media_type, "bytes": i.bytes})),
                 "ms": o.elapsed.as_millis() as u64,
             }),
         );
+    }
+}
+
+/// Images reach the model as `image` blocks, never as base64 text: a `download` is
+/// reshaped; a binary `file_read` of an image path fetches the bytes with `download`.
+async fn attach_media(sb: &Sandbox, o: &mut ToolOutcome) {
+    if o.is_error {
+        return;
+    }
+    match o.name.as_str() {
+        "download" => o.shape_download(),
+        "file_read" => {
+            let Some(path) = media::file_read_image_path(&o.input, &o.output) else {
+                return;
+            };
+            let params = json!({"path": path, "max_bytes": media::MAX_IMAGE_BYTES});
+            let dl = match sb.tool_dispatch("download", params).await {
+                Ok(v) => v,
+                Err(e) => e.to_json(),
+            };
+            let (out, img) = media::attach_to_file_read(&o.output, &dl);
+            o.output = out;
+            o.image = img;
+        }
+        _ => {}
     }
 }
 

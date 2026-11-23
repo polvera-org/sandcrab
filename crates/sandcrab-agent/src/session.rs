@@ -120,6 +120,8 @@ pub struct SessionOptions {
     pub transcript: Option<PathBuf>,
     /// One-shot task; `None` = REPL.
     pub prompt: Option<String>,
+    /// One-shot only: seconds to keep the sandbox up after the task (0 = destroy at once).
+    pub keep_alive_secs: u64,
     /// `user@host` for the port-forward hint.
     pub ssh_host: Option<String>,
     pub quiet: bool,
@@ -140,6 +142,7 @@ impl SessionOptions {
             max_turns: cli.max_turns,
             transcript: cli.transcript.clone(),
             prompt: cli.prompt.clone(),
+            keep_alive_secs: cli.keep_alive,
             ssh_host: None,
             quiet: false,
         }
@@ -297,6 +300,14 @@ pub async fn run_session(
     let mut config = SandboxConfig::from_template(&opts.template);
     config.mounts.clone_from(&mounts);
     config.default_cwd = cwd.as_ref().map(PathBuf::from);
+    // Caches go into the persistent workspace at the cwd, so `npm i`, `uv sync` or a
+    // Playwright browser download survive across sessions ($HOME does not). --env wins.
+    let cache_dir = workspace_cache_dir(&mounts, cwd.as_deref());
+    if let Some(dir) = &cache_dir {
+        for (k, v) in cache_env(dir) {
+            config.env.insert(k, v);
+        }
+    }
     config.env.extend(opts.env.iter().cloned());
     if let Some(n) = opts.network {
         config = config.network(n);
@@ -344,6 +355,7 @@ pub async fn run_session(
         &opts,
         &infos,
         &network,
+        cache_dir.as_deref(),
         &state_root,
         intr,
         &mut ui,
@@ -376,6 +388,7 @@ async fn drive(
     opts: &SessionOptions,
     infos: &[MountInfo],
     network: &str,
+    cache_dir: Option<&str>,
     state_root: &Path,
     intr: &Interrupt,
     ui: &mut Ui,
@@ -413,11 +426,17 @@ async fn drive(
             m.description
         ));
     }
+    let one_shot = opts.prompt.is_some();
+    let lifetime = match (one_shot, opts.keep_alive_secs) {
+        (false, _) => "",
+        (true, 0) => "  — live only while the task runs (--keep-alive SECS to hold it)",
+        (true, _) => "  — live while the task runs and during --keep-alive",
+    };
     let mut ports = Vec::new();
     for p in sandbox.published_ports() {
         ports.push((p.guest, p.host.to_string()));
         ui.line(&format!(
-            "   port {} → {}  (http://{})",
+            "   port {} → {}  (http://{}){lifetime}",
             p.host, p.guest, p.host
         ));
         if let Some(h) = &opts.ssh_host {
@@ -438,6 +457,9 @@ async fn drive(
         network: network.to_owned(),
         ports: ports.clone(),
         tools: defs.iter().map(|d| d.name.to_owned()).collect(),
+        one_shot,
+        keep_alive_secs: opts.keep_alive_secs,
+        cache_dir: cache_dir.map(str::to_owned),
     });
 
     let mut agent = Agent::new(llm.clone(), sandbox.clone(), system, tools).with_ui(ui.clone());
@@ -471,6 +493,11 @@ async fn drive(
             TurnOutcome::Interrupted => 130,
             _ => 1,
         };
+        if opts.keep_alive_secs > 0
+            && !matches!(out, TurnOutcome::Interrupted | TurnOutcome::SandboxLost(_))
+        {
+            hold(sandbox, opts.keep_alive_secs, intr, &mut agent.ui).await;
+        }
         (code, Some(out))
     } else {
         repl(
@@ -506,6 +533,49 @@ async fn drive(
         usage_summary,
         sandbox_id: String::new(),
     })
+}
+
+/// The workspace cache dir (`<cwd>/.cache`) when the cwd is a read-write mount.
+#[must_use]
+pub fn workspace_cache_dir(mounts: &[WorkspaceMount], cwd: Option<&str>) -> Option<String> {
+    let cwd = cwd?;
+    mounts
+        .iter()
+        .any(|m| m.mode == MountMode::ReadWrite && m.guest_path == Path::new(cwd))
+        .then(|| format!("{}/.cache", cwd.trim_end_matches('/')))
+}
+
+/// Env pointing package / browser caches at `dir`. Playwright (Linux) and pip / uv follow
+/// `XDG_CACHE_HOME`; npm needs its own variable. Templates that set an explicit path in
+/// the image (the `render` template's `PLAYWRIGHT_BROWSERS_PATH`) keep it.
+#[must_use]
+pub fn cache_env(dir: &str) -> [(String, String); 2] {
+    [
+        ("XDG_CACHE_HOME".into(), dir.to_owned()),
+        ("npm_config_cache".into(), format!("{dir}/npm")),
+    ]
+}
+
+/// One-shot `--keep-alive`: keep the sandbox (and its ports) up until the timeout or Ctrl-C.
+async fn hold(sandbox: &Sandbox, secs: u64, intr: &Interrupt, ui: &mut Ui) {
+    let urls: Vec<String> = sandbox
+        .published_ports()
+        .iter()
+        .map(|p| format!("http://{}", p.host))
+        .collect();
+    let what = if urls.is_empty() {
+        String::new()
+    } else {
+        format!(" — {}", urls.join(", "))
+    };
+    ui.line(&format!(
+        "⏸ keeping the sandbox up for {secs}s{what} (Ctrl-C to stop)"
+    ));
+    let base = intr.count();
+    tokio::select! {
+        () = tokio::time::sleep(std::time::Duration::from_secs(secs)) => {}
+        () = intr.beyond(base) => {}
+    }
 }
 
 const HELP: &str = "/exit  quit (destroys the sandbox; the workspace persists)\n\

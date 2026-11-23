@@ -1,11 +1,11 @@
 [template]
 name = "ts-dev"
 version = "0.1.0"
-description = "Node.js 26 Active LTS + pnpm + bun + TypeScript + vitest + biome sandbox for JS/TS agents"
+description = "Node.js 26 Active LTS + pnpm + bun + TypeScript + vitest + biome (+ python3) sandbox for JS/TS agents; no browser (use render)"
 image = "sandcrab/ts-dev:0.1.0"
 # Pins the locally built image ID (docker image inspect --format {{.Id}}); not
 # reproducible across rebuilds yet. Refresh with: templates/build.sh --pin
-sha256 = "sha256:5c980b5ec571dcd69a041ddd6c2ed625afbcda74e1c3f39c05d321c5fdec9613"
+sha256 = "sha256:dc8c0695633cedc3834bf4d8c0ff6870b9da1ecd1974cd478d2ca8a5c5d8636a"
 
 [resources]
 vcpu = 2
