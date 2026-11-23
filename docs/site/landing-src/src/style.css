@@ -115,10 +115,6 @@ code { font:.84em/1.4 var(--mono); background:var(--bg-2); border-radius:5px; pa
 .burrow-stage { aspect-ratio:16/9; max-width:900px; margin:clamp(40px,6vw,80px) auto 0; }
 .wire-stage { aspect-ratio:4/3; }
 
-/* ── The painting, full bleed ── */
-.shore { margin:0; }
-.shore img { display:block; width:100%; height:clamp(220px,34vw,540px); object-fit:cover; object-position:58% 50%; filter:var(--img-filter); }
-
 /* ── Sections: big heading left with a mono kicker under it, copy right ── */
 .section { padding-top:var(--section); }
 .two { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:var(--gap); align-items:start; }

@@ -78,10 +78,6 @@
   </div>
 </section>
 
-<figure class="shore" aria-label="Painting: a rust-orange crab among tall white sandcastle blocks on a bright shore">
-  <img src="assets/sandcrab-hero.jpg" width="1600" height="538" alt="Impasto oil painting of a rust-orange crab walking between tall white blocks of sand on a sunlit white beach, with a dark sea and a pale blue sky behind.">
-</figure>
-
 <!-- ───────────── A TURN ───────────── -->
 <section class="section" id="turn" aria-labelledby="turn-h">
   <div class="wrap">
@@ -120,9 +116,9 @@
   <div class="wrap">
     <div class="two two-code">
       <div class="head">
-        <h2 id="sdk-h">The whole loop in one Rust file</h2>
+        <h2 id="sdk-h">The whole loop, a dozen lines</h2>
         <p class="kicker">Rust SDK</p>
-        <p class="head-note">Build a client on the backend you name. Create workspaces on the host. Spawn a sandbox with them mounted, run a command, hand the model a tool call, then destroy the sandbox and read its timings.</p>
+        <p class="head-note">Name a backend, create a workspace, spawn a sandbox with it mounted, run a command, throw the sandbox away. The file stays.</p>
       </div>
       <figure class="code" id="code-sdk">
         <figcaption><span>main.rs</span><button class="copy" type="button" data-copy-target="#code-sdk pre" aria-label="Copy the Rust example">Copy</button></figcaption>
@@ -130,41 +126,20 @@
 
 #[tokio::main]
 <span class="k">async</span> <span class="k">fn</span> main() -&gt; sandcrab_sdk::Result&lt;()&gt; {
-    <span class="c">// No default backend, no fallback: you name the backend explicitly.</span>
-    <span class="k">let</span> sandcrab = Sandcrab::builder()
+    <span class="k">let</span> crab = Sandcrab::builder()
         .<span class="f">docker</span>(DockerConfig::default())
         .<span class="f">templates_dir</span>(<span class="s">"templates"</span>)
         .<span class="f">build</span>()?;
+    crab.<span class="f">workspaces</span>().<span class="f">create</span>(<span class="s">"project"</span>)?; <span class="c">// outlives every sandbox</span>
 
-    <span class="c">// Persistent workspaces live on the host; mutate them between agent turns.</span>
-    <span class="k">let</span> ws = sandcrab.<span class="f">workspaces</span>();
-    ws.<span class="f">create</span>(<span class="s">"project"</span>)?;
-    ws.<span class="f">create</span>(<span class="s">"attachments"</span>)?;
-    ws.<span class="f">put_file</span>(<span class="s">"attachments"</span>, <span class="s">"spec.md"</span>, b<span class="s">"# Spec\nPrint hello.\n"</span>)?;
+    <span class="k">let</span> config = SandboxConfig::from_template(<span class="s">"base"</span>)
+        .<span class="f">mount</span>(<span class="s">"project"</span>, <span class="s">"/workspace"</span>, MountMode::ReadWrite);
+    <span class="k">let</span> sandbox = crab.<span class="f">spawn</span>(config).<span class="k">await</span>?;
 
-    <span class="c">// Ephemeral sandbox: one rw workspace (the cwd) and one ro workspace.</span>
-    <span class="k">let</span> sandbox = sandcrab
-        .<span class="f">spawn</span>(
-            SandboxConfig::from_template(<span class="s">"python-dev"</span>)
-                .<span class="f">mount</span>(<span class="s">"project"</span>, <span class="s">"/workspace"</span>, MountMode::ReadWrite)
-                .<span class="f">mount</span>(<span class="s">"attachments"</span>, <span class="s">"/attachments"</span>, MountMode::ReadOnly)
-                .<span class="f">default_cwd</span>(<span class="s">"/workspace"</span>),
-        )
-        .<span class="k">await</span>?;
+    <span class="k">let</span> out = sandbox.<span class="f">bash</span>(<span class="s">"echo 42 | tee answer.txt"</span>).<span class="k">await</span>?;
+    <span class="m">println!</span>(<span class="s">"{}"</span>, out.stdout);
 
-    sandbox.<span class="f">file_write</span>(<span class="s">"hello.py"</span>, <span class="s">"print('hello')\n"</span>).<span class="k">await</span>?;
-    <span class="k">let</span> out = sandbox.<span class="f">bash</span>(<span class="s">"python3 hello.py &amp;&amp; cat /attachments/spec.md"</span>).<span class="k">await</span>?;
-    <span class="m">println!</span>(<span class="s">"exit={:?}\n{}"</span>, out.exit_code, out.stdout);
-
-    <span class="c">// LLM tool use: tool name + JSON input from the model, JSON reply back.</span>
-    <span class="k">let</span> reply = sandbox
-        .<span class="f">tool_dispatch</span>(<span class="s">"grep"</span>, serde_json::<span class="m">json!</span>({ <span class="s">"pattern"</span>: <span class="s">"hello"</span> }))
-        .<span class="k">await</span>
-        .<span class="f">expect</span>(<span class="s">"sandbox is alive"</span>);
-    <span class="m">println!</span>(<span class="s">"{reply}"</span>);
-
-    <span class="k">let</span> timings = sandbox.<span class="f">destroy</span>().<span class="k">await</span>?;
-    <span class="m">println!</span>(<span class="s">"spawn→ready: {:?}"</span>, timings.<span class="f">spawn_ready</span>());
+    sandbox.<span class="f">destroy</span>().<span class="k">await</span>?; <span class="c">// answer.txt stays in the workspace</span>
     <span class="k">Ok</span>(())
 }</code></pre>
       </figure>
