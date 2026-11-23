@@ -50,7 +50,10 @@
 //! # Backends
 //!
 //! There is no default and no fallback: pick one with [`SandcrabBuilder::docker`] (feature
-//! `docker`, on by default) or [`SandcrabBuilder::backend`] for any [`RuntimeBackend`].
+//! `docker`, on by default), `SandcrabBuilder::firecracker` (feature `firecracker`, off by
+//! default, Linux only; hardware isolated, needs `/dev/kvm`) or [`SandcrabBuilder::backend`]
+//! for any [`RuntimeBackend`]. A backend that cannot start (e.g. no `/dev/kvm`) is an error,
+//! never a reason to pick another one.
 //! A backend that is not hardware isolated is refused unless explicitly allowed
 //! ([`DockerDevConfig::allow_insecure_dev_backend`] / [`SandcrabBuilder::allow_insecure_backend`]),
 //! and [`SandcrabBuilder::require_hardware_isolation`] refuses it outright.
@@ -101,6 +104,12 @@ pub use sandcrab_protocol as protocol;
 #[cfg(feature = "docker")]
 pub use sandcrab_backend_docker::{self as docker, DockerDevBackend, DockerDevConfig, ReapReport};
 
+/// The Firecracker backend crate (config types, artifacts, rootfs pipeline, orphan reaping).
+#[cfg(all(feature = "firecracker", target_os = "linux"))]
+pub use sandcrab_backend_firecracker::{
+    self as firecracker, FirecrackerBackend, FirecrackerConfig, RootfsSource,
+};
+
 use sandcrab_core::{SandboxManager, TemplateRegistry, WorkspaceRegistry};
 
 /// Which runtime backend a [`Sandcrab`] runs on. Always explicit.
@@ -113,6 +122,10 @@ pub enum BackendConfig {
     /// unless `allow_insecure_dev_backend` is set.
     #[cfg(feature = "docker")]
     Docker(DockerDevConfig),
+    /// Firecracker microVMs: hardware isolated (KVM). Construction fails without a usable
+    /// `/dev/kvm` or the pinned kernel / `firecracker` binary; there is no fallback.
+    #[cfg(all(feature = "firecracker", target_os = "linux"))]
+    Firecracker(Box<FirecrackerConfig>),
     /// Any [`RuntimeBackend`]. `allow_insecure` must be true for a backend that is not
     /// hardware isolated.
     Custom {
@@ -126,6 +139,8 @@ impl std::fmt::Debug for BackendConfig {
         match self {
             #[cfg(feature = "docker")]
             Self::Docker(c) => f.debug_tuple("Docker").field(c).finish(),
+            #[cfg(all(feature = "firecracker", target_os = "linux"))]
+            Self::Firecracker(c) => f.debug_tuple("Firecracker").field(c).finish(),
             Self::Custom {
                 backend,
                 allow_insecure,
@@ -157,6 +172,16 @@ impl SandcrabBuilder {
     #[cfg(feature = "docker")]
     pub fn docker(mut self, config: DockerDevConfig) -> Self {
         self.backend = Some(BackendConfig::Docker(config));
+        self
+    }
+
+    /// Use the Firecracker microVM backend (hardware isolated, no insecure opt-in needed).
+    /// [`Self::build`] fails if `/dev/kvm` is not usable read-write or the pinned artifacts
+    /// are missing / do not match their SHA-256 pins
+    /// ([`FirecrackerConfig::fetch_pinned_artifacts`] downloads them).
+    #[cfg(all(feature = "firecracker", target_os = "linux"))]
+    pub fn firecracker(mut self, config: FirecrackerConfig) -> Self {
+        self.backend = Some(BackendConfig::Firecracker(Box::new(config)));
         self
     }
 
@@ -221,8 +246,8 @@ impl SandcrabBuilder {
     pub fn build(self) -> Result<Sandcrab> {
         let backend_config = self.backend.ok_or_else(|| {
             SandboxError::InvalidConfig(
-                "no runtime backend configured: call .docker(..) or .backend(..) \
-                 explicitly (Sandcrab never picks or falls back to a backend)"
+                "no runtime backend configured: call .docker(..), .firecracker(..) or \
+                 .backend(..) explicitly (Sandcrab never picks or falls back to a backend)"
                     .into(),
             )
         })?;
@@ -232,8 +257,20 @@ impl SandcrabBuilder {
             None => sandcrab_core::default_state_root()?,
         };
 
+        // Statically known not to be hardware isolated: refuse before touching the daemon.
+        #[cfg(feature = "docker")]
+        if self.require_hardware_isolation && matches!(backend_config, BackendConfig::Docker(_)) {
+            return Err(SandboxError::InsecureBackendRejected(
+                "hardware isolation required but the docker backend (docker-dev) shares the \
+                 host kernel"
+                    .into(),
+            ));
+        }
+
         #[cfg(feature = "docker")]
         let mut docker = None;
+        #[cfg(all(feature = "firecracker", target_os = "linux"))]
+        let mut firecracker = None;
         let (backend, allow_insecure): (Arc<dyn RuntimeBackend>, bool) = match backend_config {
             #[cfg(feature = "docker")]
             BackendConfig::Docker(mut config) => {
@@ -244,6 +281,12 @@ impl SandcrabBuilder {
                 let b = DockerDevBackend::new(config)?;
                 docker = Some(b.clone());
                 (Arc::new(b), allow)
+            }
+            #[cfg(all(feature = "firecracker", target_os = "linux"))]
+            BackendConfig::Firecracker(config) => {
+                let b = FirecrackerBackend::new(*config)?;
+                firecracker = Some(b.clone());
+                (Arc::new(b), false)
             }
             BackendConfig::Custom {
                 backend,
@@ -277,6 +320,8 @@ impl SandcrabBuilder {
             require_hardware_isolation: self.require_hardware_isolation,
             #[cfg(feature = "docker")]
             docker,
+            #[cfg(all(feature = "firecracker", target_os = "linux"))]
+            firecracker,
         })
     }
 }
@@ -289,6 +334,8 @@ pub struct Sandcrab {
     require_hardware_isolation: bool,
     #[cfg(feature = "docker")]
     docker: Option<DockerDevBackend>,
+    #[cfg(all(feature = "firecracker", target_os = "linux"))]
+    firecracker: Option<FirecrackerBackend>,
 }
 
 impl std::fmt::Debug for Sandcrab {
@@ -361,6 +408,14 @@ impl Sandcrab {
     #[must_use]
     pub fn docker_backend(&self) -> Option<&DockerDevBackend> {
         self.docker.as_ref()
+    }
+
+    /// The Firecracker backend, when that is the selected backend (selected with
+    /// [`SandcrabBuilder::firecracker`]).
+    #[cfg(all(feature = "firecracker", target_os = "linux"))]
+    #[must_use]
+    pub fn firecracker_backend(&self) -> Option<&FirecrackerBackend> {
+        self.firecracker.as_ref()
     }
 
     /// Check the template's pinned image digest against the image present on the backend
@@ -494,6 +549,70 @@ mod tests {
             matches!(err, SandboxError::InsecureBackendRejected(_)),
             "{err}"
         );
+    }
+
+    /// `require_hardware_isolation` passes with a real `FirecrackerBackend` (constructed
+    /// without host checks, so no KVM is needed) and its capabilities are reported as-is.
+    #[cfg(all(feature = "firecracker", target_os = "linux"))]
+    #[tokio::test]
+    async fn firecracker_passes_hardware_isolation_gate() {
+        let env = Env::new();
+        let mut config =
+            FirecrackerConfig::with_home(&env.tmp.path().join("fc"), "/nonexistent/crabd");
+        config.mkfs = Some(firecracker::rootfs::MkfsStrategy::Fakeroot);
+        let backend = FirecrackerBackend::new_unchecked(config).unwrap();
+        let sc = env
+            .builder()
+            .backend(backend)
+            .require_hardware_isolation(true)
+            .build()
+            .unwrap();
+        assert_eq!(sc.backend_kind(), BackendKind::Firecracker);
+        let caps = sc.backend_capabilities();
+        assert!(caps.hardware_isolated && !caps.multi_tenant_safe);
+    }
+
+    /// `.firecracker(..)` is an explicit selection: without a usable `/dev/kvm` it is an
+    /// error naming the device, never a silent switch to another backend.
+    #[cfg(all(feature = "firecracker", target_os = "linux"))]
+    #[tokio::test]
+    async fn firecracker_without_kvm_is_an_error_not_a_fallback() {
+        if std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(firecracker::KVM_DEVICE)
+            .is_ok()
+        {
+            eprintln!("skipped: /dev/kvm is usable on this host");
+            return;
+        }
+        let env = Env::new();
+        let config = FirecrackerConfig::with_home(&env.tmp.path().join("fc"), "/x/crabd");
+        let err = env
+            .builder()
+            .firecracker(config)
+            .require_hardware_isolation(true)
+            .build()
+            .unwrap_err();
+        assert!(matches!(err, SandboxError::Backend { .. }), "{err}");
+        assert!(err.to_string().contains("/dev/kvm"), "{err}");
+    }
+
+    #[cfg(feature = "docker")]
+    #[tokio::test]
+    async fn docker_fails_hardware_isolation_gate() {
+        let env = Env::new();
+        let err = env
+            .builder()
+            .docker(DockerDevConfig::allow_insecure())
+            .require_hardware_isolation(true)
+            .build()
+            .unwrap_err();
+        assert!(
+            matches!(err, SandboxError::InsecureBackendRejected(_)),
+            "{err}"
+        );
+        assert!(err.to_string().contains("docker"), "{err}");
     }
 
     #[tokio::test]

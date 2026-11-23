@@ -193,9 +193,123 @@ fn backend_must_be_explicit_and_insecure_opted_in() {
         stderr(&out)
     );
 
-    let out = cli.run(&["--backend", "firecracker", "run", "--", "true"]);
+    let out = cli.run(&["--backend", "libkrun", "run", "--", "true"]);
     assert_eq!(out.status.code(), Some(2));
     assert!(stderr(&out).contains("not compiled"), "{}", stderr(&out));
+}
+
+fn kvm_usable() -> bool {
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/kvm")
+        .is_ok()
+}
+
+/// Sandcrab-managed DockerDev containers on this host (`None` without a Docker daemon).
+fn docker_sandboxes() -> Option<usize> {
+    let out = Command::new("docker")
+        .args(["ps", "-aq", "--filter", "label=sandcrab.managed=true"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    Some(String::from_utf8_lossy(&out.stdout).lines().count())
+}
+
+/// `--backend firecracker` is hardware isolated (no insecure opt-in) and, without KVM, fails
+/// with an actionable error: no fallback to docker, no container created.
+#[cfg(target_os = "linux")]
+#[test]
+fn firecracker_without_kvm_is_a_clear_error() {
+    if kvm_usable() {
+        eprintln!("skipped: /dev/kvm is usable on this host");
+        return;
+    }
+    let cli = Cli::new(false);
+    let before = docker_sandboxes();
+    // Even with the docker opt-in present, an explicit firecracker selection never
+    // degrades to docker.
+    let out = cli
+        .cmd(&["--backend", "firecracker", "run", "--", "echo", "hi"])
+        .env("SANDCRAB_ALLOW_INSECURE", "1")
+        .output()
+        .unwrap();
+    let err = stderr(&out);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(out.stdout.is_empty());
+    assert!(err.contains("firecracker backend unavailable"), "{err}");
+    assert!(err.contains("/dev/kvm"), "{err}");
+    assert!(err.contains("usermod -aG kvm"), "{err}");
+    assert!(err.contains("never falls back"), "{err}");
+    assert!(!err.contains("shares the host kernel"), "{err}");
+    assert!(!err.contains("--allow-insecure"), "{err}");
+    assert_eq!(docker_sandboxes(), before, "a docker container was created");
+
+    // Same through SANDCRAB_BACKEND and the `fc` alias.
+    let out = cli
+        .cmd(&["tool", "glob"])
+        .env("SANDCRAB_BACKEND", "fc")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("/dev/kvm"), "{}", stderr(&out));
+}
+
+/// `doctor` reports the Firecracker prerequisites; on a host without KVM the summary says
+/// so, and selecting firecracker turns it into a failing check.
+#[cfg(target_os = "linux")]
+#[test]
+fn firecracker_doctor_section() {
+    let cli = Cli::new(false);
+    let checks = |extra: &[&str]| {
+        let mut args = vec!["--json"];
+        args.extend_from_slice(extra);
+        args.push("doctor");
+        let out = cli.run(&args);
+        let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+        (out.status.code(), v)
+    };
+    let find = |v: &Value, name: &str| {
+        v["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == name)
+            .cloned()
+            .unwrap_or_else(|| panic!("no `{name}` check in {v}"))
+    };
+    let (_, v) = checks(&[]);
+    for name in ["fc:kvm", "fc:kvm_group", "fc:mkfs", "fc:crabd", "fc:taps"] {
+        find(&v, name);
+    }
+    let summary = find(&v, "firecracker");
+    let detail = summary["detail"].as_str().unwrap();
+    assert!(detail.contains("e2e pending"), "{detail}");
+    if !kvm_usable() {
+        assert!(
+            detail.starts_with("Firecracker: unavailable (") && detail.contains("/dev/kvm"),
+            "{detail}"
+        );
+        assert_eq!(summary["status"], "info");
+        let (code, v) = checks(&["--backend", "firecracker"]);
+        assert_eq!(code, Some(1));
+        assert_eq!(find(&v, "firecracker")["status"], "fail");
+        assert_eq!(find(&v, "fc:kvm")["status"], "fail");
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn rootfs_commands_parse() {
+    let cli = Cli::new(false);
+    let out = cli.run(&["rootfs", "build"]);
+    assert_eq!(out.status.code(), Some(2), "names or --all required");
+    // Missing crabd is reported before any Docker work.
+    let out = cli.run(&["--crabd", "/nonexistent/crabd", "rootfs", "build", "base"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("crabd"), "{}", stderr(&out));
+    let v = cli.json(&["rootfs", "list"]);
+    assert_eq!(v, Value::Array(vec![]));
 }
 
 #[test]

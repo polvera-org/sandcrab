@@ -1,7 +1,6 @@
 //! `sandcrab doctor [--fix]`.
 
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
 use std::process::Command;
 
 use serde::Serialize;
@@ -11,7 +10,7 @@ use crate::util::{self, print_json};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
-enum Status {
+pub enum Status {
     Ok,
     Info,
     Warn,
@@ -26,10 +25,10 @@ struct Check {
 }
 
 #[derive(Default)]
-struct Report(Vec<Check>);
+pub struct Report(Vec<Check>);
 
 impl Report {
-    fn add(&mut self, name: impl Into<String>, status: Status, detail: impl Into<String>) {
+    pub fn add(&mut self, name: impl Into<String>, status: Status, detail: impl Into<String>) {
         self.0.push(Check {
             name: name.into(),
             status,
@@ -53,8 +52,10 @@ fn rust(r: &mut Report) {
     }
 }
 
+/// Builds without the firecracker backend only report whether KVM exists.
+#[cfg(not(all(feature = "firecracker", target_os = "linux")))]
 fn kvm(r: &mut Report) {
-    if Path::new("/dev/kvm").exists() {
+    if std::path::Path::new("/dev/kvm").exists() {
         r.add(
             "firecracker",
             Status::Info,
@@ -275,7 +276,10 @@ pub async fn doctor(g: &Global, fix: bool) -> anyhow::Result<u8> {
     rust(&mut r);
     #[cfg(feature = "docker")]
     docker(g, &mut r, fix).await;
+    #[cfg(not(all(feature = "firecracker", target_os = "linux")))]
     kvm(&mut r);
+    #[cfg(all(feature = "firecracker", target_os = "linux"))]
+    crate::firecracker::doctor(g, &mut r, fix);
     state_dir(g, &mut r, fix);
 
     let ok = r.0.iter().all(|c| c.status != Status::Fail);

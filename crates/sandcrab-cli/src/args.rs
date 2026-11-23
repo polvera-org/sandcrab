@@ -11,14 +11,21 @@ pub enum BackendArg {
     /// DockerDev: shared kernel, local dev / CI only.
     #[cfg(feature = "docker")]
     Docker,
+    /// Firecracker microVMs: hardware isolated, needs /dev/kvm.
+    #[cfg(all(feature = "firecracker", target_os = "linux"))]
+    Firecracker,
 }
+
+/// Is the firecracker backend compiled into this binary?
+pub const FIRECRACKER_COMPILED: bool = cfg!(all(feature = "firecracker", target_os = "linux"));
 
 /// Backends compiled into this binary (for messages).
 pub fn compiled_backends() -> &'static str {
-    if cfg!(feature = "docker") {
-        "docker"
-    } else {
-        "none"
+    match (cfg!(feature = "docker"), FIRECRACKER_COMPILED) {
+        (true, true) => "docker, firecracker",
+        (true, false) => "docker",
+        (false, true) => "firecracker",
+        (false, false) => "none",
     }
 }
 
@@ -31,7 +38,15 @@ pub fn parse_backend(s: &str) -> Result<BackendArg, String> {
             "backend `{s}` is not compiled into this build (available: {})",
             compiled_backends()
         )),
-        "firecracker" | "cloud-hypervisor" | "libkrun" => Err(format!(
+        #[cfg(all(feature = "firecracker", target_os = "linux"))]
+        "firecracker" | "fc" => Ok(BackendArg::Firecracker),
+        #[cfg(not(all(feature = "firecracker", target_os = "linux")))]
+        "firecracker" | "fc" => Err(format!(
+            "backend `{s}` is not compiled into this build (Linux only, cargo feature \
+             `firecracker`; available: {})",
+            compiled_backends()
+        )),
+        "cloud-hypervisor" | "libkrun" => Err(format!(
             "backend `{s}` is not compiled into / available in this build (available: {})",
             compiled_backends()
         )),
@@ -64,6 +79,7 @@ pub fn parse_network(s: &str) -> Result<NetworkPolicy, String> {
 }
 
 /// `1`, `true`, `yes`, `on` (case-insensitive).
+#[cfg(any(feature = "docker", test))]
 pub fn truthy(v: &str) -> bool {
     matches!(
         v.trim().to_ascii_lowercase().as_str(),
@@ -197,7 +213,21 @@ mod tests {
     fn backends() {
         #[cfg(feature = "docker")]
         assert_eq!(parse_backend("docker").unwrap(), BackendArg::Docker);
-        let e = parse_backend("firecracker").unwrap_err();
+        if FIRECRACKER_COMPILED {
+            #[cfg(all(feature = "firecracker", target_os = "linux"))]
+            {
+                assert_eq!(
+                    parse_backend("firecracker").unwrap(),
+                    BackendArg::Firecracker
+                );
+                assert_eq!(parse_backend("fc").unwrap(), BackendArg::Firecracker);
+            }
+            assert!(compiled_backends().contains("firecracker"));
+        } else {
+            let e = parse_backend("firecracker").unwrap_err();
+            assert!(e.contains("not compiled"), "{e}");
+        }
+        let e = parse_backend("libkrun").unwrap_err();
         assert!(e.contains("not compiled"), "{e}");
         assert!(parse_backend("qemu").unwrap_err().contains("unknown"));
     }
