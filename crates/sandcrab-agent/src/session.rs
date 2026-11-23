@@ -22,7 +22,16 @@ use crate::tools::anthropic_tools;
 use crate::transcript::{self, Transcript};
 use crate::ui::Ui;
 
-pub const INSECURE_ENV: &str = "SANDCRAB_ALLOW_INSECURE";
+/// Deprecated, no-op docker opt-in (warned about, otherwise ignored) kept for one release.
+pub const DEPRECATED_INSECURE_ENV: &str = "SANDCRAB_ALLOW_INSECURE";
+pub const DEPRECATED_INSECURE_WARNING: &str = "warning: --allow-insecure / \
+    SANDCRAB_ALLOW_INSECURE is deprecated and has no effect: the docker backend is officially \
+    supported and needs no opt-in";
+
+/// Was the deprecated opt-in used? Only decides whether to warn.
+pub fn deprecated_opt_in_used(flag: bool, env: Option<&str>) -> bool {
+    flag || env.is_some_and(truthy)
+}
 pub const SSH_HOST_ENV: &str = "CRABAGENT_SSH_HOST";
 pub const DEFAULT_GUEST_WORKSPACE: &str = "/workspace";
 
@@ -324,21 +333,16 @@ pub async fn run_session(
             .map(|t| t.manifest.network.default_policy.to_string())
             .unwrap_or_else(|_| "template default".into()),
     };
-    if !sc.backend_capabilities().hardware_isolated {
-        #[cfg(feature = "docker")]
-        let disk = sc
-            .docker_backend()
-            .is_some_and(|d| !d.enforces_disk_limit());
-        #[cfg(not(feature = "docker"))]
-        let disk = false;
+    #[cfg(feature = "docker")]
+    let disk_unenforced = sc
+        .docker_backend()
+        .is_some_and(|d| !d.enforces_disk_limit());
+    #[cfg(not(feature = "docker"))]
+    let disk_unenforced = false;
+    if disk_unenforced {
         ui.info(&format!(
-            "warning: backend `{}` shares the host kernel — not a security boundary; local dev / CI only{}",
-            sc.backend_kind(),
-            if disk {
-                "; template disk_mb is not enforced"
-            } else {
-                ""
-            }
+            "warning: backend `{}`: template disk_mb is not enforced",
+            sc.backend_kind()
         ));
     }
     ui.info(&format!("spawning `{}` sandbox…", opts.template));
@@ -659,6 +663,10 @@ async fn repl(
 
 /// Build a [`Sandcrab`] on the explicitly selected backend.
 pub fn build_sandcrab(cli: &Cli) -> anyhow::Result<Sandcrab> {
+    let env = std::env::var(DEPRECATED_INSECURE_ENV).ok();
+    if deprecated_opt_in_used(cli.allow_insecure, env.as_deref()) {
+        eprintln!("{DEPRECATED_INSECURE_WARNING}");
+    }
     let Some(backend) = cli.backend else {
         bail!(
             "no backend selected: pass --backend docker (or set SANDCRAB_BACKEND); crabagent never picks one"
@@ -683,19 +691,12 @@ pub fn build_sandcrab(cli: &Cli) -> anyhow::Result<Sandcrab> {
     match backend {
         #[cfg(feature = "docker")]
         BackendArg::Docker => {
-            let allow = cli.allow_insecure || std::env::var(INSECURE_ENV).is_ok_and(|v| truthy(&v));
-            if !allow {
-                bail!(
-                    "the docker backend shares the host kernel and is for local dev / CI only; \
-                     pass --allow-insecure or set {INSECURE_ENV}=1"
-                );
-            }
-            builder = builder.docker(sandcrab_sdk::DockerDevConfig {
+            builder = builder.docker(sandcrab_sdk::DockerConfig {
                 crabd_path: cli
                     .crabd
                     .clone()
                     .unwrap_or_else(sandcrab_sdk::docker::default_crabd_path),
-                ..sandcrab_sdk::DockerDevConfig::allow_insecure()
+                ..sandcrab_sdk::DockerConfig::default()
             });
         }
     }
@@ -777,6 +778,15 @@ pub async fn main(cli: Cli) -> anyhow::Result<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deprecated_opt_in_only_triggers_a_warning() {
+        assert!(!deprecated_opt_in_used(false, None));
+        assert!(!deprecated_opt_in_used(false, Some("0")));
+        assert!(deprecated_opt_in_used(false, Some("1")));
+        assert!(deprecated_opt_in_used(true, None));
+        assert!(DEPRECATED_INSECURE_WARNING.contains("no effect"));
+    }
 
     #[test]
     fn caches_only_in_managed_workspaces() {

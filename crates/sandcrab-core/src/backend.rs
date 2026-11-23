@@ -22,8 +22,10 @@ pub enum BackendKind {
     Firecracker,
     CloudHypervisor,
     Libkrun,
-    /// Shared-kernel container backend strictly for local dev & CI.
-    DockerDev,
+    /// Shared-kernel container backend (hardened OCI containers). Serialized as `docker`;
+    /// the pre-rename name `docker-dev` is still accepted on read.
+    #[serde(alias = "docker-dev")]
+    Docker,
 }
 
 impl fmt::Display for BackendKind {
@@ -32,7 +34,7 @@ impl fmt::Display for BackendKind {
             Self::Firecracker => "firecracker",
             Self::CloudHypervisor => "cloud-hypervisor",
             Self::Libkrun => "libkrun",
-            Self::DockerDev => "docker-dev",
+            Self::Docker => "docker",
         })
     }
 }
@@ -129,4 +131,24 @@ pub trait SandboxHandle: Send + Sync {
     /// syncing rw workspaces back first where the backend copies them. The manager marks
     /// `TeardownFinished` after this returns.
     async fn destroy(self: Box<Self>) -> Result<()>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BackendKind;
+
+    #[test]
+    fn docker_kind_serializes_as_docker_and_accepts_legacy_name() {
+        assert_eq!(BackendKind::Docker.to_string(), "docker");
+        assert_eq!(
+            serde_json::to_string(&BackendKind::Docker).unwrap(),
+            "\"docker\""
+        );
+        for name in ["\"docker\"", "\"docker-dev\""] {
+            assert_eq!(
+                serde_json::from_str::<BackendKind>(name).unwrap(),
+                BackendKind::Docker
+            );
+        }
+    }
 }

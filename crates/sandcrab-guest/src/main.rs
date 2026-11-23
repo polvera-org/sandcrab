@@ -60,7 +60,7 @@ struct ServeArgs {
 #[derive(Debug, Args)]
 #[group(required = true, multiple = false)]
 struct ListenArgs {
-    /// Listen on a Unix domain socket (DockerDev, local testing). A stale socket is replaced.
+    /// Listen on a Unix domain socket (Docker, local testing). A stale socket is replaced.
     #[arg(long, value_name = "PATH")]
     unix: Option<PathBuf>,
 

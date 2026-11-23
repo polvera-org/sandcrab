@@ -5,7 +5,7 @@
 //! - drop Docker runtime placeholders (`.dockerenv`, everything under `dev/`),
 //! - replace `etc/{resolv.conf,hosts,hostname}` (empty bind-mount placeholders in an export) with stubs,
 //! - inject `crabd` as `/sbin/crabd` (written to the real directory if `sbin` is a merged-usr symlink),
-//!   plus a `/opt/sandcrab/crabd` symlink so the binary sits at the same path as under DockerDev,
+//!   plus a `/opt/sandcrab/crabd` symlink so the binary sits at the same path as under Docker,
 //! - create any missing mountpoints ([`MOUNTPOINTS`]).
 
 use std::collections::{BTreeSet, HashMap};
@@ -33,7 +33,7 @@ pub const MOUNTPOINTS: &[(&str, u32)] = &[
 
 /// Where crabd lives in the guest (kernel `init=` points here).
 pub const CRABD_GUEST_PATH: &str = "/sbin/crabd";
-/// Compat symlink matching the DockerDev bind-mount location.
+/// Compat symlink matching the Docker bind-mount location.
 pub const CRABD_COMPAT_LINK: &str = "opt/sandcrab/crabd";
 
 const STUBS: &[(&str, &[u8])] = &[

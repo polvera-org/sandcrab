@@ -11,8 +11,14 @@ use tokio::sync::watch;
 use crate::Global;
 use crate::args::{self, BackendArg};
 
-#[cfg(feature = "docker")]
-pub const INSECURE_ENV: &str = "SANDCRAB_ALLOW_INSECURE";
+/// Deprecated, no-op: the docker backend used to need this opt-in. Still recognized (with a
+/// warning) for one release so existing scripts keep working.
+pub const DEPRECATED_INSECURE_ENV: &str = "SANDCRAB_ALLOW_INSECURE";
+
+/// Printed when `--allow-insecure` or `SANDCRAB_ALLOW_INSECURE` is used.
+pub const DEPRECATED_INSECURE_WARNING: &str = "warning: --allow-insecure / \
+    SANDCRAB_ALLOW_INSECURE is deprecated and has no effect: the docker backend is officially \
+    supported and needs no opt-in";
 
 pub fn state_root(g: &Global) -> anyhow::Result<PathBuf> {
     match &g.state_dir {
@@ -29,9 +35,12 @@ pub fn templates_dirs(g: &Global) -> anyhow::Result<Vec<PathBuf>> {
     }
 }
 
-#[cfg(feature = "docker")]
-pub fn allow_insecure(g: &Global) -> bool {
-    g.allow_insecure || std::env::var(INSECURE_ENV).is_ok_and(|v| args::truthy(&v))
+/// Warn (once, on stderr) if the deprecated docker opt-in was passed. It changes nothing.
+pub fn warn_deprecated_opt_in(g: &Global) {
+    let env = std::env::var(DEPRECATED_INSECURE_ENV).ok();
+    if args::deprecated_opt_in_used(g.allow_insecure, env.as_deref()) {
+        eprintln!("{DEPRECATED_INSECURE_WARNING}");
+    }
 }
 
 pub fn workspaces(g: &Global) -> anyhow::Result<WorkspaceClient> {
@@ -75,21 +84,15 @@ pub fn sandcrab(g: &Global) -> anyhow::Result<Sandcrab> {
     match backend {
         #[cfg(feature = "docker")]
         BackendArg::Docker => {
-            if !allow_insecure(g) {
-                bail!(
-                    "the docker backend shares the host kernel and is for local dev / CI only; \
-                     pass --allow-insecure or set {INSECURE_ENV}=1 to use it"
-                );
-            }
-            builder = builder.docker(sandcrab_sdk::DockerDevConfig {
+            builder = builder.docker(sandcrab_sdk::DockerConfig {
                 crabd_path: crabd_path(g),
                 allow_unpinned_images: g.allow_unpinned,
-                ..sandcrab_sdk::DockerDevConfig::allow_insecure()
+                ..sandcrab_sdk::DockerConfig::default()
             });
         }
         #[cfg(all(feature = "firecracker", target_os = "linux"))]
         BackendArg::Firecracker => {
-            // Hardware isolated: no insecure opt-in. Preflight first so a missing /dev/kvm
+            // Hardware isolated. Preflight first so a missing /dev/kvm
             // or artifact is a precise, actionable error (never a fallback).
             let config = crate::firecracker::config(g)?;
             crate::firecracker::preflight(&config)?;
@@ -99,18 +102,12 @@ pub fn sandcrab(g: &Global) -> anyhow::Result<Sandcrab> {
     builder.build().context("cannot initialise the backend")
 }
 
-/// The one-line warning printed on every insecure (shared-kernel) spawn; it also says when
-/// the backend does not enforce the template's `disk_mb`.
-pub fn warn_if_insecure(sc: &Sandcrab) {
-    if !sc.backend_capabilities().hardware_isolated {
+/// One line per spawn when the backend cannot enforce the template's `disk_mb`.
+pub fn warn_unenforced_limits(sc: &Sandcrab) {
+    if !enforces_disk_limit(sc) {
         eprintln!(
-            "warning: backend `{}` shares the host kernel — not a security boundary; local dev / CI only{}",
-            sc.backend_kind(),
-            if enforces_disk_limit(sc) {
-                ""
-            } else {
-                "; template disk_mb is not enforced"
-            }
+            "warning: backend `{}`: template disk_mb is not enforced",
+            sc.backend_kind()
         );
     }
 }

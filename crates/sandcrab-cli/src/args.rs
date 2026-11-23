@@ -8,7 +8,7 @@ use sandcrab_sdk::{NetworkPolicy, SandboxConfig, WorkspaceMount};
 /// Runtime backends this CLI knows about. Only compiled ones parse successfully.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendArg {
-    /// DockerDev: shared kernel, local dev / CI only.
+    /// Docker: hardened containers on the shared host kernel (not hardware isolated).
     #[cfg(feature = "docker")]
     Docker,
     /// Firecracker microVMs: hardware isolated, needs /dev/kvm.
@@ -55,6 +55,12 @@ pub fn parse_backend(s: &str) -> Result<BackendArg, String> {
             compiled_backends()
         )),
     }
+}
+
+/// Was the deprecated, no-op docker opt-in (`--allow-insecure` / a truthy
+/// `SANDCRAB_ALLOW_INSECURE`) used? Only decides whether to print a deprecation warning.
+pub fn deprecated_opt_in_used(flag: bool, env: Option<&str>) -> bool {
+    flag || env.is_some_and(truthy)
 }
 
 /// `<workspace>:<guest_path>[:rw|ro]`.
@@ -230,6 +236,14 @@ mod tests {
         let e = parse_backend("libkrun").unwrap_err();
         assert!(e.contains("not compiled"), "{e}");
         assert!(parse_backend("qemu").unwrap_err().contains("unknown"));
+    }
+
+    #[test]
+    fn deprecated_opt_in_detection() {
+        assert!(!deprecated_opt_in_used(false, None));
+        assert!(!deprecated_opt_in_used(false, Some("0")));
+        assert!(deprecated_opt_in_used(false, Some("1")));
+        assert!(deprecated_opt_in_used(true, None));
     }
 
     #[test]

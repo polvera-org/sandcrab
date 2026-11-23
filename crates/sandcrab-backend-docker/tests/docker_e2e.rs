@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use bollard::Docker;
 use bollard::query_parameters::ListContainersOptionsBuilder;
 use sandcrab_backend_docker::spec::container_name;
-use sandcrab_backend_docker::{CRABD_ENV, DockerDevBackend, DockerDevConfig, ReapScope};
+use sandcrab_backend_docker::{CRABD_ENV, DockerBackend, DockerConfig, ReapScope};
 use sandcrab_core::{
     LifecycleTimings, ManagerConfig, MountMode, NetworkConfig, ResolvedSpec, RuntimeBackend,
     Sandbox, SandboxConfig, SandboxError, SandboxId, SandboxManager, TemplateRegistry,
@@ -72,7 +72,7 @@ fn crabd() -> &'static Path {
 
 struct Env {
     tmp: tempfile::TempDir,
-    backend: Arc<DockerDevBackend>,
+    backend: Arc<DockerBackend>,
     manager: SandboxManager,
     project: PathBuf,
     docs: PathBuf,
@@ -87,10 +87,10 @@ impl Env {
 fn env() -> Env {
     let tmp = tempfile::tempdir().unwrap();
     let backend = Arc::new(
-        DockerDevBackend::new(DockerDevConfig {
+        DockerBackend::new(DockerConfig {
             crabd_path: crabd().to_path_buf(),
             state_dir: tmp.path().join("run"),
-            ..DockerDevConfig::allow_insecure()
+            ..DockerConfig::default()
         })
         .unwrap(),
     );
@@ -108,10 +108,7 @@ fn env() -> Env {
         backend.clone(),
         workspaces,
         templates,
-        ManagerConfig {
-            allow_insecure_backend: true,
-            ..ManagerConfig::default()
-        },
+        ManagerConfig::default(),
     )
     .unwrap();
     Env {
@@ -341,14 +338,14 @@ async fn policy_rejections_leave_nothing_behind() {
     let _serial = SERIAL.lock().await;
     let env = env();
 
-    let err = DockerDevBackend::new(DockerDevConfig {
-        crabd_path: crabd().to_path_buf(),
-        allow_insecure_dev_backend: false,
-        ..DockerDevConfig::default()
-    })
-    .unwrap_err();
+    // Hardware isolation required -> refused before anything is created.
+    let err = env
+        .manager
+        .spawn(SandboxConfig::from_template("base").require_hardware_isolation(true))
+        .await
+        .unwrap_err();
     assert!(
-        matches!(err, SandboxError::InsecureBackendRejected(_)),
+        matches!(err, SandboxError::HardwareIsolationRequired(_)),
         "{err}"
     );
 
@@ -564,7 +561,7 @@ async fn timing_smoke_base_w0() {
     }
     let last = last.unwrap();
     println!(
-        "docker-dev base W0 n={runs}: spawn_ready p50={:?} (min {:?} max {:?}) | first_call p50={:?} | teardown p50={:?} (min {:?} max {:?})",
+        "docker base W0 n={runs}: spawn_ready p50={:?} (min {:?} max {:?}) | first_call p50={:?} | teardown p50={:?} (min {:?} max {:?})",
         p50(spawn_ready.clone()),
         spawn_ready.iter().min().unwrap(),
         spawn_ready.iter().max().unwrap(),

@@ -34,7 +34,7 @@ pub struct FirecrackerConfig {
     /// Artifact / rootfs / blank-scratch / read-only-workspace image cache.
     pub cache_root: PathBuf,
     /// Per-sandbox run dirs `<run_dir>/<sandbox id>/` (0700) and tap locks `<run_dir>/net/`.
-    /// Kept apart from DockerDev's `run/` so neither backend's orphan reaper sees the other's
+    /// Kept apart from Docker's `run/` so neither backend's orphan reaper sees the other's
     /// directories. Socket paths must stay ≤ 108 bytes, so keep this short.
     pub run_dir: PathBuf,
     /// Images of rw workspaces whose sync-back failed are moved here
@@ -85,7 +85,7 @@ pub struct FirecrackerConfig {
     /// `firecracker --level`.
     pub log_level: String,
     /// Guest user when neither the sandbox config nor the template sets one; `None` = the
-    /// host uid:gid (same default as DockerDev).
+    /// host uid:gid (same default as Docker).
     pub default_user: Option<UserSpec>,
 }
 

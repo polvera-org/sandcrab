@@ -267,11 +267,11 @@ impl FakeBackend {
         }
     }
 
-    /// Shared-kernel (DockerDev-like) fake enforcing `disabled` and `unrestricted`.
+    /// Shared-kernel (Docker-like) fake enforcing `disabled` and `unrestricted`.
     #[must_use]
-    pub fn insecure() -> Self {
+    pub fn shared_kernel() -> Self {
         Self {
-            kind: BackendKind::DockerDev,
+            kind: BackendKind::Docker,
             caps: BackendCapabilities {
                 hardware_isolated: false,
                 multi_tenant_safe: false,

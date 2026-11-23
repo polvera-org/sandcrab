@@ -2,7 +2,8 @@
 //! no longer tracked — e.g. after a crash or a cancelled spawn. Used by `doctor --fix`.
 //!
 //! Only containers carrying **both** `sandcrab.managed=true` and
-//! `sandcrab.backend=docker-dev` are considered; unlabeled containers are never touched.
+//! `sandcrab.backend=docker` (or the pre-rename `docker-dev`) are considered; unlabeled
+//! containers are never touched.
 //!
 //! Every container also records its [`Owner`] (host uid, pid, boot id, state dir). The
 //! default [`ReapScope::Owned`] only removes containers spawned by **this uid** for **this
@@ -19,18 +20,18 @@ use sandcrab_core::{Result, SandboxId};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::DockerDevBackend;
+use crate::DockerBackend;
 use crate::backend::{backend_err, teardown};
 use crate::spec::{
     BACKEND_LABEL_VALUE, LABEL_BACKEND, LABEL_MANAGED, LABEL_OWNER_BOOT_ID, LABEL_OWNER_PID,
-    LABEL_OWNER_UID, LABEL_SANDBOX_ID, LABEL_STATE_DIR,
+    LABEL_OWNER_UID, LABEL_SANDBOX_ID, LABEL_STATE_DIR, LEGACY_BACKEND_LABEL_VALUE,
 };
 
 /// Socket dirs younger than this are left alone by [`ReapScope::Owned`]: another process
 /// sharing the state dir may be between "create socket dir" and "create container".
 const SOCKET_DIR_MIN_AGE: Duration = Duration::from_secs(60);
 
-/// Which untracked containers [`DockerDevBackend::reap_orphans`] may remove.
+/// Which untracked containers [`DockerBackend::reap_orphans`] may remove.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ReapScope {
     /// Only containers whose owner labels say: same uid, same state dir, and the owning
@@ -38,7 +39,7 @@ pub enum ReapScope {
     /// (spawned before they existed) are kept.
     #[default]
     Owned,
-    /// Every managed docker-dev container on the daemon — including live sandboxes of
+    /// Every managed docker container on the daemon — including live sandboxes of
     /// other processes and users. Destructive; ask first.
     All,
 }
@@ -140,7 +141,7 @@ pub(crate) fn is_orphan(
     pid == me.pid || !pid_alive(pid)
 }
 
-/// A container removed by [`DockerDevBackend::reap_orphans`].
+/// A container removed by [`DockerBackend::reap_orphans`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReapedContainer {
     pub container_id: String,
@@ -149,7 +150,7 @@ pub struct ReapedContainer {
     pub sandbox_id: Option<SandboxId>,
 }
 
-/// Outcome of [`DockerDevBackend::reap_orphans`].
+/// Outcome of [`DockerBackend::reap_orphans`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReapReport {
     pub containers: Vec<ReapedContainer>,
@@ -162,17 +163,20 @@ pub struct ReapReport {
 
 fn is_managed(labels: &HashMap<String, String>) -> bool {
     labels.get(LABEL_MANAGED).map(String::as_str) == Some("true")
-        && labels.get(LABEL_BACKEND).map(String::as_str) == Some(BACKEND_LABEL_VALUE)
+        && matches!(
+            labels.get(LABEL_BACKEND).map(String::as_str),
+            Some(BACKEND_LABEL_VALUE | LEGACY_BACKEND_LABEL_VALUE)
+        )
 }
 
-impl DockerDevBackend {
+impl DockerBackend {
     /// The owner recorded on containers this backend spawns.
     #[must_use]
     pub fn owner(&self) -> Owner {
         Owner::current(&self.config.state_dir)
     }
 
-    /// Remove every managed docker-dev container that is not in `tracked` and that `scope`
+    /// Remove every managed docker container that is not in `tracked` and that `scope`
     /// allows (see [`ReapScope`]), then every `state_dir/<uuid>` socket directory that is
     /// neither tracked nor backed by a remaining container (with [`ReapScope::Owned`], only
     /// directories older than a minute).
@@ -185,8 +189,10 @@ impl DockerDevBackend {
         let filters = HashMap::from([(
             "label",
             vec![
+                // Docker ANDs label filters, so match on the key and check the value
+                // (current or legacy) in `is_managed`.
                 format!("{LABEL_MANAGED}=true"),
-                format!("{LABEL_BACKEND}={BACKEND_LABEL_VALUE}"),
+                LABEL_BACKEND.to_owned(),
             ],
         )]);
         let containers = self
@@ -298,6 +304,13 @@ mod tests {
         assert!(!is_managed(&l));
         l.insert(LABEL_BACKEND.to_owned(), BACKEND_LABEL_VALUE.to_owned());
         assert!(is_managed(&l));
+        // Containers labelled before the DockerDev -> Docker rename are still managed.
+        l.insert(
+            LABEL_BACKEND.to_owned(),
+            LEGACY_BACKEND_LABEL_VALUE.to_owned(),
+        );
+        assert!(is_managed(&l));
+        l.insert(LABEL_BACKEND.to_owned(), BACKEND_LABEL_VALUE.to_owned());
         l.insert(LABEL_MANAGED.to_owned(), "false".to_owned());
         assert!(!is_managed(&l));
     }

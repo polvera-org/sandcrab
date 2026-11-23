@@ -28,7 +28,7 @@
 //!
 //! # Transports
 //!
-//! - Unix socket (DockerDev, local tests): a stale socket at the path is removed on start
+//! - Unix socket (Docker, local tests): a stale socket at the path is removed on start
 //!   (a *live* one, or a non-socket file, is an error). The socket is chmod `0660`: the
 //!   Docker backend runs `crabd` as the host user's uid and the host connects as that same
 //!   uid through a bind-mounted directory, so owner (+ group) access is all that is needed.

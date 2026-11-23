@@ -18,7 +18,7 @@ const POLL_MAX: Duration = Duration::from_millis(250);
 
 /// Spawn with Ctrl-C deferred until the sandbox is up (so it can be torn down cleanly).
 async fn spawn(g: &Global, sc: &Sandcrab, config: SandboxConfig) -> anyhow::Result<Sandbox> {
-    util::warn_if_insecure(sc);
+    util::warn_unenforced_limits(sc);
     let template = config.template.clone();
     let sb = sc
         .spawn(config)

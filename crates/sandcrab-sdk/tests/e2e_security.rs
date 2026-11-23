@@ -23,30 +23,20 @@ async fn backend_selection_is_explicit_and_never_downgraded() {
         assert!(matches!(err, SandboxError::InvalidConfig(_)), "{err}");
 
         if h.is_docker() {
-            assert_eq!(h.sc.backend_kind(), BackendKind::DockerDev);
+            assert_eq!(h.sc.backend_kind(), BackendKind::Docker);
             assert!(
                 !caps.hardware_isolated && !caps.multi_tenant_safe,
                 "{caps:?}"
             );
-            // DockerDev without the explicit insecure opt-in → error.
+            // Hardware isolation required → Docker refused (never a silent downgrade).
             let err = h
                 .builder()
-                .docker(docker_config(false))
-                .build()
-                .unwrap_err();
-            assert!(
-                matches!(err, SandboxError::InsecureBackendRejected(_)),
-                "{err}"
-            );
-            // Hardware isolation required → DockerDev refused, even with the opt-in.
-            let err = h
-                .builder()
-                .docker(docker_config(true))
+                .docker(docker_config())
                 .require_hardware_isolation(true)
                 .build()
                 .unwrap_err();
             assert!(
-                matches!(err, SandboxError::InsecureBackendRejected(_)),
+                matches!(err, SandboxError::HardwareIsolationRequired(_)),
                 "{err}"
             );
         }
@@ -60,7 +50,7 @@ async fn backend_selection_is_explicit_and_never_downgraded() {
         } else {
             let err = res.unwrap_err();
             assert!(
-                matches!(err, SandboxError::InsecureBackendRejected(_)),
+                matches!(err, SandboxError::HardwareIsolationRequired(_)),
                 "{err}"
             );
         }
@@ -147,7 +137,7 @@ async fn sandbox_hardening_network_user_capabilities() {
         let su = sb.bash("touch /etc/sandcrab-e2e").await.unwrap();
         assert_ne!(su.exit_code, Some(0), "rootfs writable as root? {su:?}");
 
-        // DockerDev runs as the host user, so workspace files stay host-owned.
+        // Docker runs as the host user, so workspace files stay host-owned.
         if h.is_docker() {
             let uid: u32 = sh(&sb, "id -u").await.trim().parse().unwrap();
             assert_eq!(uid, host_uid());

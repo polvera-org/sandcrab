@@ -3,7 +3,7 @@
 //! Every scenario talks to Sandcrab only through the public SDK, so the same suite runs on
 //! any backend. The backend is picked by `SANDCRAB_E2E_BACKEND`:
 //!
-//! - `docker` (default): DockerDev with the explicit insecure opt-in. Needs a Docker daemon,
+//! - `docker` (default): the Docker backend. Needs a Docker daemon,
 //!   the template images (`templates/build.sh --pin`) and a static `crabd` (`$SANDCRAB_CRABD`,
 //!   else `target/<arch>-unknown-linux-musl/release/crabd`, built on first use).
 //! - `firecracker`: not wired into the SDK yet → every test prints a SKIP line and passes.
@@ -29,7 +29,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use sandcrab_sdk::{
-    BashParams, BashResult, DockerDevConfig, Sandbox, SandboxId, Sandcrab, SandcrabBuilder,
+    BashParams, BashResult, DockerConfig, Sandbox, SandboxId, Sandcrab, SandcrabBuilder,
     WorkspaceClient,
 };
 use tokio::sync::RwLock;
@@ -95,12 +95,11 @@ pub fn crabd() -> &'static Path {
     })
 }
 
-/// DockerDev config with the explicit opt-in and the test crabd.
-pub fn docker_config(allow_insecure: bool) -> DockerDevConfig {
-    DockerDevConfig {
-        allow_insecure_dev_backend: allow_insecure,
+/// Docker config with the test crabd.
+pub fn docker_config() -> DockerConfig {
+    DockerConfig {
         crabd_path: crabd().to_path_buf(),
-        ..DockerDevConfig::default()
+        ..DockerConfig::default()
     }
 }
 
@@ -122,7 +121,7 @@ impl Harness {
             .unwrap();
         let builder = base_builder(tmp.path());
         let sc = match backend {
-            E2eBackend::Docker => builder.docker(docker_config(true)).build().unwrap(),
+            E2eBackend::Docker => builder.docker(docker_config()).build().unwrap(),
             E2eBackend::Firecracker => {
                 // TODO(fc-wire): build with the Firecracker backend here
                 // (`builder.firecracker(..)` / `.backend(FirecrackerBackend::new(..))`).
@@ -168,7 +167,7 @@ impl Harness {
         base_builder(self.tmp.path())
     }
 
-    /// Whether the backend still has a live instance for `id` (DockerDev: any container
+    /// Whether the backend still has a live instance for `id` (Docker: any container
     /// labelled with it). Other backends: the SDK's own view only.
     pub fn backend_has(&self, id: SandboxId) -> bool {
         match self.backend {

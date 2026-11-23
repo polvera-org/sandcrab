@@ -8,7 +8,7 @@
 #
 # Runtime contract (see templates/README note in build.sh):
 #   - no crabd baked in: backends bind-mount it read-only at /opt/sandcrab/crabd
-#     (DockerDev) or inject it into the ext4 rootfs (Firecracker).
+#     (Docker) or inject it into the ext4 rootfs (Firecracker).
 #   - /workspace (WORKDIR) and /run/sandcrab exist.
 #   - runs as an arbitrary non-root uid:gid. HOME=/home/sandcrab is a sticky,
 #     world-writable (1777) dir so any uid can create caches/config there

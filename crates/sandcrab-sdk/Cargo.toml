@@ -10,7 +10,7 @@ authors.workspace = true
 
 [features]
 default = ["docker"]
-# DockerDev backend (shared kernel; local dev / CI only, requires explicit opt-in).
+# Docker backend (hardened containers, shared kernel; officially supported).
 docker = ["dep:sandcrab-backend-docker"]
 # Firecracker microVM backend (hardware isolated; Linux x86_64 + /dev/kvm). Off by default.
 # The dependency only exists on Linux: elsewhere the feature compiles to nothing.

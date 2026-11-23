@@ -78,7 +78,6 @@ impl Cli {
             .env_remove("SANDCRAB_HOME");
         if self.docker {
             c.env("SANDCRAB_BACKEND", "docker")
-                .env("SANDCRAB_ALLOW_INSECURE", "1")
                 .env("SANDCRAB_CRABD", crabd());
         }
         c
@@ -175,8 +174,9 @@ fn templates_and_schema() {
 }
 
 #[test]
-fn backend_must_be_explicit_and_insecure_opted_in() {
+fn backend_must_be_explicit_and_docker_needs_no_opt_in() {
     let cli = Cli::new(false);
+    // No default backend: never picks docker (or anything else) for you.
     let out = cli.run(&["run", "--", "true"]);
     assert_eq!(out.status.code(), Some(1));
     assert!(
@@ -185,17 +185,56 @@ fn backend_must_be_explicit_and_insecure_opted_in() {
         stderr(&out)
     );
 
-    let out = cli.run(&["--backend", "docker", "run", "--", "true"]);
-    assert_eq!(out.status.code(), Some(1));
-    assert!(
-        stderr(&out).contains("--allow-insecure"),
-        "{}",
-        stderr(&out)
-    );
+    // Docker no longer asks for an opt-in: it gets as far as checking crabd.
+    let out = cli.run(&[
+        "--backend",
+        "docker",
+        "--crabd",
+        "/nonexistent/crabd",
+        "run",
+        "--",
+        "true",
+    ]);
+    let err = stderr(&out);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(err.contains("crabd"), "{err}");
+    assert!(!err.contains("allow-insecure"), "{err}");
+    assert!(!err.contains("local dev"), "{err}");
 
     let out = cli.run(&["--backend", "libkrun", "run", "--", "true"]);
     assert_eq!(out.status.code(), Some(2));
     assert!(stderr(&out).contains("not compiled"), "{}", stderr(&out));
+}
+
+/// `--allow-insecure` / `SANDCRAB_ALLOW_INSECURE` are deprecated no-ops: still accepted
+/// (hidden from --help), they print a warning and change nothing.
+#[test]
+fn deprecated_allow_insecure_is_a_noop_with_warning() {
+    let cli = Cli::new(false);
+    let help = String::from_utf8_lossy(&cli.run(&["--help"]).stdout).into_owned();
+    assert!(!help.contains("allow-insecure"), "{help}");
+
+    let plain = cli.run(&["workspace", "list"]);
+    assert_eq!(plain.status.code(), Some(0));
+    assert!(!stderr(&plain).contains("deprecated"), "{}", stderr(&plain));
+
+    let flag = cli.run(&["--allow-insecure", "workspace", "list"]);
+    let env = cli
+        .cmd(&["workspace", "list"])
+        .env("SANDCRAB_ALLOW_INSECURE", "1")
+        .output()
+        .unwrap();
+    for out in [&flag, &env] {
+        let err = stderr(out);
+        assert_eq!(out.status.code(), Some(0), "{err}");
+        assert!(err.contains("deprecated and has no effect"), "{err}");
+        assert_eq!(out.stdout, plain.stdout, "output changed");
+    }
+
+    // Still a no-op for backend selection: no backend → still an error.
+    let out = cli.run(&["--allow-insecure", "run", "--", "true"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("no backend selected"));
 }
 
 fn kvm_usable() -> bool {
@@ -206,7 +245,7 @@ fn kvm_usable() -> bool {
         .is_ok()
 }
 
-/// Sandcrab-managed DockerDev containers on this host (`None` without a Docker daemon).
+/// Sandcrab-managed Docker containers on this host (`None` without a Docker daemon).
 fn docker_sandboxes() -> Option<usize> {
     let out = Command::new("docker")
         .args(["ps", "-aq", "--filter", "label=sandcrab.managed=true"])
@@ -216,7 +255,7 @@ fn docker_sandboxes() -> Option<usize> {
     Some(String::from_utf8_lossy(&out.stdout).lines().count())
 }
 
-/// `--backend firecracker` is hardware isolated (no insecure opt-in) and, without KVM, fails
+/// `--backend firecracker` is hardware isolated and, without KVM, fails
 /// with an actionable error: no fallback to docker, no container created.
 #[cfg(target_os = "linux")]
 #[test]
@@ -227,8 +266,8 @@ fn firecracker_without_kvm_is_a_clear_error() {
     }
     let cli = Cli::new(false);
     let before = docker_sandboxes();
-    // Even with the docker opt-in present, an explicit firecracker selection never
-    // degrades to docker.
+    // Even with the (deprecated) docker opt-in present, an explicit firecracker selection
+    // never degrades to docker.
     let out = cli
         .cmd(&["--backend", "firecracker", "run", "--", "echo", "hi"])
         .env("SANDCRAB_ALLOW_INSECURE", "1")
@@ -241,8 +280,8 @@ fn firecracker_without_kvm_is_a_clear_error() {
     assert!(err.contains("/dev/kvm"), "{err}");
     assert!(err.contains("usermod -aG kvm"), "{err}");
     assert!(err.contains("never falls back"), "{err}");
-    assert!(!err.contains("shares the host kernel"), "{err}");
-    assert!(!err.contains("--allow-insecure"), "{err}");
+    assert!(!err.contains("backend `docker`"), "{err}");
+    assert!(err.contains("deprecated and has no effect"), "{err}");
     assert_eq!(docker_sandboxes(), before, "a docker container was created");
 
     // Same through SANDCRAB_BACKEND and the `fc` alias.
@@ -377,7 +416,7 @@ fn docker_smoke_run_and_tool() {
         src.to_str().unwrap(),
     ]);
 
-    // cat a workspace file; insecure warning + timings on stderr
+    // cat a workspace file; disk_mb warning + timings on stderr (no dev-only warning)
     let out = cli.run(&[
         "-v",
         "run",
@@ -393,7 +432,8 @@ fn docker_smoke_run_and_tool() {
         "hello from the host\n"
     );
     let err = stderr(&out);
-    assert!(err.contains("shares the host kernel"), "{err}");
+    assert!(!err.contains("shares the host kernel"), "{err}");
+    assert!(!err.contains("deprecated"), "{err}");
     assert!(err.contains("disk_mb is not enforced"), "{err}");
     assert_eq!(err.matches("disk_mb").count(), 1, "warned twice: {err}");
     assert!(
@@ -512,7 +552,7 @@ fn spawn_sleeper(cli: &Cli) -> (std::process::Child, String) {
     std::thread::spawn(move || {
         for line in BufReader::new(stderr).lines().map_while(Result::ok) {
             eprintln!("  stderr: {line}");
-            // "sandcrab: sandbox <id> (docker-dev, base) ready in N ms"
+            // "sandcrab: sandbox <id> (docker, base) ready in N ms"
             if let Some(rest) = line.strip_prefix("sandcrab: sandbox ")
                 && line.contains("ready in")
             {

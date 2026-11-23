@@ -15,14 +15,14 @@ use crate::sample;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum BackendId {
-    DockerDev,
+    Docker,
     Firecracker,
 }
 
 impl BackendId {
     pub fn parse(s: &str) -> Result<Self, String> {
         match s.trim() {
-            "docker" | "docker-dev" => Ok(Self::DockerDev),
+            "docker" | "docker-dev" => Ok(Self::Docker),
             "firecracker" | "fc" => Ok(Self::Firecracker),
             other => Err(format!(
                 "unknown backend `{other}` (expected docker | firecracker)"
@@ -33,7 +33,7 @@ impl BackendId {
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
-            Self::DockerDev => "docker-dev",
+            Self::Docker => "docker",
             Self::Firecracker => "firecracker",
         }
     }
@@ -106,7 +106,7 @@ pub async fn open(id: BackendId, opts: &OpenOpts) -> Result<LiveBackend, String>
         .state_dir(&opts.state_dir)
         .templates_dir(&opts.templates_dir);
     match id {
-        BackendId::DockerDev => open_docker(builder, opts).await,
+        BackendId::Docker => open_docker(builder, opts).await,
         BackendId::Firecracker => open_firecracker(builder, opts),
     }
 }
@@ -122,14 +122,14 @@ async fn open_docker(
             opts.crabd.display()
         ));
     }
-    // Shared kernel: the bench opts in explicitly; the result records the capabilities.
+    // Shared kernel: the result records the (honest) capabilities.
     let sc = builder
-        .docker(sandcrab_sdk::DockerDevConfig {
+        .docker(sandcrab_sdk::DockerConfig {
             crabd_path: opts.crabd.clone(),
-            ..sandcrab_sdk::DockerDevConfig::allow_insecure()
+            ..sandcrab_sdk::DockerConfig::default()
         })
         .build()
-        .map_err(|e| format!("cannot initialise docker-dev: {e}"))?;
+        .map_err(|e| format!("cannot initialise docker: {e}"))?;
     let docker = bollard::Docker::connect_with_defaults()
         .map_err(|e| format!("cannot connect to the Docker daemon: {e}"))?;
     docker
@@ -137,7 +137,7 @@ async fn open_docker(
         .await
         .map_err(|e| format!("Docker daemon not reachable: {e}"))?;
     Ok(LiveBackend {
-        id: BackendId::DockerDev,
+        id: BackendId::Docker,
         caps: caps(&sc),
         sc,
         docker: Some(docker),
@@ -342,11 +342,8 @@ mod tests {
 
     #[test]
     fn backend_names() {
-        assert_eq!(BackendId::parse("docker").unwrap(), BackendId::DockerDev);
-        assert_eq!(
-            BackendId::parse("docker-dev").unwrap(),
-            BackendId::DockerDev
-        );
+        assert_eq!(BackendId::parse("docker").unwrap(), BackendId::Docker);
+        assert_eq!(BackendId::parse("docker-dev").unwrap(), BackendId::Docker);
         assert_eq!(BackendId::parse("fc").unwrap(), BackendId::Firecracker);
         assert!(BackendId::parse("kata").is_err());
         assert_eq!(BackendId::Firecracker.label(), "firecracker");

@@ -1,6 +1,6 @@
 [package]
 name = "sandcrab-bench"
-description = "Benchmark harness for Sandcrab runtime backends (DockerDev, Firecracker); emits schema-versioned JSON"
+description = "Benchmark harness for Sandcrab runtime backends (Docker, Firecracker); emits schema-versioned JSON"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -15,7 +15,7 @@ path = "src/main.rs"
 
 [features]
 default = ["docker", "firecracker"]
-# DockerDev backend (`--backends docker`). Resource sampling talks to the daemon via bollard.
+# Docker backend (`--backends docker`). Resource sampling talks to the daemon via bollard.
 docker = ["sandcrab-sdk/docker", "dep:bollard"]
 # Firecracker backend (`--backends firecracker`). Only compiles in on Linux; elsewhere (and on
 # hosts without /dev/kvm) the backend is recorded as `unavailable`, never substituted.

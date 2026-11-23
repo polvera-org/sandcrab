@@ -1,4 +1,4 @@
-//! [`DockerDevConfig`] and host-side checks on the injected `crabd` binary.
+//! [`DockerConfig`] and host-side checks on the injected `crabd` binary.
 
 use std::fs;
 use std::io::Read;
@@ -32,13 +32,9 @@ impl Default for DockerLimits {
     }
 }
 
-/// Configuration for [`crate::DockerDevBackend`].
+/// Configuration for [`crate::DockerBackend`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DockerDevConfig {
-    /// Explicit acknowledgement that this backend shares the host kernel and is for local
-    /// dev / CI only. **Defaults to `false`**: [`crate::DockerDevBackend::new`] refuses to
-    /// construct the backend unless this is set.
-    pub allow_insecure_dev_backend: bool,
+pub struct DockerConfig {
     /// Docker daemon address (`unix:///…`, `tcp://…`). `None` = `$DOCKER_HOST`, else the
     /// local default socket. The daemon must run on this host: workspaces, `crabd` and the
     /// socket directory are bind-mounted from host paths.
@@ -57,10 +53,9 @@ pub struct DockerDevConfig {
     pub allow_unpinned_images: bool,
 }
 
-impl Default for DockerDevConfig {
+impl Default for DockerConfig {
     fn default() -> Self {
         Self {
-            allow_insecure_dev_backend: false,
             docker_host: None,
             crabd_path: default_crabd_path(),
             state_dir: default_state_dir(),
@@ -70,14 +65,13 @@ impl Default for DockerDevConfig {
     }
 }
 
-impl DockerDevConfig {
-    /// Default config with the explicit insecure-backend opt-in set.
+impl DockerConfig {
+    /// Former explicit opt-in constructor. The Docker backend no longer needs an opt-in, so
+    /// this is [`Self::default`]; kept for one release.
+    #[deprecated(note = "the Docker backend needs no opt-in; use `DockerConfig::default()`")]
     #[must_use]
     pub fn allow_insecure() -> Self {
-        Self {
-            allow_insecure_dev_backend: true,
-            ..Self::default()
-        }
+        Self::default()
     }
 }
 
@@ -109,7 +103,7 @@ pub fn check_static_crabd(path: &Path) -> Result<PathBuf> {
     let fail = |why: String| {
         SandboxError::InvalidConfig(format!(
             "crabd binary `{}` {why}; build it with `scripts/build-crabd.sh` \
-             (or point ${CRABD_ENV} / DockerDevConfig::crabd_path at a static musl crabd)",
+             (or point ${CRABD_ENV} / DockerConfig::crabd_path at a static musl crabd)",
             path.display()
         ))
     };
@@ -217,14 +211,18 @@ mod tests {
 
     #[test]
     fn config_defaults_are_safe() {
-        let c = DockerDevConfig::default();
-        assert!(!c.allow_insecure_dev_backend);
+        let c = DockerConfig::default();
         assert!(!c.allow_unpinned_images);
         assert!(c.docker_host.is_none());
         assert!(c.crabd_path.ends_with("crabd"));
         assert!(c.state_dir.ends_with("run"));
         assert_eq!(c.limits.stop_grace, Duration::from_secs(2));
-        assert!(DockerDevConfig::allow_insecure().allow_insecure_dev_backend);
+        #[allow(deprecated)]
+        let legacy = DockerConfig::allow_insecure();
+        assert_eq!(
+            legacy, c,
+            "deprecated constructor is a no-op alias of default()"
+        );
     }
 
     #[test]

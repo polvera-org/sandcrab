@@ -51,7 +51,10 @@ pub const LABEL_SANDBOX_ID: &str = "sandcrab.sandbox_id";
 pub const LABEL_TEMPLATE: &str = "sandcrab.template";
 pub const LABEL_BACKEND: &str = "sandcrab.backend";
 /// Value of [`LABEL_BACKEND`].
-pub const BACKEND_LABEL_VALUE: &str = "docker-dev";
+pub const BACKEND_LABEL_VALUE: &str = "docker";
+/// [`LABEL_BACKEND`] value written before the backend was renamed from `DockerDev`;
+/// containers carrying it are still recognized (and reaped) as Sandcrab-managed.
+pub const LEGACY_BACKEND_LABEL_VALUE: &str = "docker-dev";
 /// Owner labels (see [`crate::Owner`]): host uid, pid and boot id of the spawning process,
 /// and a hash of its socket state directory.
 pub const LABEL_OWNER_UID: &str = "sandcrab.owner_uid";
@@ -82,7 +85,7 @@ pub fn network_mode(network: &NetworkConfig) -> Result<&'static str> {
         NetworkPolicy::Disabled => Ok("none"),
         NetworkPolicy::Unrestricted => Ok("bridge"),
         NetworkPolicy::EgressRestricted => Err(SandboxError::PolicyUnenforceable(
-            "docker-dev cannot enforce network policy `egress_restricted` (no domain \
+            "docker cannot enforce network policy `egress_restricted` (no domain \
              allow-list support); use `disabled` or `unrestricted`"
                 .into(),
         )),
@@ -180,7 +183,7 @@ pub fn build_container_spec(
     for m in &spec.mounts {
         if let WorkspaceBacking::BlockVolume(_) = m.backing {
             return Err(SandboxError::InvalidConfig(format!(
-                "workspace `{}` is a block volume; docker-dev only mounts directories",
+                "workspace `{}` is a block volume; docker only mounts directories",
                 m.workspace_name
             )));
         }
@@ -450,7 +453,7 @@ image = "sandcrab/base:0.1.0"
         assert_eq!(labels[LABEL_MANAGED], "true");
         assert_eq!(labels[LABEL_SANDBOX_ID], s.id.to_string());
         assert_eq!(labels[LABEL_TEMPLATE], "base");
-        assert_eq!(labels[LABEL_BACKEND], "docker-dev");
+        assert_eq!(labels[LABEL_BACKEND], "docker");
         assert_eq!(labels[LABEL_OWNER_UID], "1234");
         assert_eq!(labels[LABEL_OWNER_PID], "42");
         assert_eq!(labels[LABEL_OWNER_BOOT_ID], "boot-a");
