@@ -74,12 +74,34 @@ impl WorkspaceClient {
             .put_file(&workspace.into(), rel_path, bytes.as_ref())
     }
 
+    /// Read a whole file, up to [`sandcrab_core::DEFAULT_READ_LIMIT`] bytes
+    /// ([`sandcrab_core::SandboxError::TooLarge`] beyond).
     pub fn read_file(
         &self,
         workspace: impl Into<WorkspaceRef>,
         rel_path: impl AsRef<Path>,
     ) -> Result<Vec<u8>> {
         self.registry.read_file(&workspace.into(), rel_path)
+    }
+
+    /// [`Self::read_file`] with an explicit size limit in bytes.
+    pub fn read_file_limited(
+        &self,
+        workspace: impl Into<WorkspaceRef>,
+        rel_path: impl AsRef<Path>,
+        limit: u64,
+    ) -> Result<Vec<u8>> {
+        self.registry
+            .read_file_limited(&workspace.into(), rel_path, limit)
+    }
+
+    /// Open a file for streaming (no size limit): `(reader, size at open)`.
+    pub fn open_file(
+        &self,
+        workspace: impl Into<WorkspaceRef>,
+        rel_path: impl AsRef<Path>,
+    ) -> Result<(std::fs::File, u64)> {
+        self.registry.open_file(&workspace.into(), rel_path)
     }
 
     /// Delete a file, symlink or directory (recursively).

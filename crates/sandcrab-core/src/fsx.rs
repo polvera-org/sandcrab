@@ -17,7 +17,7 @@
 //! A symlink anywhere on the path is refused with [`SandboxError::PathEscape`], even when
 //! it points inside the workspace: host-side workspace operations do not follow symlinks.
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsFd, OwnedFd};
@@ -226,8 +226,9 @@ fn walk(root: &OwnedFd, rel: &SafeRelPath, comps: &[&OsStr], create: bool) -> Re
     }
 }
 
-/// Read a regular file. Symlinks, directories and special files are refused.
-pub(crate) fn read_file(root: &OwnedFd, rel: &SafeRelPath) -> Result<Vec<u8>> {
+/// Open a regular file for reading: `(file, size)`. Symlinks, directories and special
+/// files are refused.
+pub(crate) fn open_file(root: &OwnedFd, rel: &SafeRelPath) -> Result<(File, u64)> {
     let (parent, name) = split(rel)?;
     let dir = open_dir(root, rel, &parent, false)?;
     // O_NONBLOCK: a guest-planted FIFO must not hang the host; refused right below.
@@ -250,10 +251,29 @@ pub(crate) fn read_file(root: &OwnedFd, rel: &SafeRelPath) -> Result<Vec<u8>> {
             )));
         }
     }
-    let mut buf = Vec::new();
-    File::from(fd)
+    Ok((File::from(fd), u64::try_from(st.st_size).unwrap_or(0)))
+}
+
+fn too_large(rel: &SafeRelPath, limit: u64) -> SandboxError {
+    SandboxError::TooLarge(format!(
+        "`{rel}` is larger than the {limit}-byte read limit; stream it instead"
+    ))
+}
+
+/// Read a regular file of at most `limit` bytes ([`SandboxError::TooLarge`] beyond, also
+/// when it grows past the limit while being read).
+pub(crate) fn read_file(root: &OwnedFd, rel: &SafeRelPath, limit: u64) -> Result<Vec<u8>> {
+    let (file, size) = open_file(root, rel)?;
+    if size > limit {
+        return Err(too_large(rel, limit));
+    }
+    let mut buf = Vec::with_capacity(usize::try_from(size).unwrap_or(0));
+    file.take(limit.saturating_add(1))
         .read_to_end(&mut buf)
         .map_err(|e| SandboxError::io_at(rel.as_path(), e))?;
+    if buf.len() as u64 > limit {
+        return Err(too_large(rel, limit));
+    }
     Ok(buf)
 }
 
@@ -324,42 +344,143 @@ fn create_tmp(dir: &OwnedFd, rel: &SafeRelPath) -> Result<(PathBuf, OwnedFd)> {
     )))
 }
 
+/// Deepest directory nesting [`delete`] removes; deeper trees are refused.
+pub(crate) const MAX_REMOVE_DEPTH: usize = 4096;
+/// Directory descriptors [`remove_tree`] keeps open at once; ancestors beyond the window are
+/// closed and re-opened (fd-relative, no symlinks) when the walk returns to them.
+const REMOVE_FD_WINDOW: usize = 64;
+
 /// Delete a file, a symlink (the link itself) or a directory tree.
 pub(crate) fn delete(root: &OwnedFd, rel: &SafeRelPath) -> Result<()> {
+    delete_max_depth(root, rel, MAX_REMOVE_DEPTH)
+}
+
+fn delete_max_depth(root: &OwnedFd, rel: &SafeRelPath, max_depth: usize) -> Result<()> {
     let (parent, name) = split(rel)?;
     let dir = open_dir(root, rel, &parent, false)?;
     let st = rustix::fs::statat(&dir, name, AtFlags::SYMLINK_NOFOLLOW).map_err(|e| map(rel, e))?;
     if FileType::from_raw_mode(st.st_mode) == FileType::Directory {
-        remove_tree(&dir, name).map_err(|e| map(rel, e))
+        remove_tree(&dir, name, rel, max_depth)
     } else {
         rustix::fs::unlinkat(&dir, name, AtFlags::empty()).map_err(|e| map(rel, e))
     }
 }
 
-/// Recursively remove directory `name` inside `parent`, fd-relative, never following links.
-/// A concurrent swap of a subdirectory for a symlink makes the open fail (`ELOOP`) or, at
-/// worst, unlinks the symlink itself; it never reaches outside.
-fn remove_tree(parent: &OwnedFd, name: &OsStr) -> std::result::Result<(), Errno> {
-    let dir = rustix::fs::openat(parent, name, DIR_FLAGS, Mode::empty())?;
-    let mut children = Vec::new();
-    for entry in Dir::read_from(&dir)? {
+/// One directory being emptied by [`remove_tree`].
+struct Frame {
+    /// Name inside the previous frame's directory (or the base parent for frame 0).
+    name: OsString,
+    /// Open handle, or `None` while closed to bound descriptor use.
+    fd: Option<OwnedFd>,
+    /// Entries not yet removed.
+    pending: Vec<OsString>,
+}
+
+fn read_children(dir: &OwnedFd) -> std::result::Result<Vec<OsString>, Errno> {
+    let mut out = Vec::new();
+    for entry in Dir::read_from(dir)? {
         let entry = entry?;
         let bytes = entry.file_name().to_bytes();
         if bytes != b"." && bytes != b".." {
-            children.push(OsStr::from_bytes(bytes).to_owned());
+            out.push(OsStr::from_bytes(bytes).to_owned());
         }
     }
-    for child in &children {
-        match rustix::fs::statat(&dir, child.as_os_str(), AtFlags::SYMLINK_NOFOLLOW) {
-            Ok(st) if FileType::from_raw_mode(st.st_mode) == FileType::Directory => {
-                remove_tree(&dir, child)?;
+    Ok(out)
+}
+
+/// Make sure `stack[i]` has an open descriptor, re-opening it from the nearest open
+/// ancestor (or `base`) by name, `O_NOFOLLOW` at every step.
+fn reopen(base: &OwnedFd, stack: &mut [Frame], i: usize) -> std::result::Result<(), Errno> {
+    if stack[i].fd.is_some() {
+        return Ok(());
+    }
+    let start = (0..i).rev().find(|&j| stack[j].fd.is_some());
+    let mut cur: Option<OwnedFd> = None;
+    for k in start.map_or(0, |j| j + 1)..=i {
+        let dir = match (&cur, start) {
+            (Some(c), _) => c.as_fd(),
+            (None, Some(j)) => stack[j].fd.as_ref().map_or(base.as_fd(), AsFd::as_fd),
+            (None, None) => base.as_fd(),
+        };
+        cur = Some(rustix::fs::openat(
+            dir,
+            stack[k].name.as_os_str(),
+            DIR_FLAGS,
+            Mode::empty(),
+        )?);
+    }
+    stack[i].fd = cur;
+    Ok(())
+}
+
+/// Remove directory `name` inside `parent`, fd-relative, never following links. Iterative
+/// (explicit stack), refuses trees deeper than `max_depth` ([`MAX_REMOVE_DEPTH`]), and keeps at most
+/// [`REMOVE_FD_WINDOW`] directory descriptors open. A concurrent swap of a subdirectory for
+/// a symlink makes the open fail (`ELOOP`/`ENOTDIR`) or, at worst, unlinks the symlink
+/// itself; it never reaches outside.
+fn remove_tree(parent: &OwnedFd, name: &OsStr, rel: &SafeRelPath, max_depth: usize) -> Result<()> {
+    let err = |e| map(rel, e);
+    let fd = rustix::fs::openat(parent, name, DIR_FLAGS, Mode::empty()).map_err(err)?;
+    let pending = read_children(&fd).map_err(err)?;
+    let mut stack = vec![Frame {
+        name: name.to_owned(),
+        fd: Some(fd),
+        pending,
+    }];
+    while let Some(top) = stack.len().checked_sub(1) {
+        let Some(child) = stack[top].pending.pop() else {
+            let done = stack.pop().expect("non-empty stack");
+            drop(done.fd);
+            let dir = match stack.len().checked_sub(1) {
+                Some(p) => {
+                    reopen(parent, &mut stack, p).map_err(err)?;
+                    stack[p].fd.as_ref().map_or(parent.as_fd(), AsFd::as_fd)
+                }
+                None => parent.as_fd(),
+            };
+            match rustix::fs::unlinkat(dir, done.name.as_os_str(), AtFlags::REMOVEDIR) {
+                Ok(()) | Err(Errno::NOENT) => {}
+                Err(e) => return Err(err(e)),
             }
-            Ok(_) => rustix::fs::unlinkat(&dir, child.as_os_str(), AtFlags::empty())?,
+            continue;
+        };
+        reopen(parent, &mut stack, top).map_err(err)?;
+        let Some(dir) = stack[top].fd.as_ref() else {
+            unreachable!("reopen leaves the frame open")
+        };
+        match rustix::fs::statat(dir, child.as_os_str(), AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(st) if FileType::from_raw_mode(st.st_mode) == FileType::Directory => {
+                if stack.len() >= max_depth {
+                    return Err(SandboxError::Workspace(format!(
+                        "`{rel}`: directory tree is deeper than {max_depth} levels; \
+                         refusing to delete it"
+                    )));
+                }
+                let fd = match rustix::fs::openat(dir, child.as_os_str(), DIR_FLAGS, Mode::empty())
+                {
+                    Ok(fd) => fd,
+                    Err(Errno::NOENT) => continue,
+                    Err(e) => return Err(err(e)),
+                };
+                let pending = read_children(&fd).map_err(err)?;
+                stack.push(Frame {
+                    name: child,
+                    fd: Some(fd),
+                    pending,
+                });
+                if let Some(old) = stack.len().checked_sub(REMOVE_FD_WINDOW + 1) {
+                    stack[old].fd = None;
+                }
+            }
+            Ok(_) => match rustix::fs::unlinkat(dir, child.as_os_str(), AtFlags::empty()) {
+                Ok(()) | Err(Errno::NOENT) => {}
+                Err(e) => return Err(err(e)),
+            },
             Err(Errno::NOENT) => {}
-            Err(e) => return Err(e),
+            Err(e) => return Err(err(e)),
         }
     }
-    rustix::fs::unlinkat(parent, name, AtFlags::REMOVEDIR)
+    Ok(())
 }
 
 /// List one directory: `(name, kind, size)`, symlinks reported (`lstat`), not followed.
@@ -444,11 +565,11 @@ mod tests {
         assert!(status.success());
         let root = open_root(tmp.path()).unwrap();
         assert!(matches!(
-            read_file(&root, &rel("fifo")),
+            read_file(&root, &rel("fifo"), u64::MAX),
             Err(SandboxError::Workspace(_))
         ));
         assert!(matches!(
-            read_file(&root, &rel("d")),
+            read_file(&root, &rel("d"), u64::MAX),
             Err(SandboxError::Workspace(_))
         ));
     }
@@ -472,6 +593,63 @@ mod tests {
             .map(|e| e.unwrap().file_name())
             .collect();
         assert_eq!(names, ["run.sh"]);
+    }
+
+    #[test]
+    fn read_cap_enforced() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("big"), vec![7u8; 1000]).unwrap();
+        let root = open_root(tmp.path()).unwrap();
+        assert_eq!(read_file(&root, &rel("big"), 1000).unwrap().len(), 1000);
+        assert!(matches!(
+            read_file(&root, &rel("big"), 999),
+            Err(SandboxError::TooLarge(_))
+        ));
+    }
+
+    #[test]
+    fn deep_tree_removed_iteratively_with_bounded_fds() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Deeper than the fd window (and than a default 1024-fd ulimit would allow if every
+        // level kept its descriptor), built fd-relative to dodge PATH_MAX.
+        let depth = 1500;
+        let root = open_root(tmp.path()).unwrap();
+        let mut cur = root.try_clone().unwrap();
+        for i in 0..depth {
+            rustix::fs::mkdirat(&cur, "d", Mode::from_raw_mode(0o755)).unwrap();
+            if i % 100 == 0 {
+                let f = rustix::fs::openat(
+                    &cur,
+                    "f",
+                    OFlags::WRONLY | OFlags::CREATE | OFlags::CLOEXEC,
+                    Mode::from_raw_mode(0o644),
+                )
+                .unwrap();
+                drop(f);
+            }
+            cur = rustix::fs::openat(&cur, "d", DIR_FLAGS, Mode::empty()).unwrap();
+        }
+        drop(cur);
+        delete(&root, &rel("d")).unwrap();
+        assert!(!tmp.path().join("d").exists());
+    }
+
+    #[test]
+    fn too_deep_tree_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = open_root(tmp.path()).unwrap();
+        let mut cur = root.try_clone().unwrap();
+        for _ in 0..10 {
+            rustix::fs::mkdirat(&cur, "d", Mode::from_raw_mode(0o755)).unwrap();
+            cur = rustix::fs::openat(&cur, "d", DIR_FLAGS, Mode::empty()).unwrap();
+        }
+        drop(cur);
+        assert!(matches!(
+            delete_max_depth(&root, &rel("d"), 5),
+            Err(SandboxError::Workspace(m)) if m.contains("deeper")
+        ));
+        delete_max_depth(&root, &rel("d"), 10).unwrap();
+        assert!(!tmp.path().join("d").exists());
     }
 
     #[test]

@@ -73,6 +73,9 @@ const RW_LOCK: &str = "rw.lock";
 /// `ManagedDir` contents under `<root>/workspaces/<id>/`.
 const MANAGED_DATA: &str = "data";
 
+/// Default cap for [`WorkspaceRegistry::read_file`] (64 MiB).
+pub const DEFAULT_READ_LIMIT: u64 = 64 * 1024 * 1024;
+
 /// Options for host-side mutation (`put_file_with`, `delete_file_with`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct HostWriteOptions {
@@ -633,9 +636,10 @@ impl WorkspaceRegistry {
 
     /// Unregister a workspace. Refused while leased.
     ///
-    /// With `delete_data`, a `ManagedDir` workspace's data is deleted; for other backings only
-    /// Sandcrab's own per-workspace state (caches) is removed — a registered host directory
-    /// or block volume is never deleted.
+    /// Sandcrab's own per-workspace state (`<root>/workspaces/<id>/`: lock files, caches,
+    /// staging) is always removed. With `delete_data`, a `ManagedDir` workspace's data goes
+    /// too; without it the data directory is kept. A registered host directory or block
+    /// volume is never touched.
     pub fn remove(&self, r: &WorkspaceRef, delete_data: bool) -> Result<Workspace> {
         let ws = self.inner.with_db(true, |db| {
             let idx = db
@@ -652,13 +656,17 @@ impl WorkspaceRegistry {
             }
             Ok(db.workspaces.remove(idx))
         })?;
-        if delete_data {
-            let dir = self.inner.workspace_dir(ws.id);
-            match fs::remove_dir_all(&dir) {
-                Ok(()) => {}
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                Err(e) => return Err(SandboxError::io_at(&dir, e)),
-            }
+        let dir = self.inner.workspace_dir(ws.id);
+        let keep_data = !delete_data && matches!(ws.backing, WorkspaceBacking::ManagedDir(_));
+        let res = if keep_data {
+            remove_state_except(&dir, MANAGED_DATA)
+        } else {
+            fs::remove_dir_all(&dir)
+        };
+        match res {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(SandboxError::io_at(&dir, e)),
         }
         Ok(ws)
     }
@@ -719,14 +727,36 @@ impl WorkspaceRegistry {
         })
     }
 
-    /// Read a regular file. Allowed under any lease; a symlink anywhere on the path is
-    /// refused with [`SandboxError::PathEscape`].
+    /// Read a regular file of at most [`DEFAULT_READ_LIMIT`] bytes (else
+    /// [`SandboxError::TooLarge`]; see [`Self::read_file_limited`] and [`Self::open_file`]).
+    /// Allowed under any lease; a symlink anywhere on the path is refused with
+    /// [`SandboxError::PathEscape`].
     pub fn read_file(&self, r: &WorkspaceRef, rel_path: impl AsRef<Path>) -> Result<Vec<u8>> {
+        self.read_file_limited(r, rel_path, DEFAULT_READ_LIMIT)
+    }
+
+    /// [`Self::read_file`] with an explicit size limit in bytes.
+    pub fn read_file_limited(
+        &self,
+        r: &WorkspaceRef,
+        rel_path: impl AsRef<Path>,
+        limit: u64,
+    ) -> Result<Vec<u8>> {
         let rel = file_path(rel_path)?;
         let ws = self
             .inner
             .with_db(false, |db| find(db, r).map(|w| w.clone()))?;
-        fsx::read_file(&open_ws_root(&ws)?, &rel)
+        fsx::read_file(&open_ws_root(&ws)?, &rel, limit)
+    }
+
+    /// Open a regular file for streaming: `(reader, size at open)`. Same path rules as
+    /// [`Self::read_file`], no size limit.
+    pub fn open_file(&self, r: &WorkspaceRef, rel_path: impl AsRef<Path>) -> Result<(File, u64)> {
+        let rel = file_path(rel_path)?;
+        let ws = self
+            .inner
+            .with_db(false, |db| find(db, r).map(|w| w.clone()))?;
+        fsx::open_file(&open_ws_root(&ws)?, &rel)
     }
 
     /// Delete a file, symlink (the link itself, never its target) or directory (recursively).
@@ -886,6 +916,23 @@ fn refresh_managed_identity(ws: &mut Workspace) {
     {
         ws.root_identity = Some(RootIdentity { dev, ino });
     }
+}
+
+/// Remove everything in `dir` except the entry `keep`.
+fn remove_state_except(dir: &Path, keep: &str) -> io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        if entry.file_name() == keep {
+            continue;
+        }
+        let path = entry.path();
+        if entry.file_type()?.is_dir() {
+            fs::remove_dir_all(&path)?;
+        } else {
+            fs::remove_file(&path)?;
+        }
+    }
+    Ok(())
 }
 
 fn ensure_unique_name(db: &RegistryDb, name: &str) -> Result<()> {
@@ -1101,8 +1148,38 @@ mod tests {
     fn remove_managed_without_delete_keeps_data() {
         let f = fixture();
         let ws = f.reg.create("keepme").unwrap();
+        fs::write(ws.backing.path().join("file"), b"x").unwrap();
+        drop(
+            f.reg
+                .lease(&"keepme".into(), MountMode::ReadWrite, SandboxId::new())
+                .unwrap(),
+        );
+        let dir = f.reg.workspace_dir(ws.id);
+        assert!(dir.join(MOUNT_LOCK).exists());
         f.reg.remove(&"keepme".into(), false).unwrap();
-        assert!(ws.backing.path().is_dir());
+        assert!(ws.backing.path().join("file").is_file());
+        // Sandcrab's own state (lock files, caches) is cleaned; only `data/` stays.
+        let left: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(left, [MANAGED_DATA]);
+    }
+
+    #[test]
+    fn remove_host_dir_cleans_state_only() {
+        let f = fixture();
+        fs::write(f.host.join("keep"), b"x").unwrap();
+        let id = f.reg.get(&proj()).unwrap().id;
+        drop(
+            f.reg
+                .lease(&proj(), MountMode::ReadWrite, SandboxId::new())
+                .unwrap(),
+        );
+        assert!(f.reg.workspace_dir(id).join(RW_LOCK).exists());
+        f.reg.remove(&proj(), false).unwrap();
+        assert!(!f.reg.workspace_dir(id).exists());
+        assert_eq!(fs::read(f.host.join("keep")).unwrap(), b"x");
     }
 
     #[test]
@@ -1176,6 +1253,7 @@ mod tests {
     /// Every host op and lease on `proj` must refuse, and `outside` must be untouched.
     fn assert_all_ops_refused(f: &Fixture) {
         assert_root_changed(f.reg.read_file(&proj(), "secret"), "read");
+        assert_root_changed(f.reg.open_file(&proj(), "secret"), "open");
         assert_root_changed(f.reg.put_file(&proj(), "planted", b"x"), "put");
         assert_root_changed(f.reg.delete_file(&proj(), "secret"), "delete");
         assert_root_changed(f.reg.list_files(&proj(), ""), "list");
@@ -1288,6 +1366,31 @@ mod tests {
             reg.lease(&proj(), MountMode::ReadWrite, SandboxId::new())
                 .unwrap(),
         );
+    }
+
+    #[test]
+    fn read_limit_and_streaming() {
+        use std::io::Read as _;
+        let f = fixture();
+        fs::write(f.host.join("big"), vec![1u8; 4096]).unwrap();
+        assert!(matches!(
+            f.reg.read_file_limited(&proj(), "big", 4095),
+            Err(SandboxError::TooLarge(_))
+        ));
+        assert_eq!(
+            f.reg.read_file_limited(&proj(), "big", 4096).unwrap().len(),
+            4096
+        );
+        let (mut file, size) = f.reg.open_file(&proj(), "big").unwrap();
+        assert_eq!(size, 4096);
+        let mut buf = Vec::new();
+        file.read_to_end(&mut buf).unwrap();
+        assert_eq!(buf.len(), 4096);
+        symlink(f.outside.join("secret"), f.host.join("link")).unwrap();
+        assert!(matches!(
+            f.reg.open_file(&proj(), "link"),
+            Err(SandboxError::PathEscape(_))
+        ));
     }
 
     #[test]

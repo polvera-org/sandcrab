@@ -39,8 +39,8 @@ pub use policy::{
     SecretSpec, UserSpec,
 };
 pub use registry::{
-    FileEntry, FileKind, HostWriteOptions, STATE_ROOT_ENV, WorkspaceLease, WorkspaceRegistry,
-    default_state_root, verify_workspace_root,
+    DEFAULT_READ_LIMIT, FileEntry, FileKind, HostWriteOptions, STATE_ROOT_ENV, WorkspaceLease,
+    WorkspaceRegistry, default_state_root, verify_workspace_root,
 };
 pub use sandbox::{DEFAULT_TTL_SECS, SandboxConfig, SandboxId};
 pub use template::{

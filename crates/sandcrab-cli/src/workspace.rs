@@ -159,9 +159,10 @@ pub fn workspace(g: &Global, cmd: WorkspaceCmd) -> anyhow::Result<u8> {
             workspace,
             rel_path,
         } => {
-            let bytes = client.read_file(workspace.as_str(), &rel_path)?;
+            // Streamed: no size cap, constant memory.
+            let (mut file, _) = client.open_file(workspace.as_str(), &rel_path)?;
             let mut out = std::io::stdout().lock();
-            out.write_all(&bytes)?;
+            std::io::copy(&mut file, &mut out)?;
             out.flush()?;
         }
         WorkspaceCmd::Files { workspace, dir } => {
