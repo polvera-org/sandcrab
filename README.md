@@ -1,5 +1,11 @@
 # Sandcrab
 
+<p align="center">
+  <img src="docs/assets/sandcrab-hero.jpg" alt="A crab building sandcastles on the shoreline" width="100%">
+</p>
+
+<p align="center"><em>An architect of the impermanent, born of iron and grit, carving safe harbors from the chaotic shoreline.</em></p>
+
 **Sandcrab** is an open-source, self-hostable, Rust-based ephemeral sandbox manager and SDK for AI agents.
 
 > *Sandbox + Rust's crab mascot = Sandcrab.*
