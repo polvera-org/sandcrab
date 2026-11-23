@@ -13,6 +13,7 @@
 
 mod error;
 pub mod hash;
+pub mod rootfs;
 
 pub use error::{Error, Result};
 
