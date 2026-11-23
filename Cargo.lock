@@ -626,6 +626,7 @@ name = "sandcrab-guest"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "globset",
  "ignore",
  "sandcrab-protocol",
  "serde",

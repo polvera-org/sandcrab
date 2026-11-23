@@ -38,6 +38,7 @@
 //!   [`GREP_MAX_CONTEXT_LINES`]; each match carries its own full context (overlapping context
 //!   is repeated, never shared). Unreadable files are skipped silently.
 
+mod glob_impl;
 mod list_impl;
 
 use std::fs;
@@ -78,8 +79,10 @@ pub async fn list_dir(ctx: &ToolContext, p: ListDirParams) -> Result<ListDirResu
 
 /// Find files by glob pattern.
 pub async fn glob(ctx: &ToolContext, p: GlobParams) -> Result<GlobResult, ProtocolError> {
-    let _ = (ctx, p);
-    Err(super::unimplemented("glob"))
+    let root = ctx.resolve_path_or_default(p.root.as_deref());
+    let matcher = glob_impl::compile(&p.pattern)?;
+    let max = ctx.limits.glob_max_results;
+    blocking(move || glob_impl::run(&root, &matcher, p.respect_gitignore, max)).await
 }
 
 /// Search file contents.

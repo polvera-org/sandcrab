@@ -38,6 +38,7 @@ tokio = { version = "1", features = [
 ] }
 # guest-search deps
 ignore = "0.4"
+globset = "0.4"
 
 [dev-dependencies]
 tempfile = "3"
