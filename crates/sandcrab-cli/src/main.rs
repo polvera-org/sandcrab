@@ -97,6 +97,13 @@ pub enum Commands {
         action: workspace::TemplateCmd,
     },
 
+    /// Firecracker rootfs images (ext4) built from templates.
+    #[cfg(all(feature = "firecracker", target_os = "linux"))]
+    Rootfs {
+        #[command(subcommand)]
+        action: firecracker::RootfsCmd,
+    },
+
     /// Spawn a sandbox, run a command, print its output, destroy the sandbox.
     ///
     /// One trailing argument is run as a shell script (`-- 'ls | wc -l'`); several are
@@ -180,6 +187,8 @@ async fn dispatch(cli: Cli) -> anyhow::Result<u8> {
         Commands::Doctor { fix } => doctor::doctor(g, fix).await,
         Commands::Workspace { action } => workspace::workspace(g, action),
         Commands::Template { action } => workspace::template(g, action),
+        #[cfg(all(feature = "firecracker", target_os = "linux"))]
+        Commands::Rootfs { action } => firecracker::rootfs_cmd(g, action),
         Commands::Run {
             spawn,
             keep,

@@ -1,23 +1,28 @@
 //! Firecracker backend plumbing for the CLI: config, preflight, `doctor` checks, pinned
-//! artifact fetch (`doctor --fix`).
+//! artifact fetch (`doctor --fix`) and `sandcrab rootfs`.
 //!
 //! Compiled on Linux with the `firecracker` feature (default on) only.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Instant;
 
-use anyhow::bail;
+use anyhow::{Context, bail};
+use clap::Subcommand;
 use sandcrab_sdk::Template;
 use sandcrab_sdk::firecracker::artifacts::{self, FIRECRACKER_X86_64, KERNEL_X86_64};
-use sandcrab_sdk::firecracker::rootfs::{self, PIPELINE_VERSION, RootfsBuilder};
+use sandcrab_sdk::firecracker::rootfs::{
+    self, MANIFEST_FILE, PIPELINE_VERSION, RootfsBuilder, RootfsManifest, RootfsRequest,
+};
 use sandcrab_sdk::firecracker::{KVM_DEVICE, hash, reap};
 use sandcrab_sdk::{FirecrackerConfig, RootfsSource};
+use serde_json::json;
 
 use crate::Global;
 use crate::args::BackendArg;
 use crate::doctor::{Report, Status};
-use crate::util;
+use crate::util::{self, print_json};
 
 /// Appended to the doctor summary until the backend has passed its end-to-end run on a KVM
 /// host (maintainer decision: e2e pending, no KVM host yet).
@@ -473,6 +478,160 @@ pub fn doctor(g: &Global, r: &mut Report, fix: bool) {
                 blockers.join(", ")
             ),
         );
+    }
+}
+
+#[derive(Debug, Subcommand)]
+pub enum RootfsCmd {
+    /// Build (or reuse) the read-only ext4 rootfs of templates for the Firecracker
+    /// backend: template image → export → inject crabd → mke2fs. Needs Docker and the
+    /// built template image (`sandcrab template build`); no KVM needed.
+    Build {
+        /// Template names.
+        #[arg(required_unless_present = "all", conflicts_with = "all")]
+        names: Vec<String>,
+        /// Every template.
+        #[arg(long)]
+        all: bool,
+        /// Re-hash a cached image against its manifest.
+        #[arg(long)]
+        verify: bool,
+    },
+    /// List cached rootfs images.
+    #[command(alias = "ls")]
+    List,
+}
+
+fn cached_manifests(rootfs_dir: &Path) -> Vec<(PathBuf, RootfsManifest)> {
+    let Ok(entries) = fs::read_dir(rootfs_dir) else {
+        return Vec::new();
+    };
+    let mut all: Vec<_> = entries
+        .flatten()
+        .filter_map(|e| {
+            let dir = e.path();
+            RootfsManifest::load(&dir.join(MANIFEST_FILE))
+                .ok()
+                .map(|m| (dir, m))
+        })
+        .collect();
+    all.sort_by_key(|(_, m)| std::cmp::Reverse(m.created_at));
+    all
+}
+
+pub fn rootfs_cmd(g: &Global, cmd: RootfsCmd) -> anyhow::Result<u8> {
+    let c = config(g)?;
+    match cmd {
+        RootfsCmd::List => {
+            let all = cached_manifests(RootfsBuilder::new(&c.cache_root).rootfs_dir());
+            if g.json {
+                print_json(&all.iter().map(|(_, m)| m).collect::<Vec<_>>())?;
+            } else if all.is_empty() {
+                println!(
+                    "no cached rootfs images (build one with `sandcrab rootfs build <template>`)"
+                );
+            } else {
+                println!(
+                    "{:<12} {:<26} {:>7} {:<14} DIR",
+                    "TEMPLATE", "IMAGE", "MIB", "CRABD"
+                );
+                for (dir, m) in &all {
+                    println!(
+                        "{:<12} {:<26} {:>7} {:<14} {}",
+                        m.template.as_deref().unwrap_or("-"),
+                        m.image,
+                        m.size_bytes >> 20,
+                        &m.crabd_sha256[..m.crabd_sha256.len().min(12)],
+                        dir.display()
+                    );
+                }
+            }
+            Ok(0)
+        }
+        RootfsCmd::Build { names, all, verify } => {
+            let crabd = util::crabd_path(g);
+            if !crabd.is_file() {
+                bail!(
+                    "static crabd {} not found (build it with scripts/build-crabd.sh, or pass \
+                     --crabd / SANDCRAB_CRABD)",
+                    crabd.display()
+                );
+            }
+            let templates = util::templates(g)?;
+            let selected: Vec<Template> = if all {
+                templates.list()
+            } else {
+                names
+                    .iter()
+                    .map(|n| templates.get(n))
+                    .collect::<Result<_, _>>()?
+            };
+            if selected.is_empty() {
+                bail!("no templates found (pass --templates-dir or run from the repo root)");
+            }
+            let builder = RootfsBuilder::new(&c.cache_root).verify_on_hit(verify);
+            let mut out = Vec::new();
+            for t in &selected {
+                let pin = t.manifest.template.sha256.clone();
+                if pin.is_none() {
+                    eprintln!(
+                        "warning: template `{}` is not pinned; the rootfs is keyed by the \
+                         local image id (`sandcrab template build {}` pins it)",
+                        t.name(),
+                        t.name()
+                    );
+                }
+                if !g.json {
+                    eprintln!("sandcrab: building rootfs for `{}` ...", t.name());
+                }
+                let t0 = Instant::now();
+                let built = builder
+                    .build(&RootfsRequest {
+                        image: t.image().to_owned(),
+                        expected_image_id: pin,
+                        template: Some(t.name().to_owned()),
+                        crabd: crabd.clone(),
+                    })
+                    .with_context(|| {
+                        format!(
+                            "building the rootfs of `{}` (image {}; is it built? \
+                             `sandcrab template build {}`)",
+                            t.name(),
+                            t.image(),
+                            t.name()
+                        )
+                    })?;
+                let m = &built.manifest;
+                if g.json {
+                    out.push(json!({
+                        "template": t.name(),
+                        "path": built.image_path,
+                        "cache_hit": built.cache_hit,
+                        "cache_key": m.cache_key,
+                        "image_id": m.image_id,
+                        "crabd_sha256": m.crabd_sha256,
+                        "rootfs_sha256": m.rootfs_sha256,
+                        "size_bytes": m.size_bytes,
+                        "mkfs": m.mkfs,
+                        "elapsed_ms": t0.elapsed().as_millis(),
+                    }));
+                } else {
+                    println!(
+                        "{} `{}`: {} ({} MiB, mkfs={:?}, {:.1?})",
+                        if built.cache_hit { "cached" } else { "built" },
+                        t.name(),
+                        built.image_path.display(),
+                        m.size_bytes >> 20,
+                        m.mkfs,
+                        t0.elapsed()
+                    );
+                }
+            }
+            if g.json {
+                print_json(&out)?;
+            }
+            Ok(0)
+        }
     }
 }
 
