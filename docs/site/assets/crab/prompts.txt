@@ -1,0 +1,35 @@
+# Sandcrab crab symbology: image-generation prompts (DeepAPI /v1/generate/image, model nano-banana-2)
+# Each hero = STYLE PREFIX + scene prompt. Output 1264x848 PNG, Lanczos-upscaled to 1536 px, WebP q90.
+
+## STYLE PREFIX
+Clean flat isometric vector illustration, premium developer-tool aesthetic, wide 3:2 landscape composition, centered subject with generous negative space. Strictly limited palette: warm sand beige #E8D5B0 and light sand #F5ECD9 for ground and background, deep ocean teal #0F4C5C and mid teal #1F7A8C for water, glass and structures, coral red-orange #FF6B4A as the single accent used ONLY for the crab mascot. Mascot: one friendly, chunky, rounded coral crab with a smooth domed shell, two big rounded claws, two dot eyes on short stalks, six short legs, simple geometric shapes, no mouth details, cute but not childish. Soft subtle 30-degree isometric angle, flat color fills with gentle two-tone shading, thin consistent dark-teal #0B2F38 outlines, soft long shadows, no gradients noise, no texture grain. Absolutely no text, no letters, no numbers, no logos, no watermark, no UI labels. Scene: 
+
+## molting
+Molting: on a small square isometric sand tile, the coral crab walks forward to the right, vivid and fresh, carrying a small glowing teal cube (its finished work) in one claw. Behind it on the left lies its old discarded exoskeleton: an empty, pale, semi-transparent ghost-white crab-shaped shell (same body shape as the crab, with empty leg casings and claws), split open along the back, crumbling into fine sand particles that blow away. NOT a snail shell, NOT a spiral shell: the cast-off is a crab-shaped empty husk. Concept: the shell is discarded, the work persists.
+
+## burrow
+Cutaway cross-section of a sandy beach showing an underground burrow: a cozy chamber below the sand with neatly stacked teal crates, scrolls and folders. Above ground, a gentle shallow wave is receding (tide going out). A large friendly hand-like teal robotic arm from the top edge places a new crate into the burrow through the entrance while no crab is present; the coral crab is seen small in the distance on the far right walking back toward the burrow. Concept: durable storage that survives, tidied between tides.
+
+## isolation
+Split composition. Left and dominant: the coral crab sits safely inside its own sealed thick glass jar with a teal metal screw lid, the jar resting on sand, glass clearly solid with highlights, the crab calm. Right, smaller and further back: a shallow shared rock tide pool with several grey and teal outlined generic crabs crowded together in the same water, marked with a small striped yellow-and-teal caution barrier fence in front of it. A clear gap of sand separates the jar from the pool. Concept: hardware isolation versus shared kernel; never moved into the pool silently.
+
+## handoff
+The coral hermit crab mid-swap between two different empty shells sitting on a sandy patch: on the left, a teal spiral shell decorated with a simple snake-like coil pattern (python), on the right, a larger deep-teal spiral shell decorated with a simple film-frame and camera aperture pattern (rendering). Both shells sit directly on top of the same visible underground burrow chamber below the sand (cutaway), connected by a single tunnel, the burrow full of teal crates. Concept: switch shells, same burrow.
+
+## toolbelt
+Hero portrait of the coral crab standing proudly, wearing a teal utility toolbelt around its shell with neatly holstered simple tools: a small terminal-window icon block with a prompt chevron shape, a document sheet, a pencil, a magnifying glass, a tiny broom, a branching folder tree, and a gear. One big claw raised holding a magnifying glass, the other claw holding a pencil. Clean symmetrical composition on a small sand disc. Concept: native tools inside the sandbox daemon.
+
+## one-wire
+A single taut teal cable stretches horizontally across the scene between a small teal host server tower on the left and a coral crab on the right. The crab is a messenger walking along the single wire like a tightrope, carrying small sealed envelope packets; each packet is a short rounded block with a little header segment at its front (length prefix). Below the wire, three different small platforms on the ground (a glass jar, a container box, a little microchip) all connect upward to the very same single wire. Concept: one protocol for every backend.
+
+## tide-clock
+A large round tide clock sculpture standing in the sand, its face is a teal circle with a single sweeping hand and a coral sector showing elapsed time; beside it, the coral crab calmly uses one big claw to pinch closed a runaway tangle of teal process threads that branch like a small tree (cutting the whole tree at its root), while a wave is about to arrive. Concept: time-to-live and timeouts, killing the whole process group.
+
+## few-grains
+The coral crab sits next to a huge overflowing mound of sand pouring out of a pipe on the left. With its claws it carefully passes only a small neat handful of sand grains into a small elegant teal tray in front of it: the tray shows a little pile at the start, a gap with three dots, and a little pile at the end (head and tail). Concept: bounded output truncation that protects the context window.
+
+## window-door
+Small teal sandcastle-like building on sand, seen isometrically, with two openings on the front: on the left a round porthole window sealed with thick glass, through it a stack of teal crates is visible but unreachable, a tiny teal padlock on the window frame; on the right an open arched doorway through which the coral crab walks in carrying a teal crate in its claws. All crates are teal, no brown. Concept: read-only mount (look but cannot touch) versus read-write mount (walk in and change things).
+
+## reef
+A wide underwater-meets-shoreline coral reef colony seen from a slight isometric angle: many different shells arranged like a neat marketplace grid on reef ledges, each a different shell shape and teal pattern, each with a small coral tag hanging from it, and one coral crab browsing and picking a shell. Calm teal water, light caustics, orderly and curated. Concept: a curated template marketplace.
