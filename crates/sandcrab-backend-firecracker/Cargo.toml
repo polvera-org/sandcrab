@@ -14,6 +14,8 @@ name = "sandcrab-rootfs"
 path = "src/bin/sandcrab-rootfs.rs"
 
 [dependencies]
+rustix = { workspace = true, features = ["fs", "process"] }
+tracing.workspace = true
 sandcrab-core.workspace = true
 sandcrab-protocol.workspace = true
 async-trait.workspace = true

@@ -18,6 +18,7 @@ mod error;
 pub mod hash;
 pub mod rootfs;
 pub mod vsock;
+pub mod workspace;
 
 pub use error::{Error, Result};
 

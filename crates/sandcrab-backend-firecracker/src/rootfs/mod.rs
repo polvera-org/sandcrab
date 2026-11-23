@@ -31,7 +31,9 @@ pub const PIPELINE_VERSION: u32 = 1;
 /// ext4 label of the shared read-only base (design doc §2.3).
 pub const ROOTFS_LABEL: &str = "sc-root";
 /// ext4 label of the per-sandbox scratch drive (guest init's fallback drive lookup).
-pub const SCRATCH_LABEL: &str = "sandcrab-scratch";
+/// Equal to the scratch `drive_id`: guest init falls back to this label when no virtio-blk
+/// serial matches (`sandcrab_protocol::init::SCRATCH_DRIVE_ID`).
+pub const SCRATCH_LABEL: &str = "scratch";
 pub const ROOTFS_FILE: &str = "rootfs.ext4";
 pub const MANIFEST_FILE: &str = "manifest.json";
 const MIB: u64 = 1024 * 1024;
@@ -312,6 +314,8 @@ impl RootfsBuilder {
             uuid: uuid.clone(),
             size_bytes: image_size(content_bytes),
             inodes: inode_count(stats.entries),
+            journal: false,
+            root_owner: None,
         };
         let mut attempt = 0;
         loop {

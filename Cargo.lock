@@ -1214,6 +1214,7 @@ dependencies = [
  "chrono",
  "clap",
  "flate2",
+ "rustix",
  "sandcrab-core",
  "sandcrab-protocol",
  "serde",
@@ -1224,6 +1225,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "toml",
+ "tracing",
  "uuid",
 ]
 
