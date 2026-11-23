@@ -7,9 +7,9 @@ export { THREE };
 
 /** Sandcrab palette. Coral is reserved for the crab. */
 export const PALETTE = {
-  sand50: '#F5ECD9',
-  sand200: '#E8D5B0',
-  sandDeep: '#CDB083',
+  sand50: '#F6F5F0',  // landing copy: chalk-white shore (kit default #F5ECD9)
+  sand200: '#ECEAE2', // kit default #E8D5B0
+  sandDeep: '#C9C5B8', // kit default #CDB083
   teal500: '#1F7A8C',
   teal700: '#0F4C5C',
   ink: '#0B2F38',

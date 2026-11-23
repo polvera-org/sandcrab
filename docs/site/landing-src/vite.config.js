@@ -25,7 +25,8 @@ function inlineGlyphs() {
 export default defineConfig({
   base: './', // relative paths: the build can be served from any folder
   plugins: [inlineGlyphs()],
-  build: { target: 'es2022', assetsInlineLimit: 0, chunkSizeWarningLimit: 900 },
+  // Output goes straight to docs/site/landing/ (served from docs/site/ as ./landing/).
+  build: { outDir: '../landing', emptyOutDir: true, target: 'es2022', assetsInlineLimit: 0, chunkSizeWarningLimit: 900 },
   server: { host: '0.0.0.0', port: 5173, strictPort: true },
   preview: { host: '0.0.0.0', port: 5173, strictPort: true },
 });

@@ -15,7 +15,7 @@ function currentTheme() {
 function paintThemeButton() {
   const mode = currentTheme();
   themeBtn.dataset.mode = mode;
-  themeLabel.textContent = mode[0].toUpperCase() + mode.slice(1);
+  themeLabel.textContent = `Theme: ${mode}`;
   themeBtn.setAttribute(
     'aria-label',
     `Colour theme: ${mode === 'auto' ? 'auto (follows system)' : mode}. Click to switch to ${THEMES[(THEMES.indexOf(mode) + 1) % 3]}.`,
@@ -29,12 +29,6 @@ themeBtn.addEventListener('click', () => {
   paintThemeButton();
 });
 paintThemeButton();
-
-/* ── Sticky nav border once scrolled ── */
-const nav = document.querySelector('.nav');
-const onScroll = () => nav.classList.toggle('stuck', window.scrollY > 8);
-addEventListener('scroll', onScroll, { passive: true });
-onScroll();
 
 /* ── Copy buttons ── */
 document.querySelectorAll('.copy').forEach((btn) => {
@@ -56,15 +50,6 @@ document.querySelectorAll('.copy').forEach((btn) => {
     setTimeout(() => { btn.textContent = old; btn.classList.remove('done'); }, 1600);
   });
 });
-
-/* ── Scroll reveal ── */
-const revealEls = document.querySelectorAll('.section-head, .split-copy, .steps li, .mini, .wide-fig, .be, .guard, .toolset, .code, .term, .oss-points li, .notyet, .stats-block, .chooser, .table-wrap, .tools-art');
-if ('IntersectionObserver' in window && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
-  const io = new IntersectionObserver((entries) => {
-    for (const e of entries) if (e.isIntersecting) { e.target.classList.add('in'); io.unobserve(e.target); }
-  }, { rootMargin: '0px 0px -8% 0px', threshold: 0.05 });
-  revealEls.forEach((el) => { el.classList.add('reveal'); io.observe(el); });
-}
 
 /* ── 3D scenes (kit copied to ./kit, three.js vendored: no CDN) ──
    The kit is loaded lazily so the page paints first; each scene mounts when it nears the viewport.
@@ -93,11 +78,11 @@ async function mountStage(el) {
       // compute the zoom from the element's aspect ratio and fit the whole scene at every breakpoint.
       const def = SCENES.jar;
       const alt = 'A coral crab inside a transparent glass jar, a sandbox. The lid screws down to seal it, then lifts again.';
-      const view = { ...def.meta.view, target: [0.15, 1.05, 0], radius: 1.6 };
+      const view = { ...def.meta.view, target: [0.4, 1.05, 0], radius: 1.6 };
       const meta = { ...def.meta, alt, view };
       stage = createStage(el, { create: def.create, meta }, { fallbackBase, params: sceneOpts.jar.params });
       if (stage.webgl) {
-        const NEED_W = 4.4, NEED_H = 4.2; // world units that must stay visible (width, height)
+        const NEED_W = 5.3, NEED_H = 4.3; // includes the cast shadow to the right // world units that must stay visible (width, height)
         const fit = () => {
           const r = el.getBoundingClientRect();
           if (!r.height) return;
