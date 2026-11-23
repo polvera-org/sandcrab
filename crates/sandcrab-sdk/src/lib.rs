@@ -9,8 +9,9 @@ use sandcrab_core::{
     SandboxHandle, SandboxId, SandboxSpec,
 };
 use sandcrab_protocol::{
-    BashParams, FileEditParams, FileReadParams, FileWriteParams, GlobParams, GrepParams, ToolCall,
-    ToolDefinition, ToolOutput, tool_definitions,
+    BashParams, BashResult, FileEditParams, FileEditResult, FileReadParams, FileReadResult,
+    FileWriteParams, FileWriteResult, GlobParams, GlobResult, GrepParams, GrepResult, ToolCall,
+    ToolDefinition, ToolResult, tool_definitions,
 };
 
 /// Builder for configuring a [`Sandcrab`] manager instance.
@@ -120,12 +121,20 @@ impl Sandbox {
         tool_definitions()
     }
 
-    pub async fn call_tool(&self, call: ToolCall) -> Result<ToolOutput> {
+    pub async fn call_tool(&self, call: ToolCall) -> Result<ToolResult> {
         self.handle.call_tool(call).await
     }
 
-    pub async fn bash(&self, command: impl Into<String>) -> Result<ToolOutput> {
-        self.call_tool(ToolCall::Bash(BashParams {
+    /// Call a tool and extract its typed result.
+    async fn call_typed<R>(&self, call: ToolCall) -> Result<R>
+    where
+        R: TryFrom<ToolResult, Error = sandcrab_protocol::ProtocolError>,
+    {
+        Ok(R::try_from(self.call_tool(call).await?)?)
+    }
+
+    pub async fn bash(&self, command: impl Into<String>) -> Result<BashResult> {
+        self.call_typed(ToolCall::Bash(BashParams {
             command: command.into(),
             cwd: None,
             env: Default::default(),
@@ -134,8 +143,8 @@ impl Sandbox {
         .await
     }
 
-    pub async fn file_read(&self, path: impl Into<String>) -> Result<ToolOutput> {
-        self.call_tool(ToolCall::FileRead(FileReadParams {
+    pub async fn file_read(&self, path: impl Into<String>) -> Result<FileReadResult> {
+        self.call_typed(ToolCall::FileRead(FileReadParams {
             path: path.into(),
             offset: None,
             limit: None,
@@ -147,8 +156,8 @@ impl Sandbox {
         &self,
         path: impl Into<String>,
         content: impl Into<String>,
-    ) -> Result<ToolOutput> {
-        self.call_tool(ToolCall::FileWrite(FileWriteParams {
+    ) -> Result<FileWriteResult> {
+        self.call_typed(ToolCall::FileWrite(FileWriteParams {
             path: path.into(),
             content: content.into(),
             append: false,
@@ -161,8 +170,8 @@ impl Sandbox {
         path: impl Into<String>,
         old_string: impl Into<String>,
         new_string: impl Into<String>,
-    ) -> Result<ToolOutput> {
-        self.call_tool(ToolCall::FileEdit(FileEditParams {
+    ) -> Result<FileEditResult> {
+        self.call_typed(ToolCall::FileEdit(FileEditParams {
             path: path.into(),
             old_string: old_string.into(),
             new_string: new_string.into(),
@@ -171,8 +180,8 @@ impl Sandbox {
         .await
     }
 
-    pub async fn glob(&self, pattern: impl Into<String>) -> Result<ToolOutput> {
-        self.call_tool(ToolCall::Glob(GlobParams {
+    pub async fn glob(&self, pattern: impl Into<String>) -> Result<GlobResult> {
+        self.call_typed(ToolCall::Glob(GlobParams {
             pattern: pattern.into(),
             root: None,
             respect_gitignore: true,
@@ -180,11 +189,12 @@ impl Sandbox {
         .await
     }
 
-    pub async fn grep(&self, pattern: impl Into<String>) -> Result<ToolOutput> {
-        self.call_tool(ToolCall::Grep(GrepParams {
+    pub async fn grep(&self, pattern: impl Into<String>) -> Result<GrepResult> {
+        self.call_typed(ToolCall::Grep(GrepParams {
             pattern: pattern.into(),
             root: None,
             glob: None,
+            literal: false,
             case_insensitive: false,
             context_lines: None,
         }))

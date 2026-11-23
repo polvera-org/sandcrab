@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use async_trait::async_trait;
-use sandcrab_protocol::{ToolCall, ToolOutput};
+use sandcrab_protocol::{ToolCall, ToolResult};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -94,6 +94,6 @@ pub struct SandboxSpec {
 #[async_trait]
 pub trait SandboxHandle: Send + Sync {
     fn id(&self) -> SandboxId;
-    async fn call_tool(&self, call: ToolCall) -> Result<ToolOutput>;
+    async fn call_tool(&self, call: ToolCall) -> Result<ToolResult>;
     async fn destroy(self: Box<Self>) -> Result<()>;
 }
