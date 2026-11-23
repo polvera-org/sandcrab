@@ -39,6 +39,7 @@
 
 mod error;
 mod framing;
+pub mod init;
 mod params;
 mod results;
 mod rpc;
