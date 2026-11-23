@@ -14,11 +14,14 @@
 //! microVM backends use. There is no `docker exec` anywhere.
 //!
 //! Requirements / limitations:
+//! - Templates must be pinned (`sha256` in `sandcrab.toml`) unless
+//!   [`DockerDevConfig::allow_unpinned_images`] is set.
 //! - Linux host with a local, rootful Docker daemon (bind mounts use host paths; Unix
 //!   sockets do not cross Docker Desktop's VM file sharing, and rootless Docker remaps
 //!   uids so the socket / workspace ownership model breaks).
 //! - `egress_restricted` networking is refused (`PolicyUnenforceable`), never downgraded.
-//! - Template `disk_mb` is not enforced; the container root filesystem is writable.
+//! - Template `disk_mb` is **not enforced** ([`DockerDevBackend::enforces_disk_limit`] is
+//!   `false`; every spawn logs a warning); the container root filesystem is writable.
 //! - A spawn future cancelled mid-create can leak a labeled container; see
 //!   [`DockerDevBackend::reap_orphans`].
 
@@ -27,9 +30,9 @@ mod config;
 mod reap;
 pub mod spec;
 
-pub use backend::{DockerDevBackend, DockerImageVerifier};
+pub use backend::{DISK_LIMIT_WARN_TARGET, DockerDevBackend, DockerImageVerifier};
 pub use config::{
     CRABD_ENV, DockerDevConfig, DockerLimits, check_static_crabd, default_crabd_path,
     default_state_dir,
 };
-pub use reap::{ReapReport, ReapedContainer};
+pub use reap::{Owner, ReapReport, ReapScope, ReapedContainer, boot_id, state_dir_key};

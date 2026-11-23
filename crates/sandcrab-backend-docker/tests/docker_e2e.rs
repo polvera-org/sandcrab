@@ -8,7 +8,7 @@
 //!
 //! `crabd` comes from `$SANDCRAB_CRABD`, else `target/<arch>-unknown-linux-musl/release/
 //! crabd`, which is built with `scripts/build-crabd.sh` on first use if missing.
-//! Tests are serialized (one global lock) because orphan reaping is host-wide.
+//! Tests are serialized (one global lock): orphan reaping lists every managed container.
 
 use std::collections::{HashMap, HashSet};
 use std::os::unix::fs::MetadataExt;
@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use bollard::Docker;
 use bollard::query_parameters::ListContainersOptionsBuilder;
 use sandcrab_backend_docker::spec::container_name;
-use sandcrab_backend_docker::{CRABD_ENV, DockerDevBackend, DockerDevConfig};
+use sandcrab_backend_docker::{CRABD_ENV, DockerDevBackend, DockerDevConfig, ReapScope};
 use sandcrab_core::{
     LifecycleTimings, ManagerConfig, MountMode, NetworkConfig, ResolvedSpec, RuntimeBackend,
     Sandbox, SandboxConfig, SandboxError, SandboxId, SandboxManager, TemplateRegistry,
@@ -392,6 +392,16 @@ fn resolved_spec(env: &Env, template: &str) -> ResolvedSpec {
     }
 }
 
+async fn container_labels(name: &str) -> HashMap<String, String> {
+    docker()
+        .inspect_container(name, None)
+        .await
+        .unwrap()
+        .config
+        .and_then(|c| c.labels)
+        .unwrap_or_default()
+}
+
 async fn managed_ids() -> HashSet<SandboxId> {
     let filters = HashMap::from([("label", vec!["sandcrab.managed=true".to_owned()])]);
     docker()
@@ -452,16 +462,53 @@ async fn reap_orphans_removes_only_untracked_managed_containers() {
         String::from_utf8_lossy(&st.stderr)
     );
 
-    let report = env.backend.reap_orphans(&tracked).await.unwrap();
+    // An orphan of another state dir (another sandcrab home) is not ours to reap.
+    let other = self::env();
+    let foreign_spec = resolved_spec(&other, "base");
+    let foreign_id = foreign_spec.id;
+    drop(other.backend.spawn(&foreign_spec).await.unwrap());
+    let labels = container_labels(&container_name(foreign_id)).await;
+    assert_eq!(
+        labels["sandcrab.owner_pid"],
+        std::process::id().to_string(),
+        "{labels:?}"
+    );
+    assert_eq!(
+        labels["sandcrab.state_dir"],
+        sandcrab_backend_docker::state_dir_key(&other.state_dir())
+    );
+
+    let report = env
+        .backend
+        .reap_orphans(&tracked, ReapScope::Owned)
+        .await
+        .unwrap();
     let reaped: Vec<_> = report
         .containers
         .iter()
         .filter_map(|c| c.sandbox_id)
         .collect();
     assert_eq!(reaped, [orphan_id], "{report:?}");
+    assert!(report.kept >= 1, "{report:?}");
     assert_gone(&env, orphan_id).await;
     assert!(container_exists(&container_name(kept.id())).await);
+    assert!(container_exists(&container_name(foreign_id)).await);
     assert!(container_exists(&bystander).await);
+
+    // Its own backend (same state dir) reaps it.
+    let report = other
+        .backend
+        .reap_orphans(&tracked, ReapScope::Owned)
+        .await
+        .unwrap();
+    assert!(
+        report
+            .containers
+            .iter()
+            .any(|c| c.sandbox_id == Some(foreign_id)),
+        "{report:?}"
+    );
+    assert_gone(&other, foreign_id).await;
 
     Command::new("docker")
         .args(["rm", "-f", &bystander])

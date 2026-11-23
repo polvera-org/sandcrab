@@ -19,25 +19,40 @@ use crate::tools::ToolOutcome;
 use crate::transcript::Transcript;
 use crate::ui::Ui;
 
-/// Ctrl-C counter. Cloneable; each press increments it.
+/// Signal state shared by the session. Cloneable.
+///
+/// - Ctrl-C (SIGINT) increments a counter: it interrupts the current turn, the session
+///   goes on (REPL) or ends with 130 (one-shot).
+/// - SIGTERM / SIGHUP / SIGQUIT are **terminating**: the first one is recorded and the
+///   session must destroy its sandbox and exit `128 + signal` (see [`Self::terminated`]).
 #[derive(Debug, Clone)]
 pub struct Interrupt {
     tx: Arc<watch::Sender<u64>>,
     rx: watch::Receiver<u64>,
+    term_tx: Arc<watch::Sender<Option<i32>>>,
+    term_rx: watch::Receiver<Option<i32>>,
 }
 
 impl Default for Interrupt {
     fn default() -> Self {
         let (tx, rx) = watch::channel(0);
+        let (term_tx, term_rx) = watch::channel(None);
         Self {
             tx: Arc::new(tx),
             rx,
+            term_tx: Arc::new(term_tx),
+            term_rx,
         }
     }
 }
 
+/// SIGTERM, SIGHUP, SIGQUIT.
+#[cfg(unix)]
+pub const TERMINATING_SIGNALS: [i32; 3] = [15, 1, 3];
+
 impl Interrupt {
-    /// Route SIGINT to this counter (the process is no longer killed by Ctrl-C).
+    /// Route SIGINT to the counter and SIGTERM / SIGHUP / SIGQUIT to the termination latch
+    /// (none of them kills the process any more).
     #[must_use]
     pub fn install() -> Self {
         let me = Self::default();
@@ -47,6 +62,23 @@ impl Interrupt {
                 tx.send_modify(|n| *n += 1);
             }
         });
+        #[cfg(unix)]
+        for sig in TERMINATING_SIGNALS {
+            use tokio::signal::unix::{SignalKind, signal};
+            match signal(SignalKind::from_raw(sig)) {
+                Ok(mut stream) => {
+                    let me = me.clone();
+                    tokio::spawn(async move {
+                        while stream.recv().await.is_some() {
+                            me.terminate(sig);
+                        }
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(signal = sig, error = %e, "cannot install signal handler");
+                }
+            }
+        }
         me
     }
 
@@ -55,15 +87,39 @@ impl Interrupt {
         self.tx.send_modify(|n| *n += 1);
     }
 
+    /// Latch a terminating signal (the first one wins) and interrupt the current turn.
+    pub fn terminate(&self, sig: i32) {
+        self.term_tx
+            .send_if_modified(|v| v.is_none() && v.replace(sig).is_none());
+        self.trigger();
+    }
+
     #[must_use]
     pub fn count(&self) -> u64 {
         *self.rx.borrow()
+    }
+
+    /// The terminating signal received, if any.
+    #[must_use]
+    pub fn termination(&self) -> Option<i32> {
+        *self.term_rx.borrow()
     }
 
     /// Resolves once the counter exceeds `base`.
     pub async fn beyond(&self, base: u64) {
         let mut rx = self.rx.clone();
         let _ = rx.wait_for(|n| *n > base).await;
+    }
+
+    /// Resolves with the signal number once a terminating signal was received.
+    pub async fn terminated(&self) -> i32 {
+        let mut rx = self.term_rx.clone();
+        let sig = rx.wait_for(Option::is_some).await.ok().and_then(|v| *v);
+        match sig {
+            Some(s) => s,
+            // Sender gone (cannot happen while `self` holds it): never resolve.
+            None => std::future::pending().await,
+        }
     }
 }
 
@@ -487,5 +543,19 @@ mod tests {
         i.trigger();
         h.await.unwrap();
         assert_eq!(i.count(), 1);
+    }
+
+    #[tokio::test]
+    async fn termination_latch_keeps_the_first_signal() {
+        let i = Interrupt::default();
+        assert_eq!(i.termination(), None);
+        let c = i.clone();
+        let h = tokio::spawn(async move { c.terminated().await });
+        i.terminate(15);
+        i.terminate(1);
+        assert_eq!(h.await.unwrap(), 15);
+        assert_eq!(i.termination(), Some(15));
+        // A terminating signal also interrupts the running turn.
+        assert_eq!(i.count(), 2);
     }
 }

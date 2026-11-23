@@ -5,8 +5,9 @@
 //! cargo test -p sandcrab-agent --test docker_e2e -- --ignored
 //! ```
 //!
-//! Env: `SANDCRAB_CRABD` (default `<repo>/target/<arch>-unknown-linux-musl/release/crabd`),
-//! `CRABAGENT_E2E_TEMPLATE` (default `base`).
+//! Env: `SANDCRAB_CRABD` (default `<target dir>/<arch>-unknown-linux-musl/release/crabd`,
+//! target dir = `$CARGO_TARGET_DIR`, else `<repo>/target`), `CRABAGENT_E2E_TEMPLATE`
+//! (default `base`).
 #![cfg(feature = "docker")]
 
 use std::path::PathBuf;
@@ -22,16 +23,23 @@ fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
+/// `$SANDCRAB_CRABD`, else `<target dir>/<arch>-unknown-linux-musl/release/crabd` where the
+/// target dir is `$CARGO_TARGET_DIR` (relative to the repo root) or `<repo>/target`.
+fn crabd_path() -> PathBuf {
+    if let Some(p) = std::env::var_os("SANDCRAB_CRABD").filter(|v| !v.is_empty()) {
+        return PathBuf::from(p);
+    }
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .filter(|v| !v.is_empty())
+        .map_or_else(|| repo_root().join("target"), |d| repo_root().join(d));
+    target.join(format!(
+        "{}-unknown-linux-musl/release/crabd",
+        std::env::consts::ARCH
+    ))
+}
+
 fn sandcrab(state: &std::path::Path) -> Sandcrab {
-    let crabd = std::env::var_os("SANDCRAB_CRABD").map_or_else(
-        || {
-            repo_root().join(format!(
-                "target/{}-unknown-linux-musl/release/crabd",
-                std::env::consts::ARCH
-            ))
-        },
-        PathBuf::from,
-    );
+    let crabd = crabd_path();
     assert!(crabd.is_file(), "crabd not found at {}", crabd.display());
     Sandcrab::builder()
         .state_dir(state)

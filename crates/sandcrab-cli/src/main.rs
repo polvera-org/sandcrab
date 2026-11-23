@@ -1,7 +1,8 @@
 //! `sandcrab` — operator & developer CLI for Sandcrab.
 //!
-//! Exit codes: `run` exits with the sandboxed command's code (`128 + signal` if killed,
-//! `130` on Ctrl-C); other commands exit `0` on success, `1` on error (`doctor`: any failed
+//! Exit codes: `run` exits with the sandboxed command's code (`128 + signal` if killed);
+//! if `sandcrab` itself gets SIGINT / SIGTERM / SIGHUP / SIGQUIT, `run` and `tool` destroy
+//! the sandbox first and exit `128 + signal` (130 on Ctrl-C); other commands exit `0` on success, `1` on error (`doctor`: any failed
 //! check), `2` on usage errors.
 
 mod args;
@@ -59,6 +60,11 @@ pub struct Global {
     #[arg(long, global = true)]
     pub allow_insecure: bool,
 
+    /// docker backend: run template images that have no `sha256` pin in sandcrab.toml
+    /// (refused by default; pin with `templates/build.sh --pin <name>`).
+    #[arg(long, global = true)]
+    pub allow_unpinned: bool,
+
     /// Host path of the static musl `crabd` (default: $SANDCRAB_CRABD, else
     /// target/<arch>-unknown-linux-musl/release/crabd).
     #[arg(long, global = true)]
@@ -78,11 +84,21 @@ pub enum Commands {
     /// Check the host: crabd, Docker, template images + pins, Firecracker prerequisites
     /// (/dev/kvm, pinned artifacts, rootfs cache, tap pool), state dir.
     Doctor {
-        /// Remove orphaned sandcrab containers (host-wide: also those of other running
-        /// sandcrab processes) and Firecracker run dirs of dead sandcrab processes, download
-        /// + verify the pinned Firecracker kernel and binary, tighten state dir permissions.
+        /// Remove orphaned sandcrab containers — only this user's, for this state dir, whose
+        /// sandcrab process is gone — and Firecracker run dirs of dead sandcrab processes,
+        /// download + verify the pinned Firecracker kernel and binary, tighten state dir
+        /// permissions.
         #[arg(long)]
         fix: bool,
+
+        /// With --fix: remove EVERY sandcrab docker container on the host, including live
+        /// sandboxes of other processes and users (asks for confirmation).
+        #[arg(long, requires = "fix")]
+        all: bool,
+
+        /// With --all: skip the confirmation prompt.
+        #[arg(long, short = 'y', requires = "all")]
+        yes: bool,
     },
 
     /// Manage persistent workspaces.
@@ -149,8 +165,9 @@ pub enum ToolsCmd {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    // The per-spawn "disk_mb not enforced" warning is part of our own insecure-backend line.
     let filter = match cli.global.verbose {
-        0 | 1 => "warn",
+        0 | 1 => "warn,sandcrab_backend_docker::disk_limit=off",
         2 => "info,sandcrab=debug",
         _ => "debug",
     };
@@ -184,7 +201,14 @@ fn main() -> ExitCode {
 async fn dispatch(cli: Cli) -> anyhow::Result<u8> {
     let g = &cli.global;
     match cli.command {
-        Commands::Doctor { fix } => doctor::doctor(g, fix).await,
+        Commands::Doctor { fix, all, yes } => {
+            let reap = match (fix, all) {
+                (false, _) => doctor::Reap::None,
+                (true, false) => doctor::Reap::Owned,
+                (true, true) => doctor::Reap::All { confirmed: yes },
+            };
+            doctor::doctor(g, fix, reap).await
+        }
         Commands::Workspace { action } => workspace::workspace(g, action),
         Commands::Template { action } => workspace::template(g, action),
         #[cfg(all(feature = "firecracker", target_os = "linux"))]

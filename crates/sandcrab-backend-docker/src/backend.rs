@@ -39,6 +39,10 @@ pub(crate) fn backend_err(context: &str, err: impl std::fmt::Display) -> Sandbox
     }
 }
 
+/// `tracing` target of the per-spawn "disk_mb is not enforced" warning, so front ends that
+/// already print it can filter it out.
+pub const DISK_LIMIT_WARN_TARGET: &str = "sandcrab_backend_docker::disk_limit";
+
 pub(crate) fn status_code(err: &DockerError) -> Option<u16> {
     match err {
         DockerError::DockerResponseServerError { status_code, .. } => Some(*status_code),
@@ -107,6 +111,15 @@ impl DockerDevBackend {
         &self.crabd
     }
 
+    /// Template `disk_mb` is never enforced by this backend (overlay2 size limits need an
+    /// xfs + pquota backing filesystem): the container root filesystem is unbounded. Callers
+    /// should surface this; [`RuntimeBackend::spawn`] also logs it (target
+    /// [`DISK_LIMIT_WARN_TARGET`]).
+    #[must_use]
+    pub fn enforces_disk_limit(&self) -> bool {
+        false
+    }
+
     /// Check the daemon is reachable; returns its version string.
     pub async fn ping(&self) -> Result<String> {
         let v = self
@@ -150,17 +163,23 @@ impl DockerDevBackend {
                 },
                 other => other,
             })?;
-        Ok(match status {
-            PinStatus::Verified { digest } => digest,
-            PinStatus::Unpinned { digest } => {
+        match status {
+            PinStatus::Verified { digest } => Ok(digest),
+            PinStatus::Unpinned { digest } if self.config.allow_unpinned_images => {
                 tracing::warn!(
                     template = %manifest.template.name,
                     %digest,
-                    "template image is not pinned (no sha256 in sandcrab.toml)"
+                    "running an unpinned template image (no sha256 in sandcrab.toml); \
+                     allowed by DockerDevConfig::allow_unpinned_images"
                 );
-                digest
+                Ok(digest)
             }
-        })
+            PinStatus::Unpinned { digest } => Err(unpinned_image(
+                &manifest.template.name,
+                manifest.image(),
+                &digest,
+            )),
+        }
     }
 
     /// Create `<state_dir>/<id>/` (0700; 0777 when the container runs as another uid so
@@ -212,6 +231,7 @@ impl DockerDevBackend {
                 image: image_id,
                 host_user: self.host_user,
                 limits: &self.config.limits,
+                owner: &self.owner(),
             },
         )?;
         let timings = &spec.timings;
@@ -274,6 +294,15 @@ impl DockerDevBackend {
     }
 }
 
+/// Spawn refusal for a template without a `sha256` pin (`UnpinnedImage`).
+pub(crate) fn unpinned_image(template: &str, image: &str, digest: &str) -> SandboxError {
+    SandboxError::Template(format!(
+        "UnpinnedImage: template `{template}` image `{image}` (local {digest}) has no `sha256` \
+         pin in sandcrab.toml; pin it with `templates/build.sh --pin {template}`, or opt out \
+         with `--allow-unpinned` (DockerDevConfig::allow_unpinned_images)"
+    ))
+}
+
 fn io_at(path: &Path, err: io::Error) -> SandboxError {
     SandboxError::Io(io::Error::new(
         err.kind(),
@@ -309,6 +338,14 @@ impl RuntimeBackend for DockerDevBackend {
         network_mode(&spec.network)?;
         let image_id = self.verify_image(spec).await?;
         spec.timings.mark_custom("image_verified");
+        if !self.enforces_disk_limit() {
+            tracing::warn!(
+                target: DISK_LIMIT_WARN_TARGET,
+                template = %spec.template.name(),
+                disk_mb = spec.resources.disk_mb,
+                "docker-dev does not enforce the template's disk_mb limit"
+            );
+        }
 
         let socket_dir = self.prepare_socket_dir(spec)?;
         let name = container_name(spec.id);
@@ -504,6 +541,14 @@ mod tests {
             matches!(err, SandboxError::InsecureBackendRejected(_)),
             "{err}"
         );
+    }
+
+    #[test]
+    fn unpinned_image_error_names_the_fix() {
+        let e = unpinned_image("base", "sandcrab/base:0.1.0", "sha256:abc").to_string();
+        assert!(e.contains("UnpinnedImage"), "{e}");
+        assert!(e.contains("templates/build.sh --pin base"), "{e}");
+        assert!(e.contains("--allow-unpinned"), "{e}");
     }
 
     #[test]

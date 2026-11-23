@@ -312,6 +312,56 @@ fn rootfs_commands_parse() {
     assert_eq!(v, Value::Array(vec![]));
 }
 
+/// A template without a `sha256` pin is refused by default; `--allow-unpinned` opts out.
+#[test]
+#[ignore = "needs Docker, sandcrab/base:0.1.0 and a static crabd"]
+fn docker_unpinned_template_is_refused_by_default() {
+    let cli = Cli::new(true);
+    let dir = cli.state.path().join("tpl/unpinned");
+    std::fs::create_dir_all(&dir).unwrap();
+    let base = std::fs::read_to_string(root().join("templates/base/sandcrab.toml")).unwrap();
+    let manifest: String = base
+        .lines()
+        .filter(|l| !l.starts_with("sha256"))
+        .map(|l| {
+            if l.starts_with("name = ") {
+                "name = \"unpinned\"\n".to_owned()
+            } else {
+                format!("{l}\n")
+            }
+        })
+        .collect();
+    std::fs::write(dir.join("sandcrab.toml"), manifest).unwrap();
+    let tpl = cli.state.path().join("tpl");
+    let tpl = tpl.to_str().unwrap();
+
+    let out = cli.run(&[
+        "--templates-dir",
+        tpl,
+        "run",
+        "-t",
+        "unpinned",
+        "--",
+        "true",
+    ]);
+    assert_eq!(out.status.code(), Some(1));
+    let err = stderr(&out);
+    assert!(err.contains("UnpinnedImage"), "{err}");
+    assert!(err.contains("templates/build.sh --pin unpinned"), "{err}");
+
+    let out = cli.run(&[
+        "--templates-dir",
+        tpl,
+        "--allow-unpinned",
+        "run",
+        "-t",
+        "unpinned",
+        "--",
+        "true",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+}
+
 #[test]
 #[ignore = "needs Docker, sandcrab/base:0.1.0 and a static crabd"]
 fn docker_smoke_run_and_tool() {
@@ -344,6 +394,8 @@ fn docker_smoke_run_and_tool() {
     );
     let err = stderr(&out);
     assert!(err.contains("shares the host kernel"), "{err}");
+    assert!(err.contains("disk_mb is not enforced"), "{err}");
+    assert_eq!(err.matches("disk_mb").count(), 1, "warned twice: {err}");
     assert!(
         err.contains("ready in") && err.contains("teardown"),
         "{err}"
@@ -426,4 +478,151 @@ fn docker_doctor() {
     assert_eq!(status("docker").as_deref(), Some("ok"));
     assert!(status("template:base").is_some());
     assert!(status("firecracker").is_some());
+}
+
+/// Containers (running or not) labeled with `sandcrab.sandbox_id=<id>`.
+fn containers_of(sandbox_id: &str) -> usize {
+    let out = Command::new("docker")
+        .args([
+            "ps",
+            "-aq",
+            "--filter",
+            &format!("label=sandcrab.sandbox_id={sandbox_id}"),
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "docker ps failed");
+    String::from_utf8_lossy(&out.stdout).lines().count()
+}
+
+/// Start `sandcrab -v run -- sleep 100` in the background; returns it once its sandbox is
+/// up, with the sandbox id.
+fn spawn_sleeper(cli: &Cli) -> (std::process::Child, String) {
+    use std::io::{BufRead, BufReader};
+
+    let mut child = cli
+        .cmd(&["-v", "run", "--", "sleep", "100"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let stderr = child.stderr.take().unwrap();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            eprintln!("  stderr: {line}");
+            // "sandcrab: sandbox <id> (docker-dev, base) ready in N ms"
+            if let Some(rest) = line.strip_prefix("sandcrab: sandbox ")
+                && line.contains("ready in")
+            {
+                let _ = tx.send(rest.split_whitespace().next().unwrap_or("").to_owned());
+            }
+        }
+    });
+    let id = rx
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("sandbox did not come up");
+    assert_eq!(containers_of(&id), 1, "sandbox {id} container not found");
+    // Let the command start inside the sandbox.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    (child, id)
+}
+
+fn kill(sig: &str, child: &std::process::Child) {
+    let st = Command::new("kill")
+        .args([&format!("-{sig}"), &child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(st.success());
+}
+
+/// `sandcrab -v run -- sleep 100`, then `kill -<sig>` once the sandbox is up: the sandbox
+/// must be destroyed and `sandcrab` must exit `128 + signal`.
+fn signal_tears_down(sig: &str, num: i32) {
+    let cli = Cli::new(true);
+    let (mut child, id) = spawn_sleeper(&cli);
+    kill(sig, &child);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let status = loop {
+        if let Some(s) = child.try_wait().unwrap() {
+            break s;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "sandcrab did not exit after SIG{sig}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    assert_eq!(status.code(), Some(128 + num), "SIG{sig}: {status:?}");
+    assert_eq!(
+        containers_of(&id),
+        0,
+        "SIG{sig} leaked the container of sandbox {id}"
+    );
+}
+
+/// `doctor --fix` must not touch a live sandbox of another sandcrab process (same user,
+/// same or other state dir), and must reap it once that process is gone (SIGKILL: no
+/// cleanup ran).
+#[test]
+#[ignore = "needs Docker, sandcrab/base:0.1.0 and a static crabd"]
+fn docker_doctor_fix_spares_live_sandboxes_of_other_processes() {
+    let cli = Cli::new(true);
+    let other_home = Cli::new(true);
+    let (mut child, id) = spawn_sleeper(&cli);
+
+    cli.run(&["doctor", "--fix"]);
+    assert_eq!(containers_of(&id), 1, "doctor --fix reaped a live sandbox");
+    other_home.run(&["doctor", "--fix"]);
+    assert_eq!(
+        containers_of(&id),
+        1,
+        "doctor --fix of another state dir reaped it"
+    );
+    // --all without confirmation (no terminal, no --yes) removes nothing.
+    let out = other_home.run(&["doctor", "--fix", "--all"]);
+    assert!(stderr(&out).contains("WARNING"), "{}", stderr(&out));
+    assert_eq!(containers_of(&id), 1, "unconfirmed --all reaped it");
+
+    kill("KILL", &child);
+    child.wait().unwrap();
+    assert_eq!(
+        containers_of(&id),
+        1,
+        "expected a leaked container after SIGKILL"
+    );
+    other_home.run(&["doctor", "--fix"]);
+    assert_eq!(containers_of(&id), 1, "another state dir reaped our orphan");
+    cli.run(&["doctor", "--fix"]);
+    assert_eq!(containers_of(&id), 0, "orphan of a dead process not reaped");
+}
+
+#[test]
+fn doctor_all_requires_fix() {
+    let cli = Cli::new(false);
+    assert_eq!(cli.run(&["doctor", "--all"]).status.code(), Some(2));
+    assert_eq!(
+        cli.run(&["doctor", "--fix", "--yes"]).status.code(),
+        Some(2)
+    );
+}
+
+#[test]
+#[ignore = "needs Docker, sandcrab/base:0.1.0 and a static crabd"]
+fn docker_run_sigterm_destroys_the_sandbox() {
+    signal_tears_down("TERM", 15);
+}
+
+#[test]
+#[ignore = "needs Docker, sandcrab/base:0.1.0 and a static crabd"]
+fn docker_run_sighup_destroys_the_sandbox() {
+    signal_tears_down("HUP", 1);
+}
+
+#[test]
+#[ignore = "needs Docker, sandcrab/base:0.1.0 and a static crabd"]
+fn docker_run_sigquit_destroys_the_sandbox() {
+    signal_tears_down("QUIT", 3);
 }
