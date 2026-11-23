@@ -11,10 +11,13 @@
 //! - [`context`] — [`ToolContext`] shared by every tool call (default cwd, limits, processes).
 //! - [`tools`] — [`tools::dispatch`] plus one module per tool family.
 
+pub mod codec;
 pub mod context;
+pub mod server;
 pub mod tools;
 
 pub use context::{Limits, ToolContext};
+pub use server::{ListenAddr, Server, ServerConfig};
 
 /// `crabd` build version reported by `hello`.
 pub const CRABD_VERSION: &str = env!("CARGO_PKG_VERSION");
