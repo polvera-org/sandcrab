@@ -11,6 +11,7 @@
 //! The `RuntimeBackend` implementation itself (API client, vsock transport, VM lifecycle,
 //! `BackendCapabilities`) lands in flow step `fc-backend`; see `docs/design/firecracker-backend.md`.
 
+pub mod artifacts;
 mod error;
 pub mod hash;
 pub mod rootfs;

@@ -40,14 +40,19 @@ the CI artifact bucket (`s3://spec.ccfc.min/firecracker-ci/v1.18/<arch>/vmlinux-
 `scripts/fetch-kernel.sh` and pinned in a repo-tracked `artifacts.lock.toml`:
 
 ```toml
+# Pinned 2026-11-23 (rootfs-pipeline step). Source of truth: crates/sandcrab-backend-firecracker/src/artifacts.rs
+# NOTE: the firecracker-ci/v1.18/ prefix is empty; CI artifacts now live under dated prefixes
+# (firecracker-ci/<YYYYMMDD>-<sha>-0/), so the kernel is pinned from the newest one at pin time.
 [kernel.x86_64]
-version = "6.18.39"
-url     = "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.18/x86_64/vmlinux-6.18.39"
-sha256  = "<filled by fetch-kernel.sh --pin>"
+version = "6.18.62"
+url     = "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/20261118-6d7cfa9c6b53-0/x86_64/vmlinux-6.18.62"
+sha256  = "6b2871bb1e035259a58d1b920fd8951e580125fda17825347bd475911fd2d069"
 [firecracker.x86_64]
 version = "1.18.0"
 url     = "https://github.com/firecracker-microvm/firecracker/releases/download/v1.18.0/firecracker-v1.18.0-x86_64.tgz"
-sha256  = "<…>"
+sha256  = "1ac8eec866dd5eea14efecf6323e22b23eea24054545338a5b34bc5bca6623cd"  # == upstream .tgz.sha256.txt
+firecracker_sha256 = "b33f46cd6d88834cf6a4f8d184f08f219809c636236bffd286d233a60602a2ba"  # release-v1.18.0-x86_64/firecracker-v1.18.0-x86_64
+jailer_sha256      = "ddadbaa15b5c942271a83b7040ca7259c8ccf92a9e08d44cce0b86fa407ba460"  # release-v1.18.0-x86_64/jailer-v1.18.0-x86_64
 ```
 
 Rationale:
