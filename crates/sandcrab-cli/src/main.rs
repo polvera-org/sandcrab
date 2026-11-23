@@ -6,6 +6,7 @@
 
 mod args;
 mod doctor;
+mod run;
 mod util;
 mod workspace;
 
@@ -14,7 +15,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
-use crate::args::{BackendArg, parse_backend};
+use crate::args::{BackendArg, SpawnArgs, parse_backend};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -89,6 +90,36 @@ pub enum Commands {
         action: workspace::TemplateCmd,
     },
 
+    /// Spawn a sandbox, run a command, print its output, destroy the sandbox.
+    ///
+    /// One trailing argument is run as a shell script (`-- 'ls | wc -l'`); several are
+    /// quoted as an argv (`-- bash -c 'exit 3'`). Exits with the command's exit code.
+    Run {
+        #[command(flatten)]
+        spawn: SpawnArgs,
+
+        /// After the command finishes, keep the sandbox (and its published ports) alive
+        /// until Ctrl-C, then destroy it.
+        #[arg(long)]
+        keep: bool,
+
+        /// Command to run (after `--`).
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
+
+    /// Spawn a sandbox, make one tool call, print the JSON result, destroy the sandbox.
+    Tool {
+        #[command(flatten)]
+        spawn: SpawnArgs,
+
+        /// Tool name (see `sandcrab tools schema`).
+        name: String,
+
+        /// JSON params object (`-` reads stdin). Default `{}`.
+        params: Option<String>,
+    },
+
     /// Tool catalog.
     Tools {
         #[command(subcommand)]
@@ -142,6 +173,16 @@ async fn dispatch(cli: Cli) -> anyhow::Result<u8> {
         Commands::Doctor { fix } => doctor::doctor(g, fix).await,
         Commands::Workspace { action } => workspace::workspace(g, action),
         Commands::Template { action } => workspace::template(g, action),
+        Commands::Run {
+            spawn,
+            keep,
+            command,
+        } => run::run(g, &spawn, keep, &command).await,
+        Commands::Tool {
+            spawn,
+            name,
+            params,
+        } => run::tool(g, &spawn, &name, params.as_deref()).await,
         Commands::Tools {
             action: ToolsCmd::Schema,
         } => {
