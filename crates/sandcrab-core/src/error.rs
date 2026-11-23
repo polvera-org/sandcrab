@@ -36,6 +36,15 @@ pub enum SandboxError {
     #[error("path escapes workspace root: {0}")]
     PathEscape(String),
 
+    /// A workspace's root directory is no longer the one registered: a path component is
+    /// now a symlink, it is missing, or its `(dev, ino)` changed. Never re-resolved.
+    #[error("workspace root changed: {0}")]
+    WorkspaceRootChanged(String),
+
+    /// A read exceeded its size limit.
+    #[error("too large: {0}")]
+    TooLarge(String),
+
     /// The workspace is leased read-write by a running sandbox, or is in a dirty session.
     #[error("workspace busy: {0}")]
     WorkspaceBusy(String),
@@ -99,6 +108,8 @@ impl Clone for SandboxError {
             Self::Workspace(s) => Self::Workspace(s.clone()),
             Self::PathEscape(s) => Self::PathEscape(s.clone()),
             Self::WorkspaceBusy(s) => Self::WorkspaceBusy(s.clone()),
+            Self::WorkspaceRootChanged(s) => Self::WorkspaceRootChanged(s.clone()),
+            Self::TooLarge(s) => Self::TooLarge(s.clone()),
             Self::Backend { backend, message } => Self::Backend {
                 backend: backend.clone(),
                 message: message.clone(),

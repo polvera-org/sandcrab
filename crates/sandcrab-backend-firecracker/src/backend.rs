@@ -236,6 +236,14 @@ impl FirecrackerBackend {
         for (n, m) in spec.mounts.iter().enumerate() {
             let drive_id = format!("ws{n}");
             let read_only = m.mode == MountMode::ReadOnly;
+            // Re-check the leased root (symlink-free, same dev/ino) right before packing it.
+            if m.backing.is_dir() {
+                sandcrab_core::verify_workspace_root(
+                    &m.workspace_name,
+                    &m.host_path,
+                    m.root_identity,
+                )?;
+            }
             let image = match &m.backing {
                 WorkspaceBacking::BlockVolume(_) => m.host_path.clone(),
                 _ if read_only => {
@@ -285,6 +293,7 @@ impl FirecrackerBackend {
                         backing: m.backing.clone(),
                         host_path: m.host_path.clone(),
                         guest_path: m.guest_path.clone(),
+                        root_identity: m.root_identity,
                     };
                     vm.meta.rw_drives.push(meta.clone());
                     sync.push(SyncDrive {

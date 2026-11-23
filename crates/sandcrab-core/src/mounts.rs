@@ -8,8 +8,8 @@ use std::path::{Component, Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    MountMode, Result, SandboxError, Workspace, WorkspaceBacking, WorkspaceId, WorkspaceMount,
-    WorkspaceRef,
+    MountMode, Result, RootIdentity, SandboxError, Workspace, WorkspaceBacking, WorkspaceId,
+    WorkspaceMount, WorkspaceRef,
 };
 
 /// Guest paths that may never be a mount target (or contain one): kernel pseudo-filesystems
@@ -31,6 +31,10 @@ pub struct ResolvedMount {
     pub mode: MountMode,
     /// Workspace generation at resolution / lease time.
     pub generation: u64,
+    /// Identity of `host_path` observed at lease time (dir-backed workspaces). Backends
+    /// re-check it with [`crate::verify_workspace_root`] right before using `host_path`.
+    #[serde(default)]
+    pub root_identity: Option<RootIdentity>,
 }
 
 /// Result of [`resolve_mounts`].
@@ -132,6 +136,7 @@ pub fn resolve_mounts(
             guest_path,
             mode: m.mode,
             generation: ws.generation,
+            root_identity: ws.root_identity,
         });
     }
 
@@ -169,6 +174,7 @@ mod tests {
             state: WorkspaceState::Idle,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            root_identity: None,
         }
     }
 

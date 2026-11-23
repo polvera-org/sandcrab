@@ -158,6 +158,7 @@ mod tests {
             backing: WorkspaceBacking::HostDir("/p".into()),
             host_path: "/p".into(),
             guest_path: "/workspace".into(),
+            root_identity: None,
         });
         meta.save(&dead).unwrap();
 

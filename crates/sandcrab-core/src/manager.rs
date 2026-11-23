@@ -196,7 +196,10 @@ impl SandboxManager {
         let mut leases = Vec::with_capacity(mounts.len());
         for m in &mut mounts {
             let lease = inner.workspaces.lease(&m.workspace_id.into(), m.mode, id)?;
+            // The verified (symlink-free, dev/ino-checked) root; backends re-check it with
+            // `verify_workspace_root` right before they use it.
             m.host_path = lease.root().to_path_buf();
+            m.root_identity = lease.root_identity();
             m.generation = lease.generation();
             leases.push(lease);
         }
