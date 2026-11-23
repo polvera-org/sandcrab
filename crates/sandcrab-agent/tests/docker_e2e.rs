@@ -168,7 +168,8 @@ async fn images_reach_the_model_as_image_blocks() {
     let template = std::env::var("CRABAGENT_E2E_TEMPLATE").unwrap_or_else(|_| "base".into());
     let dir = tempfile::tempdir().unwrap();
     let sc = sandcrab(&dir.path().join("state"));
-    let png: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR\0\0\0\x01\0\0\0\x01\x08\x06\0\0\0";
+    let png_bytes = sandcrab_agent::media::fixtures::png(1, 1);
+    let png: &[u8] = &png_bytes;
     sc.workspaces().create("pics").unwrap();
     sc.workspaces().put_file("pics", "shot.png", png).unwrap();
     sc.workspaces()

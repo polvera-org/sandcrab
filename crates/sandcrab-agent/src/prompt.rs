@@ -132,10 +132,14 @@ pub fn system_prompt(ctx: &PromptContext) -> String {
              screenshots.\n",
         );
     }
-    s.push_str(
+    let _ = writeln!(
+        s,
         "- file_read or download of a PNG/JPEG/GIF/WebP image shows you the image itself (up \
-         to ~3.75 MB), so you can inspect screenshots and assets. Other binary files come back \
-         as a summary (size, sha256, type), never as base64.\n",
+         to ~3.75 MB and {} px per side), so you can inspect screenshots and assets. Take \
+         viewport-sized screenshots, not full-page ones. Other binary files, and images that \
+         are too large or truncated, come back as a summary (size, sha256, type), never as \
+         base64.",
+        crate::media::MAX_IMAGE_SIDE
     );
     let _ = writeln!(s, "\n# Tools\n{}", ctx.tools.join(", "));
     s.push_str(
@@ -202,6 +206,7 @@ mod tests {
             "/workspace/.cache",
             "`render` template",
             "image itself",
+            "8000 px",
         ] {
             assert!(p.contains(needle), "missing {needle}:\n{p}");
         }
