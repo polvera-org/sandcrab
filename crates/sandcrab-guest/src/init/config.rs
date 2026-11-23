@@ -1,0 +1,323 @@
+//! Validation of [`InitConfig`] and the workspace mount plan derived from it.
+//!
+//! Everything here is pure: the host already validated the same config, but the guest
+//! re-checks it (defence in depth) before acting on it as root.
+
+use std::{
+    collections::BTreeSet,
+    io,
+    path::{Component, Path, PathBuf},
+};
+
+use sandcrab_protocol::init::{
+    CONTROL_PORT, GuestMount, InitConfig, MAX_DRIVE_ID_LEN, MAX_EXT4_LABEL_LEN, ROOT_DRIVE_ID,
+    SCRATCH_DRIVE_ID,
+};
+
+/// Guest paths that may never be (or contain) a workspace mount point.
+pub const FORBIDDEN_MOUNT_PREFIXES: &[&str] = &[
+    "/proc",
+    "/sys",
+    "/dev",
+    "/run",
+    "/mnt/scratch",
+    "/opt/sandcrab",
+];
+
+const MAX_HOSTNAME_LEN: usize = 64;
+
+pub(crate) fn invalid(msg: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, msg.into())
+}
+
+/// Normalise an absolute guest path: UTF-8, no NUL, no `..`; `.` and repeated `/` dropped.
+pub fn normalize_abs(path: &Path) -> io::Result<PathBuf> {
+    let bad = |why: &str| invalid(format!("guest path `{}` {why}", path.display()));
+    let s = path.to_str().ok_or_else(|| bad("is not valid UTF-8"))?;
+    if s.contains('\0') {
+        return Err(bad("contains a NUL byte"));
+    }
+    if !path.is_absolute() {
+        return Err(bad("must be absolute"));
+    }
+    let mut out = PathBuf::from("/");
+    for c in path.components() {
+        match c {
+            Component::RootDir | Component::CurDir => {}
+            Component::Normal(p) => out.push(p),
+            Component::ParentDir => return Err(bad("must not contain `..`")),
+            Component::Prefix(_) => return Err(bad("must be a Unix path")),
+        }
+    }
+    Ok(out)
+}
+
+/// Validate a workspace mount point: normalised, not `/`, not under a forbidden prefix.
+pub fn validate_mount_point(path: &Path) -> io::Result<PathBuf> {
+    let p = normalize_abs(path)?;
+    if p == Path::new("/") {
+        return Err(invalid("a workspace cannot be mounted at `/`"));
+    }
+    for prefix in FORBIDDEN_MOUNT_PREFIXES {
+        if p.starts_with(prefix) {
+            return Err(invalid(format!(
+                "guest path `{}` is under reserved `{prefix}`",
+                p.display()
+            )));
+        }
+    }
+    Ok(p)
+}
+
+/// `drive_id`: `[A-Za-z0-9_]`, 1..=20 bytes (virtio-blk serial limit), not a reserved drive.
+pub fn validate_drive_id(id: &str) -> io::Result<()> {
+    if id.is_empty() || id.len() > MAX_DRIVE_ID_LEN {
+        return Err(invalid(format!(
+            "drive_id `{id}` must be 1..={MAX_DRIVE_ID_LEN} bytes"
+        )));
+    }
+    if !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+        return Err(invalid(format!("drive_id `{id}` must match [A-Za-z0-9_]+")));
+    }
+    if id == ROOT_DRIVE_ID || id == SCRATCH_DRIVE_ID {
+        return Err(invalid(format!("drive_id `{id}` is reserved")));
+    }
+    Ok(())
+}
+
+fn validate_hostname(name: &str) -> io::Result<()> {
+    let ok = !name.is_empty()
+        && name.len() <= MAX_HOSTNAME_LEN
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.')
+        && !name.starts_with(['-', '.']);
+    if ok {
+        Ok(())
+    } else {
+        Err(invalid(format!(
+            "hostname `{name}` must be 1..={MAX_HOSTNAME_LEN} chars of [A-Za-z0-9.-]"
+        )))
+    }
+}
+
+fn validate_env(cfg: &InitConfig) -> io::Result<()> {
+    for (k, v) in &cfg.env {
+        if k.is_empty() || k.contains(['=', '\0']) {
+            return Err(invalid(format!("invalid env var name `{k}`")));
+        }
+        if v.contains('\0') {
+            return Err(invalid(format!("env var `{k}` contains a NUL byte")));
+        }
+    }
+    Ok(())
+}
+
+/// One workspace mount, validated, in mount order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MountStep {
+    pub drive_id: String,
+    /// ext4 label used when no device serial matches.
+    pub label: String,
+    /// Normalised absolute mount point.
+    pub target: PathBuf,
+    pub read_only: bool,
+}
+
+impl MountStep {
+    /// Filesystem-specific mount data: `noload` skips journal replay on a read-only drive
+    /// (which would otherwise write to it).
+    #[must_use]
+    pub fn data(&self) -> &'static str {
+        if self.read_only { "noload" } else { "" }
+    }
+}
+
+/// Validate `mounts` and order them parents-first (stable for equal depth).
+pub fn plan_mounts(mounts: &[GuestMount]) -> io::Result<Vec<MountStep>> {
+    let mut ids = BTreeSet::new();
+    let mut targets = BTreeSet::new();
+    let mut steps = Vec::with_capacity(mounts.len());
+    for m in mounts {
+        validate_drive_id(&m.drive_id)?;
+        if !ids.insert(m.drive_id.clone()) {
+            return Err(invalid(format!("duplicate drive_id `{}`", m.drive_id)));
+        }
+        let target = validate_mount_point(&m.guest_path)?;
+        if !targets.insert(target.clone()) {
+            return Err(invalid(format!(
+                "two workspaces mounted at `{}`",
+                target.display()
+            )));
+        }
+        let label = m.label.clone().unwrap_or_else(|| m.drive_id.clone());
+        if label.is_empty() || label.len() > MAX_EXT4_LABEL_LEN || label.contains('\0') {
+            return Err(invalid(format!(
+                "ext4 label `{label}` must be 1..={MAX_EXT4_LABEL_LEN} bytes"
+            )));
+        }
+        steps.push(MountStep {
+            drive_id: m.drive_id.clone(),
+            label,
+            target,
+            read_only: m.read_only,
+        });
+    }
+    steps.sort_by_key(|s| s.target.components().count());
+    Ok(steps)
+}
+
+/// A validated config plus its mount plan.
+#[derive(Debug, Clone)]
+pub struct ValidatedConfig {
+    pub config: InitConfig,
+    pub default_cwd: PathBuf,
+    pub mounts: Vec<MountStep>,
+}
+
+/// Validate everything `crabd init` acts on as root.
+pub fn validate_config(cfg: InitConfig) -> io::Result<ValidatedConfig> {
+    validate_hostname(&cfg.hostname)?;
+    validate_env(&cfg)?;
+    // vsock ports below 1024 need CAP_NET_BIND_SERVICE and `crabd serve` runs unprivileged.
+    // (This also keeps it off the control port.)
+    if cfg.tools_port < 1024 {
+        return Err(invalid(format!(
+            "tools_port {} must be >= 1024 (the control port is {CONTROL_PORT})",
+            cfg.tools_port
+        )));
+    }
+    let default_cwd = normalize_abs(&cfg.default_cwd)?;
+    if let Some(home) = &cfg.user.home {
+        normalize_abs(home)?;
+    }
+    if let Some(name) = &cfg.user.name
+        && (name.is_empty() || name.contains(['\0', '/', ':']))
+    {
+        return Err(invalid(format!("invalid user name `{name}`")));
+    }
+    let mounts = plan_mounts(&cfg.mounts)?;
+    Ok(ValidatedConfig {
+        config: cfg,
+        default_cwd,
+        mounts,
+    })
+}
+
+/// `/etc/resolv.conf` contents for `dns`.
+#[must_use]
+pub fn resolv_conf(dns: &[std::net::IpAddr]) -> String {
+    let mut s = String::from("# written by crabd init\n");
+    for ip in dns {
+        s.push_str(&format!("nameserver {ip}\n"));
+    }
+    s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sandcrab_protocol::init::InitUser;
+
+    fn gm(id: &str, path: &str, ro: bool) -> GuestMount {
+        GuestMount {
+            drive_id: id.into(),
+            label: None,
+            guest_path: path.into(),
+            read_only: ro,
+        }
+    }
+
+    fn cfg(mounts: Vec<GuestMount>) -> InitConfig {
+        InitConfig {
+            sandbox_id: "sb".into(),
+            hostname: "sandcrab".into(),
+            user: InitUser {
+                uid: 1000,
+                gid: 1000,
+                home: None,
+                name: Some("agent".into()),
+            },
+            env: [("A".to_owned(), "b".to_owned())].into(),
+            default_cwd: "/workspace/./".into(),
+            mounts,
+            network: false,
+            dns: vec![],
+            tools_port: 1024,
+            host_time_unix_ms: None,
+        }
+    }
+
+    #[test]
+    fn plan_orders_parents_first_and_sets_options() {
+        let plan = plan_mounts(&[
+            gm("ws1", "/workspace/data//", true),
+            gm("ws0", "/workspace", false),
+        ])
+        .unwrap();
+        assert_eq!(plan[0].target, Path::new("/workspace"));
+        assert_eq!(plan[0].data(), "");
+        assert_eq!(plan[1].target, Path::new("/workspace/data"));
+        assert!(plan[1].read_only);
+        assert_eq!(plan[1].data(), "noload");
+        assert_eq!(plan[1].label, "ws1");
+    }
+
+    #[test]
+    fn plan_rejects_bad_mounts() {
+        for (m, why) in [
+            (vec![gm("ws0", "relative", false)], "absolute"),
+            (vec![gm("ws0", "/a/../etc", false)], ".."),
+            (vec![gm("ws0", "/", false)], "`/`"),
+            (vec![gm("ws0", "/proc/x", false)], "reserved"),
+            (vec![gm("ws0", "/mnt/scratch", false)], "reserved"),
+            (vec![gm("ws0", "/run/user", false)], "reserved"),
+            (vec![gm("rootfs", "/w", false)], "reserved"),
+            (vec![gm("scratch", "/w", false)], "reserved"),
+            (vec![gm("ws-0", "/w", false)], "[A-Za-z0-9_]"),
+            (vec![gm("a_very_long_drive_id_x", "/w", false)], "1..=20"),
+            (
+                vec![gm("ws0", "/w", false), gm("ws0", "/v", false)],
+                "duplicate",
+            ),
+            (
+                vec![gm("ws0", "/w", false), gm("ws1", "/w/", false)],
+                "two workspaces",
+            ),
+        ] {
+            let err = plan_mounts(&m).unwrap_err().to_string();
+            assert!(err.contains(why), "{m:?}: {err}");
+        }
+        let mut long_label = gm("ws0", "/w", false);
+        long_label.label = Some("x".repeat(17));
+        assert!(plan_mounts(&[long_label]).is_err());
+    }
+
+    #[test]
+    fn config_validation() {
+        let v = validate_config(cfg(vec![gm("ws0", "/workspace", false)])).unwrap();
+        assert_eq!(v.default_cwd, Path::new("/workspace"));
+
+        let mut c = cfg(vec![]);
+        c.hostname = "bad host".into();
+        assert!(validate_config(c).is_err());
+        let mut c = cfg(vec![]);
+        c.env.insert("A=B".into(), "x".into());
+        assert!(validate_config(c).is_err());
+        let mut c = cfg(vec![]);
+        c.tools_port = CONTROL_PORT;
+        assert!(validate_config(c).is_err());
+        let mut c = cfg(vec![]);
+        c.default_cwd = "workspace".into();
+        assert!(validate_config(c).is_err());
+        let mut c = cfg(vec![]);
+        c.user.home = Some("../x".into());
+        assert!(validate_config(c).is_err());
+    }
+
+    #[test]
+    fn resolv_conf_lists_nameservers() {
+        let s = resolv_conf(&["1.1.1.1".parse().unwrap(), "::1".parse().unwrap()]);
+        assert!(s.contains("nameserver 1.1.1.1\nnameserver ::1\n"));
+    }
+}

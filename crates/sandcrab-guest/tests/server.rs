@@ -387,8 +387,9 @@ async fn refuses_to_replace_non_socket_file() {
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "keep me");
 }
 
+#[cfg(not(target_os = "linux"))]
 #[tokio::test]
-async fn vsock_is_not_yet_supported() {
+async fn vsock_requires_linux() {
     let err = Server::bind(
         ServerConfig::new(ListenAddr::Vsock(1024)),
         Arc::new(ToolContext::new("/")),
@@ -397,6 +398,22 @@ async fn vsock_is_not_yet_supported() {
     .err()
     .unwrap();
     assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
+}
+
+/// Binding needs a vsock transport (a VM guest, or vsock_loopback); either it binds or the
+/// error names the port.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn vsock_binds_or_reports_transport() {
+    match Server::bind(
+        ServerConfig::new(ListenAddr::Vsock(50_000 + std::process::id() % 10_000)),
+        Arc::new(ToolContext::new("/")),
+    )
+    .await
+    {
+        Ok(server) => assert!(server.endpoint().starts_with("vsock:")),
+        Err(e) => assert!(e.to_string().contains("vsock port"), "{e}"),
+    }
 }
 
 #[tokio::test]
@@ -475,14 +492,29 @@ async fn binary_serves_and_exits_cleanly_on_sigterm() {
 }
 
 #[test]
-fn binary_vsock_flag_errors_clearly() {
-    let out = std::process::Command::new(CRABD)
-        .args(["serve", "--vsock", "1024"])
-        .output()
+fn binary_vsock_flag() {
+    let port = (60_000 + std::process::id() % 5_000).to_string();
+    let mut child = std::process::Command::new(CRABD)
+        .args(["serve", "--vsock", &port])
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    if child.try_wait().unwrap().is_none() {
+        // Bound and serving: a vsock transport is available (Linux only).
+        child.kill().unwrap();
+        child.wait().unwrap();
+        return;
+    }
+    let out = child.wait_with_output().unwrap();
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("not yet supported"), "{stderr}");
+    let want = if cfg!(target_os = "linux") {
+        "vsock port"
+    } else {
+        "requires Linux"
+    };
+    assert!(stderr.contains(want), "{stderr}");
 }
 
 #[test]

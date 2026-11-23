@@ -7,6 +7,7 @@
 //! from the [`WorkspaceRegistry`], calls [`RuntimeBackend::spawn`] with a [`ResolvedSpec`],
 //! waits for `crabd` ([`wait_ready`]) and returns a [`Sandbox`] tool-call proxy.
 
+pub mod archive;
 pub mod backend;
 pub mod client;
 pub mod error;

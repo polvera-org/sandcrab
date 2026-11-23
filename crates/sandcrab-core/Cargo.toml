@@ -23,9 +23,13 @@ tokio.workspace = true
 toml.workspace = true
 tracing.workspace = true
 uuid.workspace = true
+# workspace archive (sync-back) unpacking
+tar = { version = "0.4", default-features = false }
 
 [dev-dependencies]
 tempfile.workspace = true
+# archive round-trip tests use the guest packer
+sandcrab-guest = { path = "../sandcrab-guest" }
 
 [lints]
 workspace = true

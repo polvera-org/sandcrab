@@ -6,15 +6,19 @@
 //!
 //! Layout:
 //! - [`codec`] — async adapter over the protocol crate's synchronous frame helpers.
-//! - [`server`] — listeners (UDS / TCP; vsock later), per-connection request multiplexing,
+//! - [`server`] — listeners (UDS / TCP / vsock), per-connection request multiplexing,
 //!   `hello` / `ping`, graceful shutdown.
 //! - [`context`] — [`ToolContext`] shared by every tool call (default cwd, limits, processes).
 //! - [`tools`] — [`tools::dispatch`] plus one module per tool family.
+//! - [`vsock`] — AF_VSOCK listener (Linux only).
+//! - [`init`] — `crabd init`, PID 1 of a microVM (control port, mounts, workspace export).
 
 pub mod codec;
 pub mod context;
+pub mod init;
 pub mod server;
 pub mod tools;
+pub mod vsock;
 
 pub use context::{Limits, ToolContext};
 pub use server::{ListenAddr, Server, ServerConfig};
