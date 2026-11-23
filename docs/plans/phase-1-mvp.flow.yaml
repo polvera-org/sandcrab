@@ -307,7 +307,7 @@ steps:
     title: "3D interactive presentation (three.js): sandbox lifecycle, protocol path, workspace mounts, Docker vs. FC isolation, bench results"
     depends_on: [three-kit, live-check, bench-report]
     artifacts: [docs/site/presentation.html]
-    status: doing
+    status: done
     notes: Load mstack-3d-animations skill (house style, tuning panel, seamless loops).
 
   - id: docs
