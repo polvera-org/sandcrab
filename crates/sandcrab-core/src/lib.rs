@@ -2,15 +2,21 @@
 //! template manifests, and sandbox lifecycle configuration.
 
 pub mod backend;
+pub mod client;
 pub mod error;
 pub mod mounts;
 pub mod policy;
 pub mod registry;
 pub mod sandbox;
 pub mod template;
+#[cfg(any(test, feature = "test-util"))]
+pub mod testing;
 pub mod workspace;
 
 pub use backend::{BackendCapabilities, BackendKind, RuntimeBackend};
+pub use client::{
+    AsyncStream, BoxedStream, Connector, CrabdClient, Endpoint, ReadyClient, wait_ready,
+};
 pub use error::{Result, SandboxError};
 pub use mounts::{
     FORBIDDEN_GUEST_PREFIXES, ResolvedMount, ResolvedMounts, normalize_guest_path, resolve_mounts,
