@@ -88,6 +88,9 @@ async fn boot() -> io::Result<()> {
     if let Err(e) = sys::disable_cad() {
         warn!(error = %e, "could not disable Ctrl-Alt-Del");
     }
+    if let Err(e) = sys::disable_core_dumps() {
+        warn!(error = %e, "could not disable core dumps");
+    }
 
     let ops = Arc::new(Pid1Ops::new(devices));
     let mut sigchld = signal(SignalKind::child())?;

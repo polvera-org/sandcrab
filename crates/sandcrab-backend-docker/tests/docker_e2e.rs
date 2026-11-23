@@ -267,6 +267,10 @@ async fn base_lifecycle_tools_mounts_and_hardening() {
     .await;
     assert!(r.stdout.contains("tmpfs"), "{}", r.stdout);
 
+    // Core dumps are disabled (soft and hard), so crashes leave no core.* in the workspace.
+    let r = bash(&sb, "echo $(ulimit -c) $(ulimit -Hc)").await;
+    assert_eq!(r.stdout.trim(), "0 0", "{r:?}");
+
     let marks = sb.destroy().await.unwrap();
     assert!(marks.teardown().is_some());
     assert!(marks.custom.iter().any(|(n, _)| n == "container_gone"));

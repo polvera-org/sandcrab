@@ -8,6 +8,8 @@
 //! - `init: true` (docker-init as PID 1 reaps zombies and forwards SIGTERM to `crabd`);
 //! - `pids_limit`, `memory` with `memory_swap == memory` (no swap), `nano_cpus`;
 //! - size-limited `nosuid,nodev` tmpfs at `/tmp`;
+//! - core dumps disabled (`RLIMIT_CORE` soft = hard = 0): a crashing process must not
+//!   drop `core.*` files into the cwd, which is usually a persistent workspace;
 //! - runs as the **host** uid:gid unless the spec overrides it, so files written to
 //!   bind-mounted workspaces stay editable on the host;
 //! - network `none` unless the policy is `unrestricted`; published ports bind to
@@ -23,7 +25,7 @@ use std::path::Path;
 
 use bollard::models::{
     ContainerCreateBody, HostConfig, Mount, MountBindOptions, MountBindOptionsPropagationEnum,
-    MountType, PortBinding,
+    MountType, PortBinding, ResourcesUlimits,
 };
 use sandcrab_core::{
     NetworkConfig, NetworkPolicy, ResolvedSpec, Result, SandboxError, SandboxId, UserSpec,
@@ -275,6 +277,11 @@ pub fn build_container_spec(
                 "/tmp".to_owned(),
                 format!("rw,nosuid,nodev,size={}m,mode=1777", ctx.limits.tmp_size_mb),
             )])),
+            ulimits: Some(vec![ResourcesUlimits {
+                name: Some("core".into()),
+                soft: Some(0),
+                hard: Some(0),
+            }]),
             auto_remove: Some(false),
             publish_all_ports: Some(false),
             ..Default::default()
@@ -405,6 +412,10 @@ image = "sandcrab/base:0.1.0"
             hc.tmpfs.unwrap()["/tmp"],
             "rw,nosuid,nodev,size=256m,mode=1777"
         );
+        let ulimits = hc.ulimits.unwrap();
+        assert_eq!(ulimits.len(), 1);
+        assert_eq!(ulimits[0].name.as_deref(), Some("core"));
+        assert_eq!((ulimits[0].soft, ulimits[0].hard), (Some(0), Some(0)));
     }
 
     #[test]

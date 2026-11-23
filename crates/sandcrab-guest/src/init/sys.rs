@@ -165,6 +165,18 @@ pub fn disable_cad() -> io::Result<()> {
     rustix::system::reboot(RebootCommand::CadOff).map_err(|e| ctx(e, "reboot(CAD_OFF)"))
 }
 
+/// Set `RLIMIT_CORE` to 0 (soft and hard) for PID 1 and everything it spawns, so a
+/// crashing process never writes `core.*` files into a (persistent) workspace cwd.
+/// Matches the DockerDev backend's `core=0` ulimit.
+pub fn disable_core_dumps() -> io::Result<()> {
+    let zero = rustix::process::Rlimit {
+        current: Some(0),
+        maximum: Some(0),
+    };
+    rustix::process::setrlimit(rustix::process::Resource::Core, zero)
+        .map_err(|e| ctx(e, "setrlimit(RLIMIT_CORE)"))
+}
+
 /// Mount a workspace drive (ext4). Read-only adds `MS_RDONLY` and `data` (`noload`).
 pub fn mount_workspace(dev: &Path, target: &Path, read_only: bool, data: &str) -> io::Result<()> {
     mkdir_p(target)?;
