@@ -7,6 +7,11 @@
 //! - hard links, character / block devices, FIFOs and any other entry type besides
 //!   directory, regular file and symlink;
 //! - setuid / setgid bits;
+//!
+//! Modes are **masked**, never applied verbatim: the guest must not be able to make host
+//! directories world-writable or lock the owner out. Every mode is `& 0o777 & !umask`
+//! ([`UnpackLimits::umask`], default `0o022`; sticky is dropped too), then files get `u+rw`
+//! and directories `u+rwx`.
 //! - writing through a symlink: every parent component must be a real directory created by
 //!   this unpack (checked with `lstat`, never followed), and files are created with
 //!   `O_CREAT | O_EXCL`, which refuses an existing symlink;
@@ -37,8 +42,6 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use sandcrab_protocol::init::archive::{DIR_PERMISSION_MASK, PERMISSION_MASK};
-
 use crate::{Result, SafeRelPath, SandboxError};
 
 /// Resource caps for [`unpack_safe`].
@@ -54,6 +57,8 @@ pub struct UnpackLimits {
     pub max_path_len: usize,
     /// Max path depth (components).
     pub max_depth: usize,
+    /// Permission bits removed from every guest-supplied mode.
+    pub umask: u32,
 }
 
 /// Bytes allowed on top of a drive's capacity (tar content never exceeds the filesystem
@@ -92,6 +97,7 @@ impl Default for UnpackLimits {
             max_file_bytes: 16 * 1024 * 1024 * 1024,
             max_path_len: 4096,
             max_depth: 256,
+            umask: 0o022,
         }
     }
 }
@@ -196,7 +202,7 @@ pub fn unpack_safe(r: impl Read, staging: &Path, limits: &UnpackLimits) -> Resul
                     }
                     Err(e) => return Err(e.into()),
                 }
-                dir_modes.push((dest, mode & DIR_PERMISSION_MASK, mtime));
+                dir_modes.push((dest, mask_mode(mode, true, limits.umask), mtime));
             }
             tar::EntryType::Regular | tar::EntryType::Continuous => {
                 let size = entry.size();
@@ -229,7 +235,11 @@ pub fn unpack_safe(r: impl Read, staging: &Path, limits: &UnpackLimits) -> Resul
                 if copied != size {
                     return Err(reject(format!("`{}` is truncated", rel.display())));
                 }
-                f.set_permissions(fs::Permissions::from_mode(mode & PERMISSION_MASK))?;
+                f.set_permissions(fs::Permissions::from_mode(mask_mode(
+                    mode,
+                    false,
+                    limits.umask,
+                )))?;
                 if let Some(t) = mtime {
                     f.set_modified(t)?;
                 }
@@ -282,6 +292,14 @@ pub fn unpack_safe(r: impl Read, staging: &Path, limits: &UnpackLimits) -> Resul
         fs::set_permissions(&dir, fs::Permissions::from_mode(mode))?;
     }
     Ok(stats)
+}
+
+/// Host mode for a guest-supplied one: permission bits only (no setuid/setgid/sticky), minus
+/// `umask`, and always owner-usable (`u+rw` files, `u+rwx` directories).
+#[must_use]
+pub fn mask_mode(mode: u32, is_dir: bool, umask: u32) -> u32 {
+    let m = mode & 0o777 & !umask;
+    if is_dir { m | 0o700 } else { m | 0o600 }
 }
 
 /// Copy `r` to the start of the fresh file `f`, seeking over all-zero blocks so they become
@@ -491,7 +509,8 @@ mod tests {
             fs::read_link(s.join("link")).unwrap(),
             Path::new("src/main.rs")
         );
-        assert_eq!(fs::metadata(s.join("ro")).unwrap().mode() & 0o7777, 0o555);
+        // 0o555 → owner always keeps u+rwx on directories.
+        assert_eq!(fs::metadata(s.join("ro")).unwrap().mode() & 0o7777, 0o755);
         assert_eq!(fs::read(s.join("implicit/parent/f")).unwrap(), b"x");
     }
 
@@ -658,6 +677,35 @@ mod tests {
             })
             .contains("deeper")
         );
+    }
+
+    #[test]
+    fn guest_modes_are_masked() {
+        let mut v = Vec::new();
+        raw_entry(&mut v, b"open", tar::EntryType::Directory, 0o1777, b"", b"");
+        raw_entry(
+            &mut v,
+            b"locked",
+            tar::EntryType::Directory,
+            0o000,
+            b"",
+            b"",
+        );
+        raw_entry(&mut v, b"w", tar::EntryType::Regular, 0o666, b"", b"x");
+        raw_entry(&mut v, b"none", tar::EntryType::Regular, 0o000, b"", b"x");
+        raw_entry(&mut v, b"x", tar::EntryType::Regular, 0o777, b"", b"x");
+        let (t, r) = unpack(&finish(v));
+        r.unwrap();
+        let s = t.path().join("staging");
+        let mode = |n: &str| fs::symlink_metadata(s.join(n)).unwrap().mode() & 0o7777;
+        assert_eq!(mode("open"), 0o755, "no world-write, no sticky");
+        assert_eq!(mode("locked"), 0o700, "owner can always traverse");
+        assert_eq!(mode("w"), 0o644);
+        assert_eq!(mode("none"), 0o600);
+        assert_eq!(mode("x"), 0o755);
+        // A stricter umask.
+        assert_eq!(mask_mode(0o775, true, 0o077), 0o700);
+        assert_eq!(mask_mode(0o4777, false, 0), 0o777);
     }
 
     #[test]
