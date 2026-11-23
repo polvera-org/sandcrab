@@ -23,6 +23,7 @@ authors = ["Polvera Org"]
 sandcrab-protocol = { path = "crates/sandcrab-protocol" }
 sandcrab-core = { path = "crates/sandcrab-core" }
 sandcrab-backend-docker = { path = "crates/sandcrab-backend-docker" }
+sandcrab-backend-firecracker = { path = "crates/sandcrab-backend-firecracker" }
 sandcrab-sdk = { path = "crates/sandcrab-sdk" }
 
 # Async & networking
