@@ -11,6 +11,7 @@ pub mod archive;
 pub mod backend;
 pub mod client;
 pub mod error;
+pub(crate) mod fsx;
 pub mod manager;
 pub mod mounts;
 pub mod policy;
@@ -38,7 +39,8 @@ pub use policy::{
     SecretSpec, UserSpec,
 };
 pub use registry::{
-    FileEntry, FileKind, STATE_ROOT_ENV, WorkspaceLease, WorkspaceRegistry, default_state_root,
+    FileEntry, FileKind, HostWriteOptions, STATE_ROOT_ENV, WorkspaceLease, WorkspaceRegistry,
+    default_state_root,
 };
 pub use sandbox::{DEFAULT_TTL_SECS, SandboxConfig, SandboxId};
 pub use template::{

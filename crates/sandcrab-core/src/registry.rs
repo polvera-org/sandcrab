@@ -6,20 +6,33 @@
 //! <root>/registry.json            # all workspaces (atomic write: tmp + fsync + rename)
 //! <root>/registry.lock            # flock held for every registry read-modify-write
 //! <root>/workspaces/<id>/data/    # ManagedDir contents
+//! <root>/workspaces/<id>/mount.lock  # flock: rw lease exclusive, ro leases shared
+//! <root>/workspaces/<id>/rw.lock     # flock: held exclusive by the rw lease
 //! <root>/workspaces/<id>/...      # per-workspace backend state (ro image cache, staging, recovery)
 //! ```
 //!
-//! Host-side file operations resolve every path component under the canonical workspace
-//! root and refuse `..`, absolute paths, and any symlink (existing or dangling) whose
-//! target is outside the root. They are refused while a sandbox holds a read-write lease,
-//! so a running guest cannot race them by swapping in symlinks.
+//! # Host-side file operations
 //!
-//! Leases (`lease()`) are tracked in-process; the registry file itself is safe to share
-//! between processes (CLI + SDK), but two processes leasing the same workspace read-write
-//! is not detected in V1.
+//! `put_file` / `read_file` / `delete_file` / `list_files` treat the workspace contents as
+//! hostile (a sandbox may be rewriting them concurrently). They refuse `..` and absolute
+//! paths, and walk fd-relative from an opened root handle without following any symlink
+//! (see [`crate::fsx`]): a symlink anywhere on the path — even one pointing inside the
+//! workspace — is refused with [`SandboxError::PathEscape`]. `list_files` reports symlinks
+//! and `delete_file` removes the link itself; neither follows it.
+//!
+//! # Leases
+//!
+//! Mount leases are enforced across processes with `flock` on the per-workspace lock files
+//! above (plus in-process bookkeeping for state and messages). A read-write lease is
+//! exclusive against every other lease; read-only leases share. While a read-write lease
+//! is held (by any process), host mutation (`put_file`, `delete_file`, `remove`) fails with
+//! [`SandboxError::WorkspaceBusy`] unless the caller opts in with
+//! [`HostWriteOptions::force`]. Reads are always allowed; they stay race-safe through the
+//! fd-relative walk. Leases held by another process are not reflected in
+//! [`Workspace::state`] (which shows this process's view).
 
 use std::collections::HashMap;
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -27,6 +40,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
+use crate::fsx;
 use crate::workspace::validate_workspace_name;
 use crate::{
     MountMode, Result, SafeRelPath, SandboxError, SandboxId, Workspace, WorkspaceBacking,
@@ -39,6 +53,19 @@ pub const STATE_ROOT_ENV: &str = "SANDCRAB_HOME";
 const REGISTRY_FILE: &str = "registry.json";
 const LOCK_FILE: &str = "registry.lock";
 const REGISTRY_VERSION: u32 = 1;
+/// Per-workspace flock: exclusive for a rw lease, shared for ro leases.
+const MOUNT_LOCK: &str = "mount.lock";
+/// Per-workspace flock held exclusively by a rw lease; host mutation probes it.
+const RW_LOCK: &str = "rw.lock";
+
+/// Options for host-side mutation (`put_file_with`, `delete_file_with`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HostWriteOptions {
+    /// Mutate even while a sandbox holds the workspace read-write (the guest may observe
+    /// a half-applied change or overwrite it). Path safety is unaffected; a dirty session
+    /// is still refused.
+    pub force: bool,
+}
 
 /// `$SANDCRAB_HOME`, else `$HOME/.sandcrab`.
 pub fn default_state_root() -> Result<PathBuf> {
@@ -215,13 +242,19 @@ impl Inner {
             .is_some_and(|l| l.rw.is_some() || l.ro > 0)
     }
 
-    /// Refuse host-side mutation while a sandbox can write, or while a session is dirty.
-    fn ensure_mutable(&self, ws: &Workspace) -> Result<()> {
+    /// Refuse host-side mutation while a sandbox (in any process) can write, unless
+    /// `force`, or while a session is dirty. The returned guard holds `rw.lock` for the
+    /// duration of the mutation. Must be called under the exclusive registry lock (lease
+    /// acquisition takes the shared one), so probing the lease locks cannot race a lease.
+    fn ensure_mutable(&self, ws: &Workspace, opts: HostWriteOptions) -> Result<Option<File>> {
         if ws.state == WorkspaceState::DirtySession {
             return Err(SandboxError::WorkspaceBusy(format!(
                 "workspace `{}` has a dirty session; recover or clear it first",
                 ws.name
             )));
+        }
+        if opts.force {
+            return Ok(None);
         }
         if let Some(sandbox) = lock(&self.leases).get(&ws.id).and_then(|l| l.rw) {
             return Err(SandboxError::WorkspaceBusy(format!(
@@ -229,7 +262,45 @@ impl Inner {
                 ws.name
             )));
         }
-        Ok(())
+        let file = self.lock_file(ws.id, RW_LOCK)?;
+        if !try_flock(&file, true, &self.lock_path(ws.id, RW_LOCK))? {
+            return Err(SandboxError::WorkspaceBusy(format!(
+                "workspace `{}` is mounted read-write by a sandbox in another process",
+                ws.name
+            )));
+        }
+        Ok(Some(file))
+    }
+
+    fn lock_path(&self, id: WorkspaceId, name: &str) -> PathBuf {
+        self.workspace_dir(id).join(name)
+    }
+
+    /// Open (creating) a per-workspace lock file.
+    fn lock_file(&self, id: WorkspaceId, name: &str) -> Result<File> {
+        let dir = self.workspace_dir(id);
+        create_private_dir_all(&dir)?;
+        let path = dir.join(name);
+        OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .map_err(|e| SandboxError::io_at(&path, e))
+    }
+
+    /// Whether any process holds any lease on `id` (probe under the exclusive registry lock).
+    fn is_leased_anywhere(&self, id: WorkspaceId) -> Result<bool> {
+        if self.is_leased(id) {
+            return Ok(true);
+        }
+        let path = self.lock_path(id, MOUNT_LOCK);
+        let file = match OpenOptions::new().write(true).open(&path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(SandboxError::io_at(&path, e)),
+        };
+        Ok(!try_flock(&file, true, &path)?)
     }
 
     fn release(&self, id: WorkspaceId, mode: MountMode) {
@@ -243,6 +314,20 @@ impl Inner {
                 leases.remove(&id);
             }
         }
+    }
+}
+
+/// Non-blocking `flock`: `Ok(false)` when another open file description holds it.
+fn try_flock(file: &File, exclusive: bool, path: &Path) -> Result<bool> {
+    let res = if exclusive {
+        file.try_lock()
+    } else {
+        file.try_lock_shared()
+    };
+    match res {
+        Ok(()) => Ok(true),
+        Err(TryLockError::WouldBlock) => Ok(false),
+        Err(TryLockError::Error(e)) => Err(SandboxError::io_at(path, e)),
     }
 }
 
@@ -281,66 +366,6 @@ fn dir_root(ws: &Workspace) -> Result<PathBuf> {
         WorkspaceBacking::BlockVolume(_) => {
             Err(SandboxError::Unimplemented("block volume host mutation"))
         }
-    }
-}
-
-/// Resolve `rel` beneath the canonical `root`, refusing any escape.
-///
-/// Every existing component is inspected with `lstat`. A symlink is followed only if its
-/// fully resolved target stays inside `root`; dangling symlinks are refused (writing
-/// through one would create its target wherever it points). With `follow_final = false`
-/// the last component is returned unresolved, so callers can unlink a symlink itself.
-/// Components that do not exist yet are appended verbatim (they are created fresh).
-fn resolve_beneath(root: &Path, rel: &SafeRelPath, follow_final: bool) -> Result<PathBuf> {
-    let components: Vec<_> = rel.as_path().components().collect();
-    let mut cur = root.to_path_buf();
-    for (i, component) in components.iter().enumerate() {
-        let last = i + 1 == components.len();
-        let next = cur.join(component);
-        match fs::symlink_metadata(&next) {
-            Ok(meta) if meta.file_type().is_symlink() => {
-                if last && !follow_final {
-                    return Ok(next);
-                }
-                match fs::canonicalize(&next) {
-                    Ok(target) if target.starts_with(root) => cur = target,
-                    Ok(target) => {
-                        return Err(SandboxError::PathEscape(format!(
-                            "`{rel}`: symlink `{}` points to `{}`, outside the workspace",
-                            next.strip_prefix(root).unwrap_or(&next).display(),
-                            target.display()
-                        )));
-                    }
-                    Err(_) => {
-                        return Err(SandboxError::PathEscape(format!(
-                            "`{rel}`: symlink `{}` is dangling or unresolvable",
-                            next.strip_prefix(root).unwrap_or(&next).display()
-                        )));
-                    }
-                }
-            }
-            Ok(_) => cur = next,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                cur = next;
-                for rest in &components[i + 1..] {
-                    cur.push(rest);
-                }
-                return Ok(cur);
-            }
-            Err(e) => return Err(SandboxError::io_at(&next, e)),
-        }
-    }
-    Ok(cur)
-}
-
-fn ensure_beneath(root: &Path, path: &Path, rel: &SafeRelPath) -> Result<()> {
-    let canon = fs::canonicalize(path).map_err(|e| SandboxError::io_at(path, e))?;
-    if canon.starts_with(root) {
-        Ok(())
-    } else {
-        Err(SandboxError::PathEscape(format!(
-            "`{rel}` resolves outside the workspace"
-        )))
     }
 }
 
@@ -498,7 +523,7 @@ impl WorkspaceRegistry {
                 .position(|w| r.matches(w))
                 .ok_or_else(|| SandboxError::not_found("workspace", r))?;
             let id = db.workspaces[idx].id;
-            if self.inner.is_leased(id) {
+            if self.inner.is_leased_anywhere(id)? {
                 return Err(SandboxError::WorkspaceBusy(format!(
                     "workspace `{}` is mounted by a running sandbox",
                     db.workspaces[idx].name
@@ -541,97 +566,99 @@ impl WorkspaceRegistry {
     }
 
     /// Write `bytes` to `rel_path`, creating parent directories. Bumps the generation.
+    /// Refused while a sandbox (in any process) holds the workspace read-write; see
+    /// [`Self::put_file_with`] to override.
     pub fn put_file(
         &self,
         r: &WorkspaceRef,
         rel_path: impl AsRef<Path>,
         bytes: &[u8],
     ) -> Result<()> {
+        self.put_file_with(r, rel_path, bytes, HostWriteOptions::default())
+    }
+
+    /// [`Self::put_file`] with options. The write is atomic (temp file + rename in the
+    /// target directory) and never follows a symlink.
+    pub fn put_file_with(
+        &self,
+        r: &WorkspaceRef,
+        rel_path: impl AsRef<Path>,
+        bytes: &[u8],
+        opts: HostWriteOptions,
+    ) -> Result<()> {
         let rel = file_path(rel_path)?;
         self.inner.with_db(true, |db| {
             let ws = find(db, r)?;
-            self.inner.ensure_mutable(ws)?;
-            let root = dir_root(ws)?;
-            let target = resolve_beneath(&root, &rel, true)?;
-            let parent = target.parent().unwrap_or(&root);
-            fs::create_dir_all(parent).map_err(|e| SandboxError::io_at(parent, e))?;
-            ensure_beneath(&root, parent, &rel)?;
-            fs::write(&target, bytes).map_err(|e| SandboxError::io_at(&target, e))?;
+            let _guard = self.inner.ensure_mutable(ws, opts)?;
+            let root = fsx::open_root(&dir_root(ws)?)?;
+            fsx::write_file(&root, &rel, bytes)?;
             touch(ws);
             Ok(())
         })
     }
 
+    /// Read a regular file. Allowed under any lease; a symlink anywhere on the path is
+    /// refused with [`SandboxError::PathEscape`].
     pub fn read_file(&self, r: &WorkspaceRef, rel_path: impl AsRef<Path>) -> Result<Vec<u8>> {
         let rel = file_path(rel_path)?;
-        self.inner.with_db(false, |db| {
-            let ws = find(db, r)?;
-            let root = dir_root(ws)?;
-            let target = resolve_beneath(&root, &rel, true)?;
-            fs::read(&target).map_err(|e| map_io(&rel, &target, e))
-        })
+        let ws = self
+            .inner
+            .with_db(false, |db| find(db, r).map(|w| w.clone()))?;
+        let root = fsx::open_root(&dir_root(&ws)?)?;
+        fsx::read_file(&root, &rel)
     }
 
     /// Delete a file, symlink (the link itself, never its target) or directory (recursively).
     pub fn delete_file(&self, r: &WorkspaceRef, rel_path: impl AsRef<Path>) -> Result<()> {
+        self.delete_file_with(r, rel_path, HostWriteOptions::default())
+    }
+
+    /// [`Self::delete_file`] with options.
+    pub fn delete_file_with(
+        &self,
+        r: &WorkspaceRef,
+        rel_path: impl AsRef<Path>,
+        opts: HostWriteOptions,
+    ) -> Result<()> {
         let rel = file_path(rel_path)?;
         self.inner.with_db(true, |db| {
             let ws = find(db, r)?;
-            self.inner.ensure_mutable(ws)?;
-            let root = dir_root(ws)?;
-            let target = resolve_beneath(&root, &rel, false)?;
-            let meta = fs::symlink_metadata(&target).map_err(|e| map_io(&rel, &target, e))?;
-            if meta.is_dir() {
-                fs::remove_dir_all(&target)
-            } else {
-                fs::remove_file(&target)
-            }
-            .map_err(|e| SandboxError::io_at(&target, e))?;
+            let _guard = self.inner.ensure_mutable(ws, opts)?;
+            let root = fsx::open_root(&dir_root(ws)?)?;
+            fsx::delete(&root, &rel)?;
             touch(ws);
             Ok(())
         })
     }
 
     /// List one directory (non-recursive), sorted by path. Paths are relative to the root.
+    /// Symlinks are listed as [`FileKind::Symlink`]; listing through one is refused.
     pub fn list_files(
         &self,
         r: &WorkspaceRef,
         rel_dir: impl AsRef<Path>,
     ) -> Result<Vec<FileEntry>> {
         let rel = SafeRelPath::new(rel_dir)?;
-        self.inner.with_db(false, |db| {
-            let ws = find(db, r)?;
-            let root = dir_root(ws)?;
-            let dir = resolve_beneath(&root, &rel, true)?;
-            let mut out = Vec::new();
-            for entry in fs::read_dir(&dir).map_err(|e| map_io(&rel, &dir, e))? {
-                let entry = entry.map_err(|e| SandboxError::io_at(&dir, e))?;
-                let meta = fs::symlink_metadata(entry.path())
-                    .map_err(|e| SandboxError::io_at(&entry.path(), e))?;
-                let ft = meta.file_type();
-                let kind = if ft.is_symlink() {
-                    FileKind::Symlink
-                } else if ft.is_dir() {
-                    FileKind::Dir
-                } else if ft.is_file() {
-                    FileKind::File
-                } else {
-                    FileKind::Other
-                };
-                out.push(FileEntry {
-                    path: rel.as_path().join(entry.file_name()),
-                    kind,
-                    size: meta.len(),
-                });
-            }
-            out.sort_by(|a, b| a.path.cmp(&b.path));
-            Ok(out)
-        })
+        let ws = self
+            .inner
+            .with_db(false, |db| find(db, r).map(|w| w.clone()))?;
+        let root = fsx::open_root(&dir_root(&ws)?)?;
+        let mut out: Vec<_> = fsx::list_dir(&root, &rel)?
+            .into_iter()
+            .map(|(name, kind, size)| FileEntry {
+                path: rel.as_path().join(name),
+                kind,
+                size,
+            })
+            .collect();
+        out.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(out)
     }
 
     /// Take a mount lease for sandbox `by`: read-write is exclusive (no other rw or ro
-    /// lease), read-only is shared. Dropping the lease releases it; releasing a read-write
-    /// lease bumps the generation (the guest may have changed the contents).
+    /// lease), read-only is shared — across processes, via `flock` on the workspace's lock
+    /// files. Dropping the lease releases it; releasing a read-write lease bumps the
+    /// generation (the guest may have changed the contents).
     pub fn lease(
         &self,
         r: &WorkspaceRef,
@@ -654,6 +681,13 @@ impl WorkspaceRegistry {
             };
             let mut leases = lock(&self.inner.leases);
             let entry = leases.entry(ws.id).or_default();
+            let elsewhere = |what: &str| {
+                SandboxError::WorkspaceBusy(format!(
+                    "workspace `{}` is mounted {what} by a sandbox in another process",
+                    ws.name
+                ))
+            };
+            let mut locks = Vec::new();
             match mode {
                 MountMode::ReadWrite => {
                     if let Some(holder) = entry.rw {
@@ -669,6 +703,13 @@ impl WorkspaceRegistry {
                             ws.name, entry.ro
                         )));
                     }
+                    for name in [MOUNT_LOCK, RW_LOCK] {
+                        let file = self.inner.lock_file(ws.id, name)?;
+                        if !try_flock(&file, true, &self.inner.lock_path(ws.id, name))? {
+                            return Err(elsewhere("(read-write or read-only)"));
+                        }
+                        locks.push(file);
+                    }
                     entry.rw = Some(by);
                     ws.state = WorkspaceState::LeasedRw { sandbox: by };
                 }
@@ -679,6 +720,11 @@ impl WorkspaceRegistry {
                             ws.name
                         )));
                     }
+                    let file = self.inner.lock_file(ws.id, MOUNT_LOCK)?;
+                    if !try_flock(&file, false, &self.inner.lock_path(ws.id, MOUNT_LOCK))? {
+                        return Err(elsewhere("read-write"));
+                    }
+                    locks.push(file);
                     entry.ro += 1;
                     ws.state = WorkspaceState::LeasedRo { holders: entry.ro };
                 }
@@ -691,6 +737,7 @@ impl WorkspaceRegistry {
                 root,
                 sandbox: by,
                 failed: false,
+                _locks: locks,
             })
         })
     }
@@ -730,14 +777,6 @@ fn file_path(rel: impl AsRef<Path>) -> Result<SafeRelPath> {
     Ok(rel)
 }
 
-fn map_io(rel: &SafeRelPath, path: &Path, e: io::Error) -> SandboxError {
-    if e.kind() == io::ErrorKind::NotFound {
-        SandboxError::not_found("workspace path", rel)
-    } else {
-        SandboxError::io_at(path, e)
-    }
-}
-
 /// A mount lease on a workspace held by one sandbox. Dropping it releases the lease.
 #[derive(Debug)]
 pub struct WorkspaceLease {
@@ -748,6 +787,9 @@ pub struct WorkspaceLease {
     generation: u64,
     sandbox: SandboxId,
     failed: bool,
+    /// Held `flock`s (`mount.lock`, plus `rw.lock` for rw); released after `Drop::drop`
+    /// has recorded the release in the registry.
+    _locks: Vec<File>,
 }
 
 impl WorkspaceLease {
@@ -1077,20 +1119,220 @@ mod tests {
     }
 
     #[test]
-    fn internal_symlinks_allowed() {
+    fn internal_symlinks_refused() {
         let f = fixture();
         fs::create_dir_all(f.host.join("real")).unwrap();
+        fs::write(f.host.join("real/x.txt"), b"1").unwrap();
         symlink("real", f.host.join("alias")).unwrap();
         symlink(f.host.join("real"), f.host.join("abs_alias")).unwrap();
-        f.reg.put_file(&proj(), "alias/x.txt", b"1").unwrap();
+        symlink("real/x.txt", f.host.join("x_link")).unwrap();
+        // Host-side ops never follow symlinks, even ones that stay inside the workspace.
+        for bad in ["alias/y.txt", "abs_alias/x.txt", "x_link"] {
+            assert!(
+                matches!(
+                    f.reg.put_file(&proj(), bad, b"2"),
+                    Err(SandboxError::PathEscape(_))
+                ),
+                "{bad}"
+            );
+            assert!(
+                matches!(
+                    f.reg.read_file(&proj(), bad),
+                    Err(SandboxError::PathEscape(_))
+                ),
+                "{bad}"
+            );
+        }
+        assert!(matches!(
+            f.reg.list_files(&proj(), "alias"),
+            Err(SandboxError::PathEscape(_))
+        ));
+        assert!(!f.host.join("real/y.txt").exists());
         assert_eq!(fs::read(f.host.join("real/x.txt")).unwrap(), b"1");
-        assert_eq!(f.reg.read_file(&proj(), "abs_alias/x.txt").unwrap(), b"1");
         let listed = f.reg.list_files(&proj(), "").unwrap();
         assert!(
             listed
                 .iter()
                 .any(|e| e.path == Path::new("alias") && e.kind == FileKind::Symlink)
         );
+        // Deleting a symlinked directory removes the link, not the directory.
+        f.reg.delete_file(&proj(), "alias").unwrap();
+        assert!(f.host.join("real/x.txt").exists());
+    }
+
+    /// The reviewer's PoC, in-process: a "guest" thread loops `renameat2(RENAME_EXCHANGE)`
+    /// swapping a real directory with a symlink to outside while the host runs file ops.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rename_exchange_race_never_escapes() {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+        use rustix::fs::{CWD, Mode, OFlags, RenameFlags};
+
+        let f = fixture();
+        fs::create_dir_all(f.host.join("real")).unwrap();
+        fs::write(f.host.join("real/secret"), b"SAFE").unwrap();
+        fs::write(f.outside.join("victim"), b"keep").unwrap();
+        symlink(&f.outside, f.host.join("y")).unwrap();
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let swaps = Arc::new(AtomicU64::new(0));
+        let guest = {
+            let (stop, swaps) = (Arc::clone(&stop), Arc::clone(&swaps));
+            let dir = rustix::fs::openat(
+                CWD,
+                &f.host,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .unwrap();
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    // Errors once the test has failed and its tempdir is gone.
+                    if rustix::fs::renameat_with(&dir, "real", &dir, "y", RenameFlags::EXCHANGE)
+                        .is_err()
+                    {
+                        break;
+                    }
+                    swaps.fetch_add(1, Ordering::Relaxed);
+                }
+            })
+        };
+
+        let (mut ok, mut refused) = (0u32, 0u32);
+        for i in 0..2000 {
+            match f.reg.read_file(&proj(), "real/secret") {
+                Ok(bytes) => {
+                    assert_eq!(bytes, b"SAFE", "read escaped at iteration {i}");
+                    ok += 1;
+                }
+                // Symlink refused, or a component swapped mid-walk (not a directory).
+                Err(SandboxError::PathEscape(_) | SandboxError::Workspace(_)) => refused += 1,
+                Err(e) => panic!("unexpected read error: {e}"),
+            }
+            let _ = f.reg.put_file(&proj(), "real/pwned", b"PWNED");
+            let _ = f.reg.delete_file(&proj(), "real/victim");
+            if let Ok(entries) = f.reg.list_files(&proj(), "real") {
+                assert!(
+                    entries.iter().all(|e| e.path != Path::new("real/victim")),
+                    "list escaped at iteration {i}"
+                );
+            }
+            assert!(!f.outside.join("pwned").exists(), "write escaped at {i}");
+            assert!(f.outside.join("victim").exists(), "delete escaped at {i}");
+        }
+        stop.store(true, Ordering::Relaxed);
+        guest.join().unwrap();
+        assert!(swaps.load(Ordering::Relaxed) > 0);
+        assert!(
+            refused > 0,
+            "race never observed (ok={ok}); test is not exercising it"
+        );
+        assert_eq!(fs::read(f.outside.join("secret")).unwrap(), b"top secret");
+    }
+
+    /// Child half of `leases_are_cross_process`: holds a rw lease until stdin closes.
+    #[test]
+    fn lease_holder_child() {
+        let Some(root) = std::env::var_os("SANDCRAB_TEST_LEASE_ROOT") else {
+            return;
+        };
+        let reg = WorkspaceRegistry::open(root).unwrap();
+        let _lease = reg
+            .lease(&proj(), MountMode::ReadWrite, SandboxId::new())
+            .unwrap();
+        println!("LEASE-READY");
+        let mut sink = String::new();
+        let _ = io::stdin().read_line(&mut sink);
+    }
+
+    #[test]
+    fn leases_are_cross_process() {
+        use std::io::BufRead;
+        use std::process::{Command, Stdio};
+
+        let f = fixture();
+        fs::write(f.host.join("a.txt"), b"a").unwrap();
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "registry::tests::lease_holder_child",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("SANDCRAB_TEST_LEASE_ROOT", f.reg.state_root())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut lines = io::BufReader::new(child.stdout.take().unwrap()).lines();
+        assert!(
+            // libtest prints `test <name> ... ` without a newline before the child output.
+            lines.any(|l| l.unwrap().contains("LEASE-READY")),
+            "child never took the lease"
+        );
+
+        // This process has no in-memory lease; only the flock tells it about the child's.
+        let busy = |r: Result<()>| matches!(r, Err(SandboxError::WorkspaceBusy(_)));
+        assert!(busy(f.reg.put_file(&proj(), "b.txt", b"b")));
+        assert!(busy(f.reg.delete_file(&proj(), "a.txt")));
+        assert!(busy(f.reg.remove(&proj(), false).map(drop)));
+        assert!(busy(
+            f.reg
+                .lease(&proj(), MountMode::ReadWrite, SandboxId::new())
+                .map(drop)
+        ));
+        assert!(busy(
+            f.reg
+                .lease(&proj(), MountMode::ReadOnly, SandboxId::new())
+                .map(drop)
+        ));
+        // Reads stay allowed; forced writes go through.
+        assert_eq!(f.reg.read_file(&proj(), "a.txt").unwrap(), b"a");
+        f.reg.list_files(&proj(), "").unwrap();
+        f.reg
+            .put_file_with(&proj(), "b.txt", b"b", HostWriteOptions { force: true })
+            .unwrap();
+        assert_eq!(fs::read(f.host.join("b.txt")).unwrap(), b"b");
+
+        drop(child.stdin.take());
+        assert!(child.wait().unwrap().success());
+        f.reg.put_file(&proj(), "c.txt", b"c").unwrap();
+        drop(
+            f.reg
+                .lease(&proj(), MountMode::ReadWrite, SandboxId::new())
+                .unwrap(),
+        );
+    }
+
+    #[test]
+    fn ro_lease_in_other_process_blocks_rw_only() {
+        let f = fixture();
+        let other = WorkspaceRegistry::open(f.reg.state_root()).unwrap();
+        let ro = other
+            .lease(&proj(), MountMode::ReadOnly, SandboxId::new())
+            .unwrap();
+        // A second registry instance has its own in-memory state: like another process.
+        f.reg.put_file(&proj(), "x", b"x").unwrap();
+        let ro2 = f
+            .reg
+            .lease(&proj(), MountMode::ReadOnly, SandboxId::new())
+            .unwrap();
+        assert!(matches!(
+            f.reg.lease(&proj(), MountMode::ReadWrite, SandboxId::new()),
+            Err(SandboxError::WorkspaceBusy(_))
+        ));
+        drop((ro, ro2));
+        let rw = f
+            .reg
+            .lease(&proj(), MountMode::ReadWrite, SandboxId::new())
+            .unwrap();
+        assert!(matches!(
+            other.put_file(&proj(), "x", b"y"),
+            Err(SandboxError::WorkspaceBusy(_))
+        ));
+        drop(rw);
+        other.put_file(&proj(), "x", b"y").unwrap();
     }
 
     #[test]
