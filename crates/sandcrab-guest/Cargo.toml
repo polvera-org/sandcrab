@@ -36,6 +36,10 @@ tokio = { version = "1", features = [
     "process",
     "fs",
 ] }
+# guest-fs deps
+similar = "2"
+base64 = "0.22"
+tempfile = "3"
 
 [dev-dependencies]
 tempfile = "3"
