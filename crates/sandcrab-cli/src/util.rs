@@ -1,4 +1,4 @@
-//! Shared CLI plumbing: paths, backend construction, output, Ctrl-C.
+//! Shared CLI plumbing: paths, backend construction, output, termination signals.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -117,30 +117,70 @@ pub fn ms(d: Option<Duration>) -> String {
     d.map_or_else(|| "?".into(), |d| d.as_millis().to_string())
 }
 
-/// Ctrl-C latch: once installed, SIGINT no longer kills the process; it flips the flag so
-/// the command can tear its sandbox down first.
+/// Signals that tear the sandbox down before exiting (exit code `128 + signal`).
+#[cfg(unix)]
+pub const TERMINATING_SIGNALS: [i32; 4] = [
+    2,  // SIGINT
+    15, // SIGTERM
+    1,  // SIGHUP
+    3,  // SIGQUIT
+];
+
+/// Termination latch: once installed, SIGINT / SIGTERM / SIGHUP / SIGQUIT no longer kill
+/// the process; the first one received is recorded so the command can tear its sandbox
+/// down first and then exit with `128 + signal`.
 #[derive(Clone)]
-pub struct Interrupt(watch::Receiver<bool>);
+pub struct Interrupt(watch::Receiver<Option<i32>>);
 
 impl Interrupt {
     pub fn install() -> Self {
-        let (tx, rx) = watch::channel(false);
+        let (tx, rx) = watch::channel(None);
+        #[cfg(unix)]
+        for sig in TERMINATING_SIGNALS {
+            use tokio::signal::unix::{SignalKind, signal};
+            let tx = tx.clone();
+            match signal(SignalKind::from_raw(sig)) {
+                Ok(mut stream) => {
+                    tokio::spawn(async move {
+                        while stream.recv().await.is_some() {
+                            // Keep the first signal: it decides the exit code.
+                            tx.send_if_modified(|v| v.is_none() && v.replace(sig).is_none());
+                        }
+                    });
+                }
+                Err(e) => tracing::warn!(signal = sig, error = %e, "cannot install signal handler"),
+            }
+        }
+        #[cfg(not(unix))]
         tokio::spawn(async move {
             while tokio::signal::ctrl_c().await.is_ok() {
-                if tx.send(true).is_err() {
-                    break;
-                }
+                tx.send_if_modified(|v| v.is_none() && v.replace(2).is_none());
             }
         });
         Self(rx)
     }
 
     pub fn is_set(&self) -> bool {
+        self.0.borrow().is_some()
+    }
+
+    /// The first terminating signal received, if any.
+    pub fn signal(&self) -> Option<i32> {
         *self.0.borrow()
     }
 
-    /// Resolves once Ctrl-C has been pressed.
-    pub async fn wait(&mut self) {
-        let _ = self.0.wait_for(|v| *v).await;
+    /// Exit code for an interrupted command: `128 + signal`.
+    pub fn exit_code(&self) -> u8 {
+        exit_code_for(self.signal().unwrap_or(2))
     }
+
+    /// Resolves once a terminating signal has been received.
+    pub async fn wait(&mut self) {
+        let _ = self.0.wait_for(Option::is_some).await;
+    }
+}
+
+/// `128 + signal`, saturating at 255.
+pub fn exit_code_for(sig: i32) -> u8 {
+    u8::try_from((128 + sig).clamp(0, 255)).unwrap_or(255)
 }

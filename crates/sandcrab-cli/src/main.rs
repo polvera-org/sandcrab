@@ -1,7 +1,8 @@
 //! `sandcrab` — operator & developer CLI for Sandcrab.
 //!
-//! Exit codes: `run` exits with the sandboxed command's code (`128 + signal` if killed,
-//! `130` on Ctrl-C); other commands exit `0` on success, `1` on error (`doctor`: any failed
+//! Exit codes: `run` exits with the sandboxed command's code (`128 + signal` if killed);
+//! if `sandcrab` itself gets SIGINT / SIGTERM / SIGHUP / SIGQUIT, `run` and `tool` destroy
+//! the sandbox first and exit `128 + signal` (130 on Ctrl-C); other commands exit `0` on success, `1` on error (`doctor`: any failed
 //! check), `2` on usage errors.
 
 mod args;

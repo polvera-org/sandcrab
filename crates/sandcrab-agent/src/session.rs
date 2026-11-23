@@ -606,12 +606,23 @@ pub async fn main(cli: Cli) -> anyhow::Result<u8> {
 
     let sc = Arc::new(build_sandcrab(&cli)?);
     let intr = Interrupt::install();
-    let task = {
+    let mut task = {
         let sc = sc.clone();
         let intr = intr.clone();
         tokio::spawn(async move { run_session(&sc, llm, opts, &intr).await })
     };
-    let joined = task.await;
+    let joined = tokio::select! {
+        j = &mut task => j,
+        sig = intr.terminated() => {
+            // SIGTERM / SIGHUP / SIGQUIT: destroy every sandbox, then exit. Don't wait for
+            // the session task: the REPL may be blocked reading a (possibly gone) terminal.
+            eprintln!("crabagent: received signal {sig}; destroying the sandbox");
+            if let Err(e) = sc.shutdown().await {
+                eprintln!("warning: sandbox cleanup: {e}");
+            }
+            std::process::exit(128 + sig);
+        }
+    };
     // Safety net: whatever happened above (error, panic), no sandbox outlives us.
     if let Err(e) = sc.shutdown().await {
         eprintln!("warning: sandbox cleanup: {e}");

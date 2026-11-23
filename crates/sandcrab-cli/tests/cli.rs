@@ -427,3 +427,104 @@ fn docker_doctor() {
     assert!(status("template:base").is_some());
     assert!(status("firecracker").is_some());
 }
+
+/// Containers (running or not) labeled with `sandcrab.sandbox_id=<id>`.
+fn containers_of(sandbox_id: &str) -> usize {
+    let out = Command::new("docker")
+        .args([
+            "ps",
+            "-aq",
+            "--filter",
+            &format!("label=sandcrab.sandbox_id={sandbox_id}"),
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "docker ps failed");
+    String::from_utf8_lossy(&out.stdout).lines().count()
+}
+
+/// Start `sandcrab -v run -- sleep 100` in the background; returns it once its sandbox is
+/// up, with the sandbox id.
+fn spawn_sleeper(cli: &Cli) -> (std::process::Child, String) {
+    use std::io::{BufRead, BufReader};
+
+    let mut child = cli
+        .cmd(&["-v", "run", "--", "sleep", "100"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let stderr = child.stderr.take().unwrap();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            eprintln!("  stderr: {line}");
+            // "sandcrab: sandbox <id> (docker-dev, base) ready in N ms"
+            if let Some(rest) = line.strip_prefix("sandcrab: sandbox ")
+                && line.contains("ready in")
+            {
+                let _ = tx.send(rest.split_whitespace().next().unwrap_or("").to_owned());
+            }
+        }
+    });
+    let id = rx
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("sandbox did not come up");
+    assert_eq!(containers_of(&id), 1, "sandbox {id} container not found");
+    // Let the command start inside the sandbox.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    (child, id)
+}
+
+fn kill(sig: &str, child: &std::process::Child) {
+    let st = Command::new("kill")
+        .args([&format!("-{sig}"), &child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(st.success());
+}
+
+/// `sandcrab -v run -- sleep 100`, then `kill -<sig>` once the sandbox is up: the sandbox
+/// must be destroyed and `sandcrab` must exit `128 + signal`.
+fn signal_tears_down(sig: &str, num: i32) {
+    let cli = Cli::new(true);
+    let (mut child, id) = spawn_sleeper(&cli);
+    kill(sig, &child);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let status = loop {
+        if let Some(s) = child.try_wait().unwrap() {
+            break s;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "sandcrab did not exit after SIG{sig}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    assert_eq!(status.code(), Some(128 + num), "SIG{sig}: {status:?}");
+    assert_eq!(
+        containers_of(&id),
+        0,
+        "SIG{sig} leaked the container of sandbox {id}"
+    );
+}
+
+#[test]
+#[ignore = "needs Docker, sandcrab/base:0.1.0 and a static crabd"]
+fn docker_run_sigterm_destroys_the_sandbox() {
+    signal_tears_down("TERM", 15);
+}
+
+#[test]
+#[ignore = "needs Docker, sandcrab/base:0.1.0 and a static crabd"]
+fn docker_run_sighup_destroys_the_sandbox() {
+    signal_tears_down("HUP", 1);
+}
+
+#[test]
+#[ignore = "needs Docker, sandcrab/base:0.1.0 and a static crabd"]
+fn docker_run_sigquit_destroys_the_sandbox() {
+    signal_tears_down("QUIT", 3);
+}

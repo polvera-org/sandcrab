@@ -72,13 +72,14 @@ struct Outcome {
     stdout: String,
     stderr: String,
     truncated: bool,
-    interrupted: bool,
+    /// Terminating signal received by `sandcrab` itself (Ctrl-C, SIGTERM, SIGHUP, SIGQUIT).
+    interrupted: Option<i32>,
 }
 
 impl Outcome {
     fn code(&self) -> u8 {
-        if self.interrupted {
-            return 130;
+        if let Some(sig) = self.interrupted {
+            return util::exit_code_for(sig);
         }
         let code = match (self.exit_code, self.signal) {
             (Some(c), _) => c,
@@ -109,8 +110,8 @@ async fn stream(
     let mut out = Outcome::default();
     let mut delay = POLL_MIN;
     loop {
-        if intr.is_set() && !out.interrupted {
-            out.interrupted = true;
+        if intr.is_set() && out.interrupted.is_none() {
+            out.interrupted = intr.signal();
             let _ = sb.process_kill(pid.as_str(), KillSignal::Kill).await;
         }
         let poll = sb
@@ -146,7 +147,7 @@ async fn stream(
         };
         tokio::select! {
             () = tokio::time::sleep(delay) => {}
-            () = intr.wait(), if !out.interrupted => {}
+            () = intr.wait(), if out.interrupted.is_none() => {}
         }
     }
 }
@@ -163,14 +164,14 @@ pub async fn run(
 
     let outcome = if intr.is_set() {
         Ok(Outcome {
-            interrupted: true,
+            interrupted: intr.signal(),
             ..Outcome::default()
         })
     } else {
         stream(&sb, shell_join(command), g.json, &mut intr).await
     };
 
-    if keep && outcome.as_ref().is_ok_and(|o| !o.interrupted) {
+    if keep && outcome.as_ref().is_ok_and(|o| o.interrupted.is_none()) {
         eprintln!(
             "sandcrab: keeping sandbox {} alive; press Ctrl-C to destroy it",
             sb.id()
@@ -186,7 +187,7 @@ pub async fn run(
             "sandbox_id": id,
             "exit_code": outcome.exit_code,
             "signal": outcome.signal,
-            "interrupted": outcome.interrupted,
+            "interrupted": outcome.interrupted.is_some(),
             "stdout": outcome.stdout,
             "stderr": outcome.stderr,
             "truncated": outcome.truncated,
@@ -231,7 +232,7 @@ pub async fn tool(
     match reply {
         None => {
             eprintln!("sandcrab: interrupted; sandbox {id} destroyed");
-            Ok(130)
+            Ok(intr.exit_code())
         }
         Some(Ok(v)) => {
             print_json(&v)?;
@@ -261,8 +262,12 @@ mod tests {
         assert_eq!(o(None, None).code(), 1);
         assert_eq!(o(Some(300), None).code(), 255);
         let mut i = o(Some(0), None);
-        i.interrupted = true;
+        i.interrupted = Some(2);
         assert_eq!(i.code(), 130);
+        i.interrupted = Some(15);
+        assert_eq!(i.code(), 143);
+        i.interrupted = Some(1);
+        assert_eq!(i.code(), 129);
     }
 
     #[test]
