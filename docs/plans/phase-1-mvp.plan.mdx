@@ -31,7 +31,7 @@ harness run in parallel.
    `SandboxConfig.ports` published to 127.0.0.1 for previews. Tier 3 browser tools deferred.
 2. **Wire framing**: u32 big-endian length-prefixed JSON-RPC 2.0 (`method` = tool name). One protocol for UDS / TCP / vsock. No gRPC.
 3. **License**: Apache-2.0 for all OSS crates; revisit control-plane licensing in Phase 3.
-4. **Phase 2 priority**: Cloud Hypervisor (`virtio-fs`) + libkrun first; Firecracker with snapshot work later.
+4. **MicroVM priority**: Firecracker is pulled into V1 and benchmarked against DockerDev on kvm-homelab. Cloud Hypervisor and libkrun follow in Phase 2.
 5. **Security hooks**: typed `network { policy, allow_domains }` + reserved `secrets` in `SandboxConfig`; backends
    that can't enforce them return an explicit error at spawn time (never silently ignore them).
 6. **Harness**: in-repo Rust `crabagent` on the Anthropic Messages API (default `claude-sonnet-5-5`, configurable),
@@ -48,7 +48,7 @@ harness run in parallel.
 
 ## Risks & open questions
 
-- **No KVM on this VPS** (no `/dev/kvm`, no nested virtualization). V1 isn't affected; Phase 2 microVMs need a bare-metal or nested-virt host.
+- **No KVM on this VPS**: the VPS handles Docker dev; Firecracker and the benchmarks run on kvm-homelab (pending the spike).
 - **2 vCPU** → parallel Ada builds contend for CPU. Cap at 3 concurrent agents with a shared `CARGO_TARGET_DIR` per worktree.
 - **Python 3.15 / Node 26 availability** in `uv` / official images. If a pinned version is missing, fall back to the latest stable and record it in the template.
 - **Egress allowlist is not enforced** in DockerDev (the proxy comes in Phase 3). Unrestricted networking is required for `npm install` in the harness.
