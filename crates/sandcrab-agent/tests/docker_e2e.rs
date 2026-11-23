@@ -1,0 +1,153 @@
+//! Scripted fake LLM driving a real DockerDev sandbox (real crabd). Needs Docker, the
+//! template image and a musl crabd:
+//!
+//! ```sh
+//! cargo test -p sandcrab-agent --test docker_e2e -- --ignored
+//! ```
+//!
+//! Env: `SANDCRAB_CRABD` (default `<repo>/target/<arch>-unknown-linux-musl/release/crabd`),
+//! `CRABAGENT_E2E_TEMPLATE` (default `base`).
+#![cfg(feature = "docker")]
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use sandcrab_agent::agent::{Interrupt, TurnOutcome};
+use sandcrab_agent::llm::fake::{ScriptedLlm, reply, text, tool_use};
+use sandcrab_agent::session::{SessionOptions, run_session};
+use sandcrab_sdk::{DockerDevConfig, Sandcrab};
+use serde_json::{Value, json};
+
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+fn sandcrab(state: &std::path::Path) -> Sandcrab {
+    let crabd = std::env::var_os("SANDCRAB_CRABD").map_or_else(
+        || {
+            repo_root().join(format!(
+                "target/{}-unknown-linux-musl/release/crabd",
+                std::env::consts::ARCH
+            ))
+        },
+        PathBuf::from,
+    );
+    assert!(crabd.is_file(), "crabd not found at {}", crabd.display());
+    Sandcrab::builder()
+        .state_dir(state)
+        .templates_dir(repo_root().join("templates"))
+        .docker(DockerDevConfig {
+            crabd_path: crabd,
+            ..DockerDevConfig::allow_insecure()
+        })
+        .build()
+        .unwrap()
+}
+
+fn results(messages: &[Value]) -> Vec<(Value, bool)> {
+    messages.last().unwrap()["content"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| {
+            (
+                serde_json::from_str(b["content"].as_str().unwrap()).unwrap(),
+                b["is_error"] == true,
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+#[ignore = "needs Docker, template images and a musl crabd"]
+async fn fake_llm_builds_a_page_in_a_real_sandbox_and_it_persists() {
+    let template = std::env::var("CRABAGENT_E2E_TEMPLATE").unwrap_or_else(|_| "base".into());
+    let dir = tempfile::tempdir().unwrap();
+    let sc = sandcrab(&dir.path().join("state"));
+    let page = "<!doctype html>\n<h1>Sandcrab</h1>\n";
+
+    // Session 1: write the page, then list + cat it (two parallel calls), then finish.
+    let llm = Arc::new(ScriptedLlm::new(vec![
+        reply(
+            vec![
+                text("Writing index.html."),
+                tool_use(
+                    "w1",
+                    "file_write",
+                    json!({"path": "index.html", "content": page}),
+                ),
+            ],
+            "tool_use",
+        ),
+        reply(
+            vec![
+                tool_use("b1", "bash", json!({"command": "ls -la && pwd"})),
+                tool_use("r1", "file_read", json!({"path": "index.html"})),
+            ],
+            "tool_use",
+        ),
+        reply(vec![text("Page written.")], "end_turn"),
+    ]));
+    let opts = SessionOptions {
+        workspace: Some("landing".into()),
+        template: template.clone(),
+        max_turns: 10,
+        transcript: Some(dir.path().join("s1.jsonl")),
+        prompt: Some("write a landing page".into()),
+        quiet: true,
+        ..SessionOptions::default()
+    };
+    let report = run_session(&sc, llm.clone(), opts, &Interrupt::default())
+        .await
+        .unwrap();
+    assert_eq!(report.outcome, Some(TurnOutcome::Done), "{report:?}");
+    assert_eq!(report.exit_code, 0);
+    let reqs = llm.requests();
+    assert_eq!(reqs.len(), 3);
+
+    let r = results(&reqs[1]);
+    assert!(!r[0].1, "file_write failed: {}", r[0].0);
+    assert_eq!(r[0].0["bytes_written"], page.len());
+
+    let r = results(&reqs[2]);
+    assert!(!r[0].1 && !r[1].1, "{r:?}");
+    assert_eq!(r[0].0["exit_code"], 0);
+    let stdout = r[0].0["stdout"].as_str().unwrap();
+    assert!(stdout.contains("index.html"), "{stdout}");
+    assert!(stdout.contains("/workspace"), "{stdout}");
+    // file_read numbers lines (`     2\t<h1>…`).
+    let read = r[1].0["content"].as_str().unwrap();
+    assert!(read.contains("\t<h1>Sandcrab</h1>"), "{read}");
+    assert!(sc.list_sandboxes().is_empty());
+
+    // Host side: the workspace kept the file.
+    let bytes = sc.workspaces().read_file("landing", "index.html").unwrap();
+    assert_eq!(bytes, page.as_bytes());
+
+    // Session 2 (new sandbox) sees session 1's work.
+    let llm2 = Arc::new(ScriptedLlm::new(vec![
+        reply(
+            vec![tool_use("g1", "grep", json!({"pattern": "Sandcrab"}))],
+            "tool_use",
+        ),
+        reply(vec![text("Found it.")], "end_turn"),
+    ]));
+    let opts = SessionOptions {
+        workspace: Some("landing".into()),
+        template,
+        max_turns: 5,
+        transcript: Some(dir.path().join("s2.jsonl")),
+        prompt: Some("is the page there?".into()),
+        quiet: true,
+        ..SessionOptions::default()
+    };
+    let report2 = run_session(&sc, llm2.clone(), opts, &Interrupt::default())
+        .await
+        .unwrap();
+    assert_eq!(report2.exit_code, 0);
+    assert_ne!(report2.sandbox_id, report.sandbox_id);
+    let r = results(&llm2.requests()[1]);
+    assert!(!r[0].1, "{r:?}");
+    assert!(r[0].0.to_string().contains("index.html"), "{}", r[0].0);
+    sc.shutdown().await.unwrap();
+}
