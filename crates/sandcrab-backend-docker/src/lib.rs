@@ -5,6 +5,7 @@
 //! accidentally treat it as a multi-tenant production isolation boundary.
 
 mod config;
+pub mod spec;
 
 use async_trait::async_trait;
 use sandcrab_core::{
