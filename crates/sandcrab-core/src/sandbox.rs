@@ -19,6 +19,12 @@ impl SandboxId {
     }
 }
 
+impl std::fmt::Display for SandboxId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 impl Default for SandboxId {
     fn default() -> Self {
         Self::new()
