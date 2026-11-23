@@ -58,7 +58,8 @@ bollard = "0.21"
 rustix = { version = "1", features = ["process"] }
 
 # CLI
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
+anyhow = "1"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
