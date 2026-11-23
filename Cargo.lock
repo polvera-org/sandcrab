@@ -1635,6 +1635,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "sandcrab-bench"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "bollard",
+ "chrono",
+ "clap",
+ "sandcrab-sdk",
+ "schemars",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "sandcrab-cli"
 version = "0.1.0"
 dependencies = [
