@@ -21,12 +21,15 @@ export const label = (text, at, extra = {}) => ({ text, at, a: 1, ...extra });
 
 /** Dashed ink outline box (a "TODO" ghost), base at y = 0. */
 export function ghostBox(k, w, h, d, { color = C.ink, opacity = 0.55, dash = 0.1, fill = C.paper, fillOpacity = 0.22 } = {}) {
+  // Edges are lifted a hair (the bottom ones would otherwise lie in the ground plane) and
+  // drawn after the fill without depth writes, so dashes never z-fight the fill or ground.
   const g = new THREE.Group();
-  const geo = k.geo(new THREE.EdgesGeometry(new THREE.BoxGeometry(w, h, d).translate(0, h / 2, 0)));
+  const geo = k.geo(new THREE.EdgesGeometry(new THREE.BoxGeometry(w, h, d).translate(0, h / 2 + 0.006, 0)));
   const lines = new THREE.LineSegments(geo, k.mat(new THREE.LineDashedMaterial({
-    color, dashSize: dash, gapSize: dash * 0.7, transparent: true, opacity,
+    color, dashSize: dash, gapSize: dash * 0.7, transparent: true, opacity, depthWrite: false,
   })));
   lines.computeLineDistances();
+  lines.renderOrder = 1;
   g.add(lines);
   if (fillOpacity > 0) {
     const f = new THREE.Mesh(k.geo(new THREE.BoxGeometry(w, h, d).translate(0, h / 2, 0)),

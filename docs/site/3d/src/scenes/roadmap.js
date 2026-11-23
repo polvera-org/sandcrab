@@ -27,7 +27,8 @@ export function createRoadmap() {
   const k = createKit();
   const g = new THREE.Group();
   // shore on the left, sea everywhere else
-  const sea = k.mesh(new THREE.BoxGeometry(6.4, 0.22, 3.6).translate(0.9, -0.19, 0), k.toon(C.teal500), { receive: true });
+  // 2 cm shallower than the shore so their front/back faces are not coplanar (z-fighting)
+  const sea = k.mesh(new THREE.BoxGeometry(6.4, 0.22, 3.56).translate(0.9, -0.19, 0), k.toon(C.teal500), { receive: true });
   g.add(sea);
   const shore = k.slab(1.8, 3.6, 0.32);
   shore.position.set(-3.1, 0.02, 0);

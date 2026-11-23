@@ -34,8 +34,10 @@ export function createShore() {
     g.add(f);
     return f;
   });
-  const wet = new THREE.Mesh(k.geo(new THREE.PlaneGeometry(6, 0.5).rotateX(-Math.PI / 2)), k.basic(C.sandDeep, { transparent: true, opacity: 0.35, depthWrite: false }));
-  wet.position.set(0, 0.003, -0.38);
+  const wet = new THREE.Mesh(k.geo(new THREE.PlaneGeometry(6, 0.5).rotateX(-Math.PI / 2)), k.basic(C.sandDeep, {
+    transparent: true, opacity: 0.35, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1,
+  }));
+  wet.position.set(0, 0.006, -0.38);
   g.add(wet);
 
   // sandcastle: white blocks with crenellations
