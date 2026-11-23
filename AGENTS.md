@@ -12,9 +12,9 @@ Before planning or writing code, read:
 
 1. **No Silent Security Downgrades**:
    - Every `RuntimeBackend` MUST explicitly report `BackendCapabilities` (`hardware_isolated`, `multi_tenant_safe`, `supports_snapshots`, `supports_host_dir_mounts`).
-   - Never silently fall back from a hardware microVM backend (`Firecracker`, `CloudHypervisor`, `Libkrun`) to `DockerDev`. `DockerDev` is strictly for local dev/CI and must require explicit selection.
+   - Never silently fall back from a hardware microVM backend (`Firecracker`, `CloudHypervisor`, `Libkrun`) to Docker. Docker is an officially supported backend (shared-kernel isolation, hardened; reports `hardware_isolated=false`, `multi_tenant_safe=false`) and must be selected explicitly.
 2. **One Guest Protocol Across All Backends**:
-   - Host ↔ sandbox communication ALWAYS uses `sandcrab-protocol` talking to `crabd` (`sandcrab-guest`), whether over `virtio-vsock` (microVMs) or Unix socket/loopback (DockerDev).
+   - Host ↔ sandbox communication ALWAYS uses `sandcrab-protocol` talking to `crabd` (`sandcrab-guest`), whether over `virtio-vsock` (microVMs) or Unix socket/loopback (Docker).
    - Never bake Docker-specific `docker exec` shortcuts into `sandcrab-core` or `sandcrab-sdk`; all tools execute through `crabd` so local dev tests the real production protocol.
 3. **Native Rust Tools Inside `crabd`**:
    - File and search tools (`file_read`, `file_write`, `file_edit`, `file_delete`, `file_move`, `list_dir`, `glob`, `grep`) must be implemented natively in Rust inside `sandcrab-guest` (using crates like `ignore`, `globset`, `grep-searcher`, `similar`) rather than shelling out to `sed`/`grep`/`find`.
@@ -38,7 +38,7 @@ Before planning or writing code, read:
 | `sandcrab-protocol` | Wire envelopes, `ToolCall`/`ToolResult`, JSON Schema export (`schemars`), protocol errors | Pure data/serde/schemars; **no** Docker, VMM, or Tokio runtime assumptions |
 | `sandcrab-guest` (`crabd`) | Static Linux binary running inside sandboxes; implements all agent tools | `sandcrab-protocol`, async runtime, Rust FS/search/PTY crates; keep binary small & `musl`-compatible |
 | `sandcrab-core` | `RuntimeBackend` trait, `Workspace` registry & mount model, `TemplateManifest`, `SandboxConfig`, `SandboxManager` | `sandcrab-protocol`, core async/IO crates; **no** backend-specific crates (`bollard`, Firecracker, etc.) |
-| `sandcrab-backend-docker` | Dev/CI `RuntimeBackend` via Docker (`bollard`) running real `crabd` | `sandcrab-core`, `sandcrab-protocol`, `bollard` |
+| `sandcrab-backend-docker` | Officially supported `RuntimeBackend` via hardened Docker containers (`bollard`) running real `crabd`; shared kernel, for single-tenant / trusted-host workloads | `sandcrab-core`, `sandcrab-protocol`, `bollard` |
 | `sandcrab-backend-firecracker` | Linux KVM `RuntimeBackend`: owned HTTP-over-UDS Firecracker API client, vsock `CONNECT` transport, OCI → ext4 rootfs pipeline (`sandcrab-rootfs` bin), pinned kernel/binary, block-volume workspaces, tap pool | `sandcrab-core`, `sandcrab-protocol`, Tokio, `rustix`, `tar`/`flate2`, `sha2`; drives the `firecracker`, `mke2fs`, `docker` and `curl` binaries. **No** Firecracker/VMM SDK crates, **no** `bollard` |
 | `sandcrab-sdk` | Public ergonomic Rust SDK (`Sandcrab`, `Sandbox`, `WorkspaceClient`) | `sandcrab-core`, `sandcrab-protocol`; backends only behind feature flags (`docker` default, `firecracker` opt-in, Linux only) |
 | `sandcrab-cli` (`sandcrab`) | Operator & developer CLI (`doctor`, `workspace`, `template`, `rootfs`, `run`, `tool`, `tools schema`) | `sandcrab-sdk` (backends via its features), `clap`, `anyhow`, `tokio` |
@@ -81,7 +81,7 @@ Note on macOS local dev:
 
 ## 5. Picking Up From Here (Agent Handoff)
 
-Phase 1 (V1) is complete on DockerDev; see [`docs/ROADMAP.md`](docs/ROADMAP.md) (V1 status) and the flow
+Phase 1 (V1) is complete on the Docker backend; see [`docs/ROADMAP.md`](docs/ROADMAP.md) (V1 status) and the flow
 [`docs/plans/phase-1-mvp.flow.yaml`](docs/plans/phase-1-mvp.flow.yaml). Next agent:
 1. Bring up a KVM host (bare metal, or a VM with nested virtualization and `cpu=host`) per [`docs/hosting.md`](docs/hosting.md).
 2. Run the pending Firecracker e2e suite (`cargo test -p sandcrab-backend-firecracker -- --ignored`) and the benchmark with `--backends docker,firecracker`, then regenerate `docs/site/bench-report.html` (`scripts/bench-report-data.py`).
