@@ -6,23 +6,33 @@
 //! <root>/registry.json            # all workspaces (atomic write: tmp + fsync + rename)
 //! <root>/registry.lock            # flock held for every registry read-modify-write
 //! <root>/workspaces/<id>/data/    # ManagedDir contents
+//! <root>/workspaces/<id>/mount.lock  # flock: rw lease exclusive, ro leases shared
+//! <root>/workspaces/<id>/rw.lock     # flock: held exclusive by the rw lease
 //! <root>/workspaces/<id>/...      # per-workspace backend state (ro image cache, staging, recovery)
 //! ```
 //!
-//! Host-side file operations (`put_file` / `read_file` / `delete_file` / `list_files`)
-//! treat the workspace contents as hostile (a sandbox may be rewriting them concurrently).
-//! They refuse `..` and absolute paths, and walk fd-relative from an opened root handle
-//! without following any symlink (see [`crate::fsx`]): a symlink anywhere on the path —
-//! even one pointing inside the workspace — is refused with [`SandboxError::PathEscape`].
-//! `list_files` reports symlinks and `delete_file` removes the link itself. Mutation is
-//! refused while a sandbox holds a read-write lease.
+//! # Host-side file operations
 //!
-//! Leases (`lease()`) are tracked in-process; the registry file itself is safe to share
-//! between processes (CLI + SDK), but two processes leasing the same workspace read-write
-//! is not detected in V1.
+//! `put_file` / `read_file` / `delete_file` / `list_files` treat the workspace contents as
+//! hostile (a sandbox may be rewriting them concurrently). They refuse `..` and absolute
+//! paths, and walk fd-relative from an opened root handle without following any symlink
+//! (see [`crate::fsx`]): a symlink anywhere on the path — even one pointing inside the
+//! workspace — is refused with [`SandboxError::PathEscape`]. `list_files` reports symlinks
+//! and `delete_file` removes the link itself; neither follows it.
+//!
+//! # Leases
+//!
+//! Mount leases are enforced across processes with `flock` on the per-workspace lock files
+//! above (plus in-process bookkeeping for state and messages). A read-write lease is
+//! exclusive against every other lease; read-only leases share. While a read-write lease
+//! is held (by any process), host mutation (`put_file`, `delete_file`, `remove`) fails with
+//! [`SandboxError::WorkspaceBusy`] unless the caller opts in with
+//! [`HostWriteOptions::force`]. Reads are always allowed; they stay race-safe through the
+//! fd-relative walk. Leases held by another process are not reflected in
+//! [`Workspace::state`] (which shows this process's view).
 
 use std::collections::HashMap;
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -43,6 +53,19 @@ pub const STATE_ROOT_ENV: &str = "SANDCRAB_HOME";
 const REGISTRY_FILE: &str = "registry.json";
 const LOCK_FILE: &str = "registry.lock";
 const REGISTRY_VERSION: u32 = 1;
+/// Per-workspace flock: exclusive for a rw lease, shared for ro leases.
+const MOUNT_LOCK: &str = "mount.lock";
+/// Per-workspace flock held exclusively by a rw lease; host mutation probes it.
+const RW_LOCK: &str = "rw.lock";
+
+/// Options for host-side mutation (`put_file_with`, `delete_file_with`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HostWriteOptions {
+    /// Mutate even while a sandbox holds the workspace read-write (the guest may observe
+    /// a half-applied change or overwrite it). Path safety is unaffected; a dirty session
+    /// is still refused.
+    pub force: bool,
+}
 
 /// `$SANDCRAB_HOME`, else `$HOME/.sandcrab`.
 pub fn default_state_root() -> Result<PathBuf> {
@@ -219,13 +242,19 @@ impl Inner {
             .is_some_and(|l| l.rw.is_some() || l.ro > 0)
     }
 
-    /// Refuse host-side mutation while a sandbox can write, or while a session is dirty.
-    fn ensure_mutable(&self, ws: &Workspace) -> Result<()> {
+    /// Refuse host-side mutation while a sandbox (in any process) can write, unless
+    /// `force`, or while a session is dirty. The returned guard holds `rw.lock` for the
+    /// duration of the mutation. Must be called under the exclusive registry lock (lease
+    /// acquisition takes the shared one), so probing the lease locks cannot race a lease.
+    fn ensure_mutable(&self, ws: &Workspace, opts: HostWriteOptions) -> Result<Option<File>> {
         if ws.state == WorkspaceState::DirtySession {
             return Err(SandboxError::WorkspaceBusy(format!(
                 "workspace `{}` has a dirty session; recover or clear it first",
                 ws.name
             )));
+        }
+        if opts.force {
+            return Ok(None);
         }
         if let Some(sandbox) = lock(&self.leases).get(&ws.id).and_then(|l| l.rw) {
             return Err(SandboxError::WorkspaceBusy(format!(
@@ -233,7 +262,45 @@ impl Inner {
                 ws.name
             )));
         }
-        Ok(())
+        let file = self.lock_file(ws.id, RW_LOCK)?;
+        if !try_flock(&file, true, &self.lock_path(ws.id, RW_LOCK))? {
+            return Err(SandboxError::WorkspaceBusy(format!(
+                "workspace `{}` is mounted read-write by a sandbox in another process",
+                ws.name
+            )));
+        }
+        Ok(Some(file))
+    }
+
+    fn lock_path(&self, id: WorkspaceId, name: &str) -> PathBuf {
+        self.workspace_dir(id).join(name)
+    }
+
+    /// Open (creating) a per-workspace lock file.
+    fn lock_file(&self, id: WorkspaceId, name: &str) -> Result<File> {
+        let dir = self.workspace_dir(id);
+        create_private_dir_all(&dir)?;
+        let path = dir.join(name);
+        OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .map_err(|e| SandboxError::io_at(&path, e))
+    }
+
+    /// Whether any process holds any lease on `id` (probe under the exclusive registry lock).
+    fn is_leased_anywhere(&self, id: WorkspaceId) -> Result<bool> {
+        if self.is_leased(id) {
+            return Ok(true);
+        }
+        let path = self.lock_path(id, MOUNT_LOCK);
+        let file = match OpenOptions::new().write(true).open(&path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(SandboxError::io_at(&path, e)),
+        };
+        Ok(!try_flock(&file, true, &path)?)
     }
 
     fn release(&self, id: WorkspaceId, mode: MountMode) {
@@ -247,6 +314,20 @@ impl Inner {
                 leases.remove(&id);
             }
         }
+    }
+}
+
+/// Non-blocking `flock`: `Ok(false)` when another open file description holds it.
+fn try_flock(file: &File, exclusive: bool, path: &Path) -> Result<bool> {
+    let res = if exclusive {
+        file.try_lock()
+    } else {
+        file.try_lock_shared()
+    };
+    match res {
+        Ok(()) => Ok(true),
+        Err(TryLockError::WouldBlock) => Ok(false),
+        Err(TryLockError::Error(e)) => Err(SandboxError::io_at(path, e)),
     }
 }
 
@@ -442,7 +523,7 @@ impl WorkspaceRegistry {
                 .position(|w| r.matches(w))
                 .ok_or_else(|| SandboxError::not_found("workspace", r))?;
             let id = db.workspaces[idx].id;
-            if self.inner.is_leased(id) {
+            if self.inner.is_leased_anywhere(id)? {
                 return Err(SandboxError::WorkspaceBusy(format!(
                     "workspace `{}` is mounted by a running sandbox",
                     db.workspaces[idx].name
@@ -485,18 +566,30 @@ impl WorkspaceRegistry {
     }
 
     /// Write `bytes` to `rel_path`, creating parent directories. Bumps the generation.
-    /// The write is atomic (temp file + rename in the target directory) and never follows
-    /// a symlink.
+    /// Refused while a sandbox (in any process) holds the workspace read-write; see
+    /// [`Self::put_file_with`] to override.
     pub fn put_file(
         &self,
         r: &WorkspaceRef,
         rel_path: impl AsRef<Path>,
         bytes: &[u8],
     ) -> Result<()> {
+        self.put_file_with(r, rel_path, bytes, HostWriteOptions::default())
+    }
+
+    /// [`Self::put_file`] with options. The write is atomic (temp file + rename in the
+    /// target directory) and never follows a symlink.
+    pub fn put_file_with(
+        &self,
+        r: &WorkspaceRef,
+        rel_path: impl AsRef<Path>,
+        bytes: &[u8],
+        opts: HostWriteOptions,
+    ) -> Result<()> {
         let rel = file_path(rel_path)?;
         self.inner.with_db(true, |db| {
             let ws = find(db, r)?;
-            self.inner.ensure_mutable(ws)?;
+            let _guard = self.inner.ensure_mutable(ws, opts)?;
             let root = fsx::open_root(&dir_root(ws)?)?;
             fsx::write_file(&root, &rel, bytes)?;
             touch(ws);
@@ -517,10 +610,20 @@ impl WorkspaceRegistry {
 
     /// Delete a file, symlink (the link itself, never its target) or directory (recursively).
     pub fn delete_file(&self, r: &WorkspaceRef, rel_path: impl AsRef<Path>) -> Result<()> {
+        self.delete_file_with(r, rel_path, HostWriteOptions::default())
+    }
+
+    /// [`Self::delete_file`] with options.
+    pub fn delete_file_with(
+        &self,
+        r: &WorkspaceRef,
+        rel_path: impl AsRef<Path>,
+        opts: HostWriteOptions,
+    ) -> Result<()> {
         let rel = file_path(rel_path)?;
         self.inner.with_db(true, |db| {
             let ws = find(db, r)?;
-            self.inner.ensure_mutable(ws)?;
+            let _guard = self.inner.ensure_mutable(ws, opts)?;
             let root = fsx::open_root(&dir_root(ws)?)?;
             fsx::delete(&root, &rel)?;
             touch(ws);
@@ -553,8 +656,9 @@ impl WorkspaceRegistry {
     }
 
     /// Take a mount lease for sandbox `by`: read-write is exclusive (no other rw or ro
-    /// lease), read-only is shared. Dropping the lease releases it; releasing a read-write
-    /// lease bumps the generation (the guest may have changed the contents).
+    /// lease), read-only is shared — across processes, via `flock` on the workspace's lock
+    /// files. Dropping the lease releases it; releasing a read-write lease bumps the
+    /// generation (the guest may have changed the contents).
     pub fn lease(
         &self,
         r: &WorkspaceRef,
@@ -577,6 +681,13 @@ impl WorkspaceRegistry {
             };
             let mut leases = lock(&self.inner.leases);
             let entry = leases.entry(ws.id).or_default();
+            let elsewhere = |what: &str| {
+                SandboxError::WorkspaceBusy(format!(
+                    "workspace `{}` is mounted {what} by a sandbox in another process",
+                    ws.name
+                ))
+            };
+            let mut locks = Vec::new();
             match mode {
                 MountMode::ReadWrite => {
                     if let Some(holder) = entry.rw {
@@ -592,6 +703,13 @@ impl WorkspaceRegistry {
                             ws.name, entry.ro
                         )));
                     }
+                    for name in [MOUNT_LOCK, RW_LOCK] {
+                        let file = self.inner.lock_file(ws.id, name)?;
+                        if !try_flock(&file, true, &self.inner.lock_path(ws.id, name))? {
+                            return Err(elsewhere("(read-write or read-only)"));
+                        }
+                        locks.push(file);
+                    }
                     entry.rw = Some(by);
                     ws.state = WorkspaceState::LeasedRw { sandbox: by };
                 }
@@ -602,6 +720,11 @@ impl WorkspaceRegistry {
                             ws.name
                         )));
                     }
+                    let file = self.inner.lock_file(ws.id, MOUNT_LOCK)?;
+                    if !try_flock(&file, false, &self.inner.lock_path(ws.id, MOUNT_LOCK))? {
+                        return Err(elsewhere("read-write"));
+                    }
+                    locks.push(file);
                     entry.ro += 1;
                     ws.state = WorkspaceState::LeasedRo { holders: entry.ro };
                 }
@@ -614,6 +737,7 @@ impl WorkspaceRegistry {
                 root,
                 sandbox: by,
                 failed: false,
+                _locks: locks,
             })
         })
     }
@@ -663,6 +787,9 @@ pub struct WorkspaceLease {
     generation: u64,
     sandbox: SandboxId,
     failed: bool,
+    /// Held `flock`s (`mount.lock`, plus `rw.lock` for rw); released after `Drop::drop`
+    /// has recorded the release in the registry.
+    _locks: Vec<File>,
 }
 
 impl WorkspaceLease {
