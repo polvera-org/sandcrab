@@ -1,7 +1,7 @@
 # Sandcrab
 
 <p align="center">
-  <img src="docs/assets/sandcrab-hero.jpg" alt="A rust-orange sand crab among white sandcastle blocks on the shoreline" width="100%">
+  <img src="docs/assets/sandcrab-hero-v2.jpg" alt="A rust-orange sand crab among white sandcastle blocks on the shoreline" width="100%">
 </p>
 
 <p align="center"><em>An architect of the impermanent, born of iron and grit, carving safe harbors from the chaotic shoreline.</em></p>
