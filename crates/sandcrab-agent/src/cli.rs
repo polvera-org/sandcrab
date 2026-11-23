@@ -204,6 +204,12 @@ pub struct Cli {
     #[arg(long, short = 'p')]
     pub prompt: Option<String>,
 
+    /// With -p: keep the sandbox (and its published ports) up for SECS after the task
+    /// finishes, so a preview URL stays reachable; Ctrl-C ends the hold early. Default 0:
+    /// the sandbox is destroyed right away.
+    #[arg(long, value_name = "SECS", default_value_t = 0, requires = "prompt")]
+    pub keep_alive: u64,
+
     /// .env file to read ANTHROPIC_API_KEY (etc.) from. Default: the first .env from the
     /// current directory up to the repository root.
     #[arg(long)]
@@ -234,6 +240,19 @@ mod tests {
         for bad in ["a", "a:b", ":/b", "a:/b:rx", "a:/b:ro:x"] {
             assert!(parse_mount_host(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn keep_alive_needs_one_shot() {
+        let c = Cli::try_parse_from(["crabagent", "-p", "go", "--keep-alive", "300"]).unwrap();
+        assert_eq!(c.keep_alive, 300);
+        assert_eq!(
+            Cli::try_parse_from(["crabagent", "-p", "go"])
+                .unwrap()
+                .keep_alive,
+            0
+        );
+        assert!(Cli::try_parse_from(["crabagent", "--keep-alive", "5"]).is_err());
     }
 
     #[test]

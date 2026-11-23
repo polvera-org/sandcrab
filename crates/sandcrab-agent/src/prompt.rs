@@ -22,6 +22,12 @@ pub struct PromptContext {
     /// `(guest port, host address)`.
     pub ports: Vec<(u16, String)>,
     pub tools: Vec<String>,
+    /// One-shot (`-p`) session: the sandbox is destroyed when the task ends.
+    pub one_shot: bool,
+    /// `--keep-alive` seconds the sandbox is held after a one-shot task (0 = none).
+    pub keep_alive_secs: u64,
+    /// Package/browser cache dir inside a persistent workspace, if one was set up.
+    pub cache_dir: Option<String>,
 }
 
 #[must_use]
@@ -83,7 +89,54 @@ pub fn system_prompt(ctx: &PromptContext) -> String {
             "- Published ports: {list}. Servers must listen on 0.0.0.0 on these exact ports \
              (e.g. `vite --host 0.0.0.0 --port <port> --strictPort`) to be reachable."
         );
+        if ctx.one_shot && ctx.keep_alive_secs == 0 {
+            s.push_str(
+                "- This is a one-shot session: the sandbox and every server in it are destroyed \
+                 as soon as you finish, so the URL above will be dead by the time the user reads \
+                 your reply. Don't present it as live; say how to preview the result instead \
+                 (the built files in the workspace, or the command to serve them).\n",
+            );
+        } else if ctx.one_shot {
+            let _ = writeln!(
+                s,
+                "- After you finish, the sandbox stays up for {}s so the user can open the URL; \
+                 leave the server running.",
+                ctx.keep_alive_secs
+            );
+        }
     }
+    s.push_str(
+        "- `/tmp` may be mounted noexec: never run binaries or load shared libraries from it. \
+         Unpack tools under $HOME or the workspace instead (e.g. `export TMPDIR=$HOME/.tmp`).\n\
+         - $HOME and everything outside the read-write mounts is reset every session.\n",
+    );
+    if let Some(dir) = &ctx.cache_dir {
+        let _ = writeln!(
+            s,
+            "- Package and browser caches (npm, pip/uv, Playwright via XDG_CACHE_HOME) live in \
+             {dir}, inside the persistent workspace, so installs are fast next session. Keep \
+             it out of git (.gitignore) and out of build output."
+        );
+    }
+    if ctx.template == "render" {
+        s.push_str(
+            "- Headless Chromium + Playwright are preinstalled (`require('playwright')`, \
+             `chromium` on PATH). Take screenshots and look at them with file_read.\n",
+        );
+    } else {
+        s.push_str(
+            "- No headless browser is installed here. Chromium + Playwright come preinstalled \
+             only in the `render` template; installing one in this template is slow and needs \
+             system libraries it lacks. Unless the user asks for it, verify visual work another \
+             way (build output, served HTML) and suggest a `--template render` session for \
+             screenshots.\n",
+        );
+    }
+    s.push_str(
+        "- file_read or download of a PNG/JPEG/GIF/WebP image shows you the image itself (up \
+         to ~3.75 MB), so you can inspect screenshots and assets. Other binary files come back \
+         as a summary (size, sha256, type), never as base64.\n",
+    );
     let _ = writeln!(s, "\n# Tools\n{}", ctx.tools.join(", "));
     s.push_str(
         "\n# How to work\n\
@@ -129,6 +182,9 @@ mod tests {
             network: "unrestricted".into(),
             ports: vec![(5173, "127.0.0.1:40001".into())],
             tools: vec!["bash".into(), "file_edit".into(), "process_start".into()],
+            one_shot: true,
+            keep_alive_secs: 0,
+            cache_dir: Some("/workspace/.cache".into()),
         });
         for needle in [
             "ts-dev",
@@ -141,6 +197,11 @@ mod tests {
             "process_start",
             "process_poll",
             "Verify",
+            "one-shot session",
+            "noexec",
+            "/workspace/.cache",
+            "`render` template",
+            "image itself",
         ] {
             assert!(p.contains(needle), "missing {needle}:\n{p}");
         }
@@ -150,5 +211,17 @@ mod tests {
         });
         assert!(p.contains("no internet"));
         assert!(p.contains("No workspace is mounted"));
+        assert!(!p.contains("one-shot"), "no ports → no preview warning");
+
+        let p = system_prompt(&PromptContext {
+            template: "render".into(),
+            ports: vec![(8080, "127.0.0.1:1".into())],
+            one_shot: true,
+            keep_alive_secs: 60,
+            ..PromptContext::default()
+        });
+        assert!(p.contains("stays up for 60s"), "{p}");
+        assert!(p.contains("preinstalled (`require('playwright')`"), "{p}");
+        assert!(!p.contains("No headless browser"));
     }
 }

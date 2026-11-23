@@ -159,3 +159,81 @@ async fn fake_llm_builds_a_page_in_a_real_sandbox_and_it_persists() {
     assert!(r[0].0.to_string().contains("index.html"), "{}", r[0].0);
     sc.shutdown().await.unwrap();
 }
+
+/// Images reach the model as `image` blocks (download and binary file_read), non-image
+/// binaries as a summary; caches point into the workspace; core dumps are off.
+#[tokio::test]
+#[ignore = "needs Docker, template images and a musl crabd"]
+async fn images_reach_the_model_as_image_blocks() {
+    let template = std::env::var("CRABAGENT_E2E_TEMPLATE").unwrap_or_else(|_| "base".into());
+    let dir = tempfile::tempdir().unwrap();
+    let sc = sandcrab(&dir.path().join("state"));
+    let png: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR\0\0\0\x01\0\0\0\x01\x08\x06\0\0\0";
+    sc.workspaces().create("pics").unwrap();
+    sc.workspaces().put_file("pics", "shot.png", png).unwrap();
+    sc.workspaces()
+        .put_file("pics", "blob.bin", &[0u8, 0xFF, 0x00, 0xFE][..])
+        .unwrap();
+
+    let llm = Arc::new(ScriptedLlm::new(vec![
+        reply(
+            vec![
+                tool_use("d1", "download", json!({"path": "shot.png"})),
+                tool_use("f1", "file_read", json!({"path": "shot.png"})),
+                tool_use("d2", "download", json!({"path": "blob.bin"})),
+                tool_use(
+                    "b1",
+                    "bash",
+                    json!({"command": "echo $XDG_CACHE_HOME $npm_config_cache $(ulimit -c)"}),
+                ),
+            ],
+            "tool_use",
+        ),
+        reply(vec![text("Seen.")], "end_turn"),
+    ]));
+    let transcript = dir.path().join("img.jsonl");
+    let opts = SessionOptions {
+        workspace: Some("pics".into()),
+        template,
+        max_turns: 5,
+        transcript: Some(transcript.clone()),
+        prompt: Some("look at shot.png".into()),
+        quiet: true,
+        ..SessionOptions::default()
+    };
+    let report = run_session(&sc, llm.clone(), opts, &Interrupt::default())
+        .await
+        .unwrap();
+    assert_eq!(report.exit_code, 0, "{report:?}");
+    let reqs = llm.requests();
+    let blocks = reqs[1].last().unwrap()["content"]
+        .as_array()
+        .unwrap()
+        .clone();
+    let b64 = {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode(png)
+    };
+    for b in &blocks[..2] {
+        let parts = b["content"].as_array().unwrap_or_else(|| panic!("{b}"));
+        assert_eq!(parts[0]["type"], "text");
+        assert!(!parts[0]["text"].as_str().unwrap().contains(&b64));
+        assert_eq!(parts[1]["type"], "image");
+        assert_eq!(parts[1]["source"]["media_type"], "image/png");
+        assert_eq!(parts[1]["source"]["data"], b64);
+    }
+    let blob: Value = serde_json::from_str(blocks[2]["content"].as_str().unwrap()).unwrap();
+    assert!(blob.get("content_base64").is_none(), "{blob}");
+    assert_eq!(blob["size"], 4);
+    assert!(blob["sha256"].is_string(), "{blob}");
+    let bash: Value = serde_json::from_str(blocks[3]["content"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        bash["stdout"].as_str().unwrap().trim(),
+        "/workspace/.cache /workspace/.cache/npm 0"
+    );
+    // The transcript keeps the shape but not the image bytes.
+    let t = std::fs::read_to_string(&transcript).unwrap();
+    assert!(!t.contains(&b64));
+    assert!(t.contains("base64 chars elided"));
+    sc.shutdown().await.unwrap();
+}
