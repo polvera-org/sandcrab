@@ -15,6 +15,7 @@
 
 pub mod codec;
 pub mod context;
+pub mod init;
 pub mod server;
 pub mod tools;
 pub mod vsock;

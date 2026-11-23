@@ -2,12 +2,13 @@
 //!
 //! ```text
 //! crabd serve (--unix <path> | --tcp <addr> | --vsock <port>) [--default-cwd /workspace]
+//! crabd init        # PID 1 of a microVM (also selected automatically when PID == 1)
 //! ```
 //!
 //! Subcommands:
 //! - `serve`: answer framed JSON-RPC tool calls (see the `sandcrab_guest` library docs).
-//! - `init` (later, `guest-vsock-init` step): PID 1 mode for microVMs that mounts the
-//!   rootfs / workspaces, takes config over the vsock control port and spawns `crabd serve`.
+//! - `init`: PID 1 mode for microVMs that mounts the rootfs / workspaces, takes config over
+//!   the vsock control port and spawns `crabd serve` (see `sandcrab_guest::init`).
 //!
 //! Logs go to stderr (`RUST_LOG`, default `info`).
 
@@ -29,6 +30,8 @@ struct Cli {
 enum Command {
     /// Serve tool calls over a Unix socket, TCP or vsock.
     Serve(ServeArgs),
+    /// Run as PID 1 of a Sandcrab microVM (mounts, control port, spawns `serve`).
+    Init,
 }
 
 #[derive(Debug, Args)]
@@ -65,7 +68,7 @@ struct ListenArgs {
     #[arg(long, value_name = "ADDR")]
     tcp: Option<String>,
 
-    /// Listen on a virtio-vsock port (Firecracker). Not yet supported.
+    /// Listen on a virtio-vsock port, any CID (Firecracker; Linux only).
     #[arg(long, value_name = "PORT")]
     vsock: Option<u32>,
 }
@@ -83,6 +86,12 @@ impl ListenArgs {
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    // Before clap: the kernel starts `init=/sbin/crabd` without a subcommand.
+    let args: Vec<_> = std::env::args_os().collect();
+    if sandcrab_guest::init::is_init_invocation(std::process::id(), &args) {
+        return sandcrab_guest::init::run().await;
+    }
+
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
@@ -94,6 +103,7 @@ async fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
         Command::Serve(args) => serve(args).await,
+        Command::Init => unreachable!("handled before argument parsing"),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
