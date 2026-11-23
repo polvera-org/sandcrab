@@ -57,11 +57,19 @@ pub struct MkfsParams {
     pub uuid: String,
     pub size_bytes: u64,
     pub inodes: u64,
+    /// Create a journal (writable workspace drives). Read-only images have none.
+    pub journal: bool,
+    /// Owner of the image's root directory (`-E root_owner=uid:gid`); `None` = root.
+    pub root_owner: Option<(u32, u32)>,
 }
 
 impl MkfsParams {
     fn args(&self, src: &str, img: &str) -> Vec<String> {
-        vec![
+        let mut extended = format!("hash_seed={}", self.uuid);
+        if let Some((uid, gid)) = self.root_owner {
+            extended.push_str(&format!(",root_owner={uid}:{gid}"));
+        }
+        let mut a: Vec<String> = vec![
             "-q".into(),
             "-F".into(),
             "-t".into(),
@@ -70,21 +78,25 @@ impl MkfsParams {
             "4096".into(),
             "-m".into(),
             "0".into(),
-            "-O".into(),
-            "^has_journal".into(),
+        ];
+        if !self.journal {
+            a.extend(["-O".into(), "^has_journal".into()]);
+        }
+        a.extend([
             "-L".into(),
             self.label.clone(),
             "-U".into(),
             self.uuid.clone(),
             "-E".into(),
-            format!("hash_seed={}", self.uuid),
+            extended,
             "-N".into(),
             self.inodes.to_string(),
             "-d".into(),
             src.into(),
             img.into(),
             format!("{}k", self.size_bytes / 1024),
-        ]
+        ]);
+        a
     }
 }
 
@@ -212,7 +224,7 @@ pub fn ensure_mkfs_image() -> Result<()> {
     res.map(|_| ())
 }
 
-pub(crate) fn tempdir_in(parent: &Path, prefix: &str) -> Result<PathBuf> {
+pub fn tempdir_in(parent: &Path, prefix: &str) -> Result<PathBuf> {
     fs::create_dir_all(parent).at(parent)?;
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
