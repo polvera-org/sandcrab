@@ -47,8 +47,3 @@ pub async fn dispatch(ctx: &ToolContext, call: ToolCall) -> Result<ToolResult, P
         C::Grep(p) => search::grep(ctx, p).await?.into(),
     })
 }
-
-/// Error returned by a tool that is not implemented yet.
-pub(crate) fn unimplemented(tool: &str) -> ProtocolError {
-    ProtocolError::Unimplemented(format!("`{tool}` is not implemented by this crabd build"))
-}

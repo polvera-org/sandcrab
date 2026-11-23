@@ -144,11 +144,11 @@ pub(crate) fn resolve_write_target(path: &Path) -> Result<PathBuf, ProtocolError
 
 /// Create the parent directories of `path`.
 pub(crate) fn create_parents(path: &Path) -> Result<(), ProtocolError> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)
-                .map_err(|e| io_err("cannot create parent directories of", path, &e))?;
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)
+            .map_err(|e| io_err("cannot create parent directories of", path, &e))?;
     }
     Ok(())
 }
