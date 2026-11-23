@@ -21,7 +21,7 @@ cargo build -p sandcrab-agent --release
 # API key: environment variable or .env (searched from the current directory up to the repo root)
 echo 'ANTHROPIC_API_KEY=sk-ant-...' >> .env
 # Optional: the ssh target printed in port-forward hints
-echo 'CRABAGENT_SSH_HOST=user@dev-vps' >> .env
+echo 'CRABAGENT_SSH_HOST=user@your-dev-host' >> .env
 ```
 
 ### Landing-page run
@@ -87,12 +87,15 @@ error or lost sandbox) and `130` on Ctrl-C.
 | `--transcript <path>` | `~/.sandcrab/transcripts/<session>.jsonl` | JSONL transcript. |
 | `--no-fallback` | off | Disable the server-side refusal fallback. |
 | `-p, --prompt <task>` | REPL | Run a single task (`-` reads it from stdin). |
+| `--keep-alive <secs>` | `0` | With `-p`: keep the sandbox and its ports up this long after the task (Ctrl-C ends it early). |
+| `--env-file <path>` | first `.env` up to the repo root | Where `ANTHROPIC_API_KEY` is read from. |
 
 ## How it works
 
 - **Tools.** Each `ToolDefinition` maps to `{name, description, input_schema}` with
   `eager_input_streaming: true`. A `tool_use` goes to `tool_dispatch(name, input)`, and the
-  JSON reply goes back as a `tool_result` with string content. The result is marked
+  JSON reply goes back as a `tool_result` with string content. Images from `download` (or a
+  binary `file_read` of an image) are attached as `image` blocks instead of base64 text. The result is marked
   `is_error` when the reply is `{"error": {...}}`. Inputs that are not valid JSON, or were
   cut off by `max_tokens`, get an error result and the tool is not run.
 - **Parallel calls.** All `tool_use` blocks in one response run concurrently. Their results
@@ -116,3 +119,5 @@ error or lost sandbox) and `130` on Ctrl-C.
 cargo test -p sandcrab-agent                     # unit tests + fake LLM against core's fake backend
 cargo test -p sandcrab-agent --test docker_e2e -- --ignored   # fake LLM against a real DockerDev sandbox
 ```
+
+Full guide (mounts, ports, caches, images, live-check findings): [docs/crabagent.md](../../docs/crabagent.md).
