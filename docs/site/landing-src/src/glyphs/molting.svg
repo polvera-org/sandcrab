@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" role="img" aria-label="Molting — ephemeral sandbox" style="color:#0B2F38">
+<title>Molting — ephemeral sandbox</title>
+<g transform="translate(17 36) scale(0.62)" stroke-width="3.23" stroke-dasharray="2.4 2.6" opacity=".55">
+<path d="M-9 4l-5 5M-5 6l-3 6M9 4l5 5M5 6l3 6"/>
+<path d="M-9 -1l-5 -5M9 -1l5 -5"/>
+<circle cx="-16" cy="-8" r="4.2" fill="none"/><circle cx="16" cy="-8" r="4.2" fill="none"/>
+<path d="M-4 -7l-1 -4M4 -7l1 -4"/>
+<path d="M-12 3a12 10 0 0 1 24 0q0 4 -12 4t-12 -4z" fill="none"/>
+<circle cx="-5" cy="-12" r="1.9" fill="currentColor" stroke="none"/><circle cx="5" cy="-12" r="1.9" fill="currentColor" stroke="none"/>
+</g><g transform="translate(45 36) scale(0.72)" stroke-width="2.78">
+<path d="M-9 4l-5 5M-5 6l-3 6M9 4l5 5M5 6l3 6"/>
+<path d="M-9 -1l-5 -5M9 -1l5 -5"/>
+<circle cx="-16" cy="-8" r="4.2" fill="#FF6B4A"/><circle cx="16" cy="-8" r="4.2" fill="#FF6B4A"/>
+<path d="M-4 -7l-1 -4M4 -7l1 -4"/>
+<path d="M-12 3a12 10 0 0 1 24 0q0 4 -12 4t-12 -4z" fill="#FF6B4A"/>
+<circle cx="-5" cy="-12" r="1.9" fill="currentColor" stroke="none"/><circle cx="5" cy="-12" r="1.9" fill="currentColor" stroke="none"/>
+</g><rect x="52" y="42" width="7" height="7" rx="1.2" fill="#1F7A8C"/><path d="M4 56H60"/><circle cx="6" cy="30" r=".9" fill="currentColor" stroke="none"/><circle cx="4" cy="36" r=".9" fill="currentColor" stroke="none"/><circle cx="7" cy="42" r=".9" fill="currentColor" stroke="none"/>
+</svg>
