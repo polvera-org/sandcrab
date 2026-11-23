@@ -46,7 +46,9 @@ export function createSafety() {
     barrier.add(s);
   }
   for (const x of [-0.36, 0.36]) {
-    const leg = k.mesh(new THREE.BoxGeometry(0.05, 0.48, 0.05).translate(0, 0.24, 0), mInk);
+    // legs end just inside the stripe bottom: running through the stripes they sat 5 mm
+    // behind its faces and shared its top face (z-fighting)
+    const leg = k.mesh(new THREE.BoxGeometry(0.05, 0.34, 0.05).translate(0, 0.17, 0), mInk);
     leg.position.x = x;
     barrier.add(leg);
   }
@@ -63,7 +65,8 @@ export function createSafety() {
 
   // ── shielded workspace (centre-right) ──
   const ws = new THREE.Group();
-  ws.position.set(1.0, 0, -0.35);
+  // lifted so the pad's top face is not coplanar with the slab top (z-fighting)
+  ws.position.set(1.0, 0.02, -0.35);
   g.add(ws);
   const pad = k.disc(0.85, 0.08, C.sand50);
   ws.add(pad);
@@ -97,7 +100,7 @@ export function createSafety() {
   for (let i = 0; i < 3; i++) {
     const m = k.toon(C.paper, { emissive: new THREE.Color(C.teal500), emissiveIntensity: 0 });
     const tk = k.mesh(new THREE.CylinderGeometry(0.22, 0.22, 0.1, 24).translate(0, 0.05, 0), m);
-    tk.position.set(-0.75 + i * 0.75, 0, 1.35);
+    tk.position.set(-0.75 + i * 0.75, 0.005, 1.35);
     g.add(tk);
     tokens.push({ tk, m });
   }
@@ -108,7 +111,7 @@ export function createSafety() {
   const c2 = k.mesh(new THREE.BoxGeometry(0.06, 0.03, 0.26), mCheck, { outline: false });
   c2.position.set(0.06, 0, -0.02); c2.rotation.y = -0.6;
   check.add(c1, c2);
-  check.position.set(0.75, 0.115, 1.35);
+  check.position.set(0.75, 0.12, 1.35);
   g.add(check);
 
   const labels = [
@@ -174,7 +177,7 @@ export function createSafety() {
       const on = clamp01(rp - i);
       o.m.color.set(on > 0.5 ? C.teal500 : C.paper);
       o.m.emissiveIntensity = on > 0 ? 0.15 + 0.5 * Math.exp(-(rp - i) * 2) : 0;
-      o.tk.position.y = 0.06 * Math.sin(Math.PI * Math.min(1, on));
+      o.tk.position.y = 0.005 + 0.06 * Math.sin(Math.PI * Math.min(1, on));
     });
     check.visible = rp >= 2.5;
 

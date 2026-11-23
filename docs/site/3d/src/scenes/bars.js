@@ -64,6 +64,7 @@ export function createBars(opts = {}) {
     const bar = k.mesh(new THREE.BoxGeometry(0.38, 1, 0.5).translate(0, 0.5, 0), mBar[j]);
     bar.position.set(GX[0] + BX[j], 0, Z);
     bar.scale.y = 0.0001;
+    bar.visible = false;
     g.add(bar);
     const h95 = (st.p95_ms / MS_MAX) * H_MAX;
     const whisk = new THREE.Group();
@@ -98,6 +99,7 @@ export function createBars(opts = {}) {
     bars.forEach((o, j) => {
       const p = ease(clamp01((t - o.delay) / 1.4));
       o.bar.scale.y = Math.max(0.0001, o.h * p);
+      o.bar.visible = o.h * p > 0.004; // a flat bar would lie in the slab top plane
       o.whisk.visible = p > 0.98;
       tops[j].position.y = o.h * p + 0.12;
       labels[j].a = clamp01((t - o.delay - 1.1) / 0.4);
