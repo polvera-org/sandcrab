@@ -156,7 +156,10 @@ pub struct SessionReport {
     pub sandbox_id: String,
 }
 
-/// Register `host` as a workspace (or reuse the existing registration); returns its name.
+/// Register `host` as a workspace (or reuse the existing registration of the same
+/// canonical directory); returns its name. A directory inside or containing another
+/// workspace is refused (nested workspaces are unsafe) with a hint to mount the existing
+/// workspace instead.
 pub fn ensure_host_workspace(ws: &WorkspaceClient, host: &Path) -> anyhow::Result<String> {
     let canon = std::fs::canonicalize(host)
         .with_context(|| format!("--mount-host: cannot resolve {}", host.display()))?;
@@ -166,6 +169,34 @@ pub fn ensure_host_workspace(ws: &WorkspaceClient, host: &Path) -> anyhow::Resul
         .find(|w| matches!(&w.backing, WorkspaceBacking::HostDir(p) if *p == canon))
     {
         return Ok(w.name.clone());
+    }
+    for w in all.iter().filter(|w| w.backing.is_dir()) {
+        let p = w.backing.path();
+        if let Ok(sub) = canon.strip_prefix(p) {
+            bail!(
+                "--mount-host {}: it is inside workspace `{}` ({}); nested workspaces are \
+                 refused. Mount the parent instead, e.g. `--mount {}:/parent:ro`, and use \
+                 `/parent/{}` in the sandbox",
+                canon.display(),
+                w.name,
+                p.display(),
+                w.name,
+                sub.display()
+            );
+        }
+        if p.starts_with(&canon) {
+            bail!(
+                "--mount-host {}: it contains workspace `{}` ({}); nested workspaces are \
+                 refused. Mount `{}` with `--mount {}:<guest_path>` instead, or remove it \
+                 first with `sandcrab workspace rm {}`",
+                canon.display(),
+                w.name,
+                p.display(),
+                w.name,
+                w.name,
+                w.name
+            );
+        }
     }
     let taken: HashSet<&str> = all.iter().map(|w| w.name.as_str()).collect();
     let base = host_workspace_name(&canon);
@@ -666,6 +697,31 @@ pub async fn main(cli: Cli) -> anyhow::Result<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mount_host_reuses_and_refuses_overlap() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = WorkspaceClient::open(dir.path().join("state")).unwrap();
+        let outer = dir.path().join("outer");
+        std::fs::create_dir_all(outer.join("inner")).unwrap();
+        std::fs::create_dir_all(dir.path().join("other")).unwrap();
+        let a = ensure_host_workspace(&ws, &outer).unwrap();
+        // Same canonical dir (through `.`): reused, not re-registered.
+        assert_eq!(ensure_host_workspace(&ws, &outer.join(".")).unwrap(), a);
+        let e = ensure_host_workspace(&ws, &outer.join("inner"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("inside workspace") && e.contains("/parent/inner"),
+            "{e}"
+        );
+        let e = ensure_host_workspace(&ws, dir.path())
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("contains workspace"), "{e}");
+        ensure_host_workspace(&ws, &dir.path().join("other")).unwrap();
+        assert_eq!(ws.list().unwrap().len(), 2);
+    }
 
     #[test]
     fn dotenv_lookup_and_discovery() {
