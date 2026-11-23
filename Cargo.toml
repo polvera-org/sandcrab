@@ -8,6 +8,7 @@ members = [
     "crates/sandcrab-backend-firecracker",
     "crates/sandcrab-sdk",
     "crates/sandcrab-cli",
+    "crates/sandcrab-bench",
 ]
 
 [workspace.package]
