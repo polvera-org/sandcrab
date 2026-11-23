@@ -4,11 +4,9 @@
   <img src="docs/assets/sandcrab-hero-v2.jpg" alt="A rust-orange sand crab among white sandcastle blocks on the shoreline" width="100%">
 </p>
 
-<p align="center"><em>An architect of the impermanent, born of iron and grit, carving safe harbors from the chaotic shoreline.</em></p>
+<p><em>An architect of the impermanent, born of iron and grit, carving safe harbors from the chaotic shoreline.</em></p>
 
-**Sandcrab** is an open-source, self-hostable, Rust-based ephemeral sandbox manager and SDK for AI agents.
-
-> *Sandbox + Rust's crab mascot = Sandcrab.*
+**Sandcrab** is an open-source, self-hostable, Rust-based ephemeral sandbox manager and SDK for running untrusted agent code.
 
 ## Why Sandcrab?
 
