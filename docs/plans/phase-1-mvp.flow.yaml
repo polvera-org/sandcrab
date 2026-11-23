@@ -8,7 +8,7 @@
 # All HTML deliverables are local static files under docs/site/ (never Claude artifacts).
 
 slug: phase-1-mvp
-name: Sandcrab V1 — DockerDev + Firecracker
+name: Sandcrab V1 — DockerDev (+ Firecracker built, tests pending)
 summary: >-
   Working V1 on two backends: crabd native tools over length-prefixed JSON-RPC 2.0, persistent
   workspaces, DockerDev and Firecracker (vsock) backends, SDK + CLI + crabagent harness. Ends with a
@@ -43,9 +43,11 @@ steps:
     agent: nova
     title: Spike + bootstrap kvm-homelab (Proxmox, tailnet) as the KVM host for Firecracker and benchmarks
     depends_on: []
-    status: doing
+    status: blocked
     notes: >-
-      Subagent spike in progress: host type, /dev/kvm access, nested virt, Firecracker smoke boot. Benchmarks must run BOTH backends on this same
+      DEFERRED by human 2026-11-23: build Firecracker now, test later. Spike 2026-11-23: kvm-homelab is a Proxmox VM (12 vCPU, 46 GiB, Ubuntu 26.04) with CPU type
+      "QEMU Virtual CPU 2.5+" → no vmx/svm, no /dev/kvm. Runs 14 containers (ollama+GPU, postgres…).
+      Needs Proxmox-host changes: nested virt on + cpu=host (recommended: a dedicated sandcrab-bench VM). Benchmarks must run BOTH backends on this same
       host (bare metal → credible numbers; nested virt adds overhead and skews FC results).
 
   - id: fc-design
@@ -66,7 +68,7 @@ steps:
     title: "Benchmark methodology: metrics, scenarios, run counts, fairness rules, acceptance criteria"
     depends_on: [decisions]
     artifacts: [docs/plans/phase-1-mvp.bench-spec.md]
-    status: todo
+    status: done
     notes: >-
       Metrics: spawn→crabd-ready, first-tool-call latency, teardown, host RSS/PSS per sandbox at
       idle and under load, CPU overhead, disk footprint, density (N concurrent until limit),
@@ -166,7 +168,7 @@ steps:
     phase: implement
     agent: ada
     title: "sandcrab-backend-firecracker: owned HTTP-over-UDS API client, vsock CONNECT handshake, block-volume workspaces rw/ro, tap/NAT, teardown"
-    depends_on: [core, guest-vsock-init, guest-exec, guest-fs, guest-search, rootfs-pipeline, kvm-host]
+    depends_on: [core, guest-vsock-init, guest-exec, guest-fs, guest-search, rootfs-pipeline]
     artifacts: [crates/sandcrab-backend-firecracker/]
     status: todo
     notes: >-
@@ -201,9 +203,10 @@ steps:
     phase: implement
     agent: ada
     title: Run the same e2e suite against Firecracker on the KVM host; fix backend gaps
-    depends_on: [fc-wire, e2e-tests]
+    depends_on: [fc-wire, e2e-tests, kvm-host]
     artifacts: [crates/sandcrab-sdk/tests/]
-    status: todo
+    status: blocked
+    notes: PENDING by human decision 2026-11-23 — no KVM host yet. Tests exist but are marked pending/ignored.
 
   - id: three-kit
     phase: implement
@@ -235,14 +238,14 @@ steps:
     phase: verify
     agent: nebula
     title: QA + security review (invariants, path traversal, killpg, insecure-backend gate, container + VM hardening, capability honesty)
-    depends_on: [e2e-tests, fc-e2e, harness]
+    depends_on: [e2e-tests, fc-wire, harness]
     status: todo
 
   - id: live-check
     phase: verify
     agent: nova
-    title: "Live run — crabagent builds the crabagent/Sandcrab landing page (open-source production agent sandboxing, 3D via three-kit) on Docker AND Firecracker; full fmt/clippy/test/--ignored gate"
-    depends_on: [e2e-tests, fc-e2e, harness, three-kit]
+    title: "Live run — crabagent builds the crabagent/Sandcrab landing page (open-source production agent sandboxing, 3D via three-kit) on Docker; full fmt/clippy/test/--ignored gate"
+    depends_on: [e2e-tests, harness, three-kit]
     artifacts: [docs/site/landing/]
     status: todo
     notes: >-
@@ -253,8 +256,8 @@ steps:
   - id: bench-run
     phase: verify
     agent: nova
-    title: Execute benchmarks for both backends on the same KVM host; capture raw JSON + host specs
-    depends_on: [bench-harness, fc-e2e, e2e-tests]
+    title: Execute DockerDev benchmarks (VPS, declared host specs); capture raw JSON. Other backends = TODO
+    depends_on: [bench-harness, e2e-tests]
     artifacts: [docs/bench/results/]
     status: todo
 
@@ -262,7 +265,7 @@ steps:
   - id: bench-report
     phase: document
     agent: rosetta
-    title: "Backend comparison report (HTML): boot, teardown, resources, density, isolation trade-offs → recommended default"
+    title: "Backend report (HTML): DockerDev measured; Firecracker / Cloud Hypervisor / libkrun columns marked TODO with what's pending"
     depends_on: [bench-run, review]
     artifacts: [docs/site/bench-report.html]
     status: todo

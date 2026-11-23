@@ -39,10 +39,8 @@ harness run in parallel.
 
 ## Firecracker + benchmark scope
 
-- **KVM host**: Firecracker needs `/dev/kvm`, and the VPS doesn't have it. Firecracker and both benchmarks run on **kvm-homelab** (Proxmox, reached over the tailnet), so the comparison is fair. A spike is checking access now.
+- **Scope (human decision 2026-11-23)**: V1 ships and benchmarks **DockerDev only**. The Firecracker backend is fully built, but its e2e tests and benchmarks are **pending** until a KVM host exists (kvm-homelab needs `--cpu host` and nested virtualization; see `kvm-host`). The report marks Firecracker, Cloud Hypervisor and libkrun as TODO.
 - **Workspace model**: Firecracker has no `virtio-fs`, so workspaces have to become ext4 block devices. `fc-design` (Turing) decides how host-side mutation between turns keeps working. That cost is measured.
-- **Honest expectation**: Firecracker should win on isolation and, later, on snapshot restore (not in V1). On a cold boot, Docker may match or beat it on spawn latency and per-sandbox memory, since it has no guest kernel.
-  The report states what the numbers say, and the default recommendation weighs isolation, not just speed.
 - **Landing page**: crabagent builds a landing page about itself, promoting Sandcrab as open-source production agent sandboxing. It uses the shared `three-kit` 3D scenes (mounted read-only), which the presentation reuses.
 - **Deliverables**: `docs/site/` holds the bench report, the walkthrough, the 3D presentation, and the crab symbology. All are local static HTML.
 
