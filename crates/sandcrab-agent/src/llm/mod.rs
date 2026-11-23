@@ -144,6 +144,30 @@ impl LlmError {
         }
     }
 
+    /// The API refused the request itself (400 / 413 / 422, or an in-stream
+    /// `invalid_request_error`): resending the same history fails the same way.
+    #[must_use]
+    pub fn is_request_rejection(&self) -> bool {
+        match self {
+            Self::Api { status, .. } => matches!(status, 400 | 413 | 422),
+            Self::StreamApi { kind, .. } => {
+                matches!(kind.as_str(), "invalid_request_error" | "request_too_large")
+            }
+            _ => false,
+        }
+    }
+
+    /// A request rejection that blames an image (dimensions, format, corrupt data, too many).
+    #[must_use]
+    pub fn is_image_rejection(&self) -> bool {
+        let msg = match self {
+            Self::Api { message, .. } | Self::StreamApi { message, .. } => message,
+            _ => return false,
+        };
+        let m = msg.to_ascii_lowercase();
+        self.is_request_rejection() && (m.contains("image") || m.contains("media"))
+    }
+
     #[must_use]
     pub fn retry_after(&self) -> Option<Duration> {
         match self {

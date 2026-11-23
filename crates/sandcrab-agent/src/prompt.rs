@@ -26,7 +26,8 @@ pub struct PromptContext {
     pub one_shot: bool,
     /// `--keep-alive` seconds the sandbox is held after a one-shot task (0 = none).
     pub keep_alive_secs: u64,
-    /// Package/browser cache dir inside a persistent workspace, if one was set up.
+    /// Package/browser cache dir inside a Sandcrab-managed workspace, if one was set up
+    /// (never inside a host directory).
     pub cache_dir: Option<String>,
 }
 
@@ -132,10 +133,15 @@ pub fn system_prompt(ctx: &PromptContext) -> String {
              screenshots.\n",
         );
     }
-    s.push_str(
+    let _ = writeln!(
+        s,
         "- file_read or download of a PNG/JPEG/GIF/WebP image shows you the image itself (up \
-         to ~3.75 MB), so you can inspect screenshots and assets. Other binary files come back \
-         as a summary (size, sha256, type), never as base64.\n",
+         to ~3.75 MB and {} px per side), so you can inspect screenshots and assets. Take \
+         viewport-sized screenshots, not full-page ones. Other binary files, and images that \
+         are too large or truncated, come back as a summary (size, sha256, type), never as \
+         base64. Only the last few images stay in the conversation; older ones become \
+         `[image elided: …]` notes, so write down what you saw that matters.",
+        crate::media::MAX_IMAGE_SIDE
     );
     let _ = writeln!(s, "\n# Tools\n{}", ctx.tools.join(", "));
     s.push_str(
@@ -202,6 +208,8 @@ mod tests {
             "/workspace/.cache",
             "`render` template",
             "image itself",
+            "8000 px",
+            "image elided",
         ] {
             assert!(p.contains(needle), "missing {needle}:\n{p}");
         }

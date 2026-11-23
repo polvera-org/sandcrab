@@ -355,8 +355,8 @@ mod tests {
     #[test]
     fn image_download_is_sent_as_an_image_block() {
         use base64::Engine as _;
-        let png = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR";
-        let b64 = base64::engine::general_purpose::STANDARD.encode(png);
+        let png = media::fixtures::png(1, 1);
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
         let mut o = ToolOutcome::from_dispatch(
             "t9",
             "download",

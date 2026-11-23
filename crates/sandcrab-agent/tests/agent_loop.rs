@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use sandcrab_agent::agent::{Agent, Interrupt, TurnOutcome};
-use sandcrab_agent::llm::fake::{ScriptedLlm, reply, text, tool_use};
+use sandcrab_agent::llm::fake::{ScriptedLlm, bad_request, reply, text, tool_use};
 use sandcrab_agent::llm::{EventSink, LlmClient, LlmError, Request, Response};
 use sandcrab_agent::session::{SessionOptions, run_session};
 use sandcrab_agent::tools::anthropic_tools;
@@ -286,4 +286,65 @@ async fn api_failure_ends_the_turn() {
     assert_eq!(report.exit_code, 1);
     assert!(matches!(report.outcome, Some(TurnOutcome::Failed(_))));
     assert!(sc.list_sandboxes().is_empty());
+}
+
+/// A turn the API rejects (HTTP 400) is rolled back, so the REPL keeps working.
+#[tokio::test]
+async fn rejected_turn_is_rolled_back_and_the_next_turn_works() {
+    let dir = tempfile::tempdir().unwrap();
+    let (sc, _b) = setup(dir.path());
+    let llm = Arc::new(ScriptedLlm::with_results(vec![
+        Ok(reply(vec![text("ok")], "end_turn")),
+        Ok(reply(
+            vec![tool_use("t1", "bash", json!({"command": "ls"}))],
+            "tool_use",
+        )),
+        Err(bad_request(
+            "messages.3: something about this request is invalid",
+        )),
+        Ok(reply(vec![text("fine")], "end_turn")),
+    ]));
+    let (mut agent, sb) = agent_with(&sc, llm.clone()).await;
+    let intr = Interrupt::default();
+    assert_eq!(agent.run("first", &intr).await, TurnOutcome::Done);
+    let kept = agent.messages().to_vec();
+    assert_eq!(kept.len(), 2);
+
+    let out = agent.run("second", &intr).await;
+    assert!(
+        matches!(out, TurnOutcome::Failed(ref m) if m.contains("HTTP 400")),
+        "{out:?}"
+    );
+    assert_eq!(agent.messages(), &kept[..], "the failed turn is gone");
+
+    assert_eq!(agent.run("third", &intr).await, TurnOutcome::Done);
+    let reqs = llm.requests();
+    assert_eq!(reqs.len(), 4);
+    assert_eq!(reqs[3].len(), 3);
+    assert_eq!(reqs[3][..2], kept[..]);
+    assert_eq!(reqs[3][2]["content"], "third");
+    drop(agent);
+    Arc::try_unwrap(sb).unwrap().destroy().await.unwrap();
+}
+
+/// Transient failures (retries exhausted) keep the turn: the history is still valid.
+#[tokio::test]
+async fn transient_failure_keeps_the_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let (sc, _b) = setup(dir.path());
+    let llm = Arc::new(ScriptedLlm::with_results(vec![
+        Err(LlmError::Transport("connection reset".into())),
+        Ok(reply(vec![text("ok")], "end_turn")),
+    ]));
+    let (mut agent, sb) = agent_with(&sc, llm.clone()).await;
+    let intr = Interrupt::default();
+    assert!(matches!(
+        agent.run("a", &intr).await,
+        TurnOutcome::Failed(_)
+    ));
+    assert_eq!(agent.messages().len(), 1);
+    assert_eq!(agent.run("b", &intr).await, TurnOutcome::Done);
+    assert_eq!(llm.requests()[1].len(), 2);
+    drop(agent);
+    Arc::try_unwrap(sb).unwrap().destroy().await.unwrap();
 }

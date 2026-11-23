@@ -8,10 +8,10 @@ use serde_json::{Value, json};
 
 use super::{EventSink, LlmClient, LlmError, Request, Response, StreamEvent, Usage};
 
-/// Replays `responses` in order; fails once the script is exhausted.
+/// Replays `responses` (or errors) in order; fails once the script is exhausted.
 #[derive(Debug, Default)]
 pub struct ScriptedLlm {
-    script: Mutex<VecDeque<Response>>,
+    script: Mutex<VecDeque<Result<Response, LlmError>>>,
     /// `messages` of every request received, in order.
     pub requests: Mutex<Vec<Vec<Value>>>,
 }
@@ -19,8 +19,14 @@ pub struct ScriptedLlm {
 impl ScriptedLlm {
     #[must_use]
     pub fn new(responses: Vec<Response>) -> Self {
+        Self::with_results(responses.into_iter().map(Ok).collect())
+    }
+
+    /// A script that may also fail requests (e.g. an HTTP 400).
+    #[must_use]
+    pub fn with_results(results: Vec<Result<Response, LlmError>>) -> Self {
         Self {
-            script: Mutex::new(responses.into()),
+            script: Mutex::new(results.into()),
             requests: Mutex::new(Vec::new()),
         }
     }
@@ -46,6 +52,17 @@ pub fn text(t: &str) -> Value {
 #[must_use]
 pub fn tool_use(id: &str, name: &str, input: Value) -> Value {
     json!({"type": "tool_use", "id": id, "name": name, "input": input})
+}
+
+/// An HTTP 400 `invalid_request_error` with `message`.
+#[must_use]
+pub fn bad_request(message: &str) -> LlmError {
+    LlmError::Api {
+        status: 400,
+        kind: "invalid_request_error".into(),
+        message: message.into(),
+        retry_after: None,
+    }
 }
 
 /// A canned response with fixed token usage (100 in / 20 out).
@@ -85,7 +102,7 @@ impl LlmClient for ScriptedLlm {
             .lock()
             .expect("lock")
             .pop_front()
-            .ok_or_else(|| LlmError::Stream("fake LLM script exhausted".into()))?;
+            .ok_or_else(|| LlmError::Stream("fake LLM script exhausted".into()))??;
         for b in &resp.content {
             let kind = b["type"].as_str().unwrap_or("");
             sink.on_event(StreamEvent::BlockStart { kind });
