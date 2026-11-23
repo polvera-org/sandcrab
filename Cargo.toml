@@ -5,6 +5,7 @@ members = [
     "crates/sandcrab-core",
     "crates/sandcrab-guest",
     "crates/sandcrab-backend-docker",
+    "crates/sandcrab-backend-firecracker",
     "crates/sandcrab-sdk",
     "crates/sandcrab-cli",
 ]
@@ -34,6 +35,11 @@ serde_json = "1"
 schemars = { version = "0.8", features = ["uuid1"] }
 toml = "0.8"
 
+# Archives & hashing (Firecracker rootfs/artifact pipeline)
+flate2 = "1"
+sha2 = "0.10"
+tar = "0.4"
+
 # Errors, logging & primitives
 thiserror = "2"
 tracing = "0.1"
@@ -46,6 +52,9 @@ tempfile = "3"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
+
+# Testing
+tempfile = "3"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
