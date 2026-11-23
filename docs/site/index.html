@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sandcrab Docs Site</title>
+<meta name="description" content="Index of the local Sandcrab documentation site: walkthrough, 3D presentation, benchmark report, symbology, 3D kit and the crabagent-built landing page.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root {
+  --sand-50:#F5ECD9; --teal-500:#1F7A8C; --coral:#FF6B4A;
+  --bg:#F8F2E6; --surface:#FFFCF6; --surface-2:#F5ECD9; --ink:#0B2F38; --ink-2:#3C5A62; --line:#E2D3B4;
+  --accent:#D9472A; --accent-soft:#FFE3DA; --warn-bg:#FFF4E0; --warn-line:#E9C88A;
+  --shadow:0 1px 2px rgba(11,47,56,.06),0 8px 24px rgba(11,47,56,.07);
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg:#0A1B20; --surface:#10262D; --surface-2:#163239; --ink:#E9F1EF; --ink-2:#A9BFC0; --line:#21414A;
+    --accent:#FF8466; --accent-soft:#3A2420; --warn-bg:#2B2416; --warn-line:#5C4A26;
+    --shadow:0 1px 2px rgba(0,0,0,.3),0 8px 24px rgba(0,0,0,.25);
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg:#0A1B20; --surface:#10262D; --surface-2:#163239; --ink:#E9F1EF; --ink-2:#A9BFC0; --line:#21414A;
+  --accent:#FF8466; --accent-soft:#3A2420; --warn-bg:#2B2416; --warn-line:#5C4A26;
+  --shadow:0 1px 2px rgba(0,0,0,.3),0 8px 24px rgba(0,0,0,.25);
+  color-scheme: dark;
+}
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.6 Inter, system-ui, -apple-system, "Segoe UI", sans-serif; -webkit-font-smoothing:antialiased; }
+.wrap { max-width:1120px; margin:0 auto; padding:0 16px 48px; }
+h1,h2,h3 { font-family:"Space Grotesk", Inter, system-ui, sans-serif; letter-spacing:-.01em; line-height:1.15; margin:0; }
+a { color:var(--accent); }
+code { font:13px/1.4 "JetBrains Mono", ui-monospace, Menlo, monospace; background:var(--surface-2); border:1px solid var(--line); border-radius:6px; padding:1px 6px; overflow-wrap:anywhere; }
+.top { display:flex; justify-content:space-between; align-items:center; gap:12px; padding:20px 0; }
+.brand { font-family:"Space Grotesk",sans-serif; font-weight:700; font-size:18px; }
+.btn { font:500 14px/1 Inter, system-ui, sans-serif; color:var(--ink); background:var(--surface); border:1px solid var(--line); border-radius:999px; padding:9px 14px; cursor:pointer; }
+.btn:hover { border-color:var(--teal-500); }
+.btn:focus-visible, .card:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+.intro { padding:20px 0 8px; max-width:760px; }
+.intro h1 { font-size:clamp(32px,5vw,48px); }
+.intro p { color:var(--ink-2); font-size:18px; }
+.note { background:var(--warn-bg); border:1px solid var(--warn-line); border-radius:14px; padding:12px 16px; margin:12px 0 32px; font-size:15px; }
+.note pre { margin:8px 0 0; overflow-x:auto; }
+.grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(min(100%,320px),1fr)); gap:20px; }
+.card { display:flex; flex-direction:column; text-decoration:none; color:var(--ink); background:var(--surface); border:1px solid var(--line); border-radius:18px; overflow:hidden; box-shadow:var(--shadow); }
+.card:hover { border-color:var(--teal-500); }
+.card figure { margin:0; background:var(--sand-50); aspect-ratio:16/9; }
+.card img { display:block; width:100%; height:100%; object-fit:cover; }
+.card .body { padding:16px 18px 18px; display:flex; flex-direction:column; gap:6px; }
+.card h2 { font-size:21px; }
+.card p { margin:0; color:var(--ink-2); font-size:15px; }
+.tag { align-self:flex-start; font-size:12px; font-weight:600; text-transform:uppercase; letter-spacing:.06em; color:var(--accent); background:var(--accent-soft); border-radius:999px; padding:2px 10px; }
+section.docs { margin-top:44px; }
+section.docs h2 { font-size:26px; margin-bottom:10px; }
+.docs ul { padding-left:20px; color:var(--ink-2); }
+.docs li + li { margin-top:4px; }
+footer { margin-top:40px; color:var(--ink-2); font-size:14px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <span class="brand">Sandcrab</span>
+    <button class="btn" id="theme" type="button" aria-label="Toggle colour theme">Theme: auto</button>
+  </header>
+
+  <div class="intro">
+    <h1>Sandcrab, explained</h1>
+    <p>Ephemeral sandboxes with persistent workspaces for AI agents. These pages explain the V1 code, its results and its visual language.</p>
+  </div>
+
+  <div class="note">
+    <strong>Serve this folder over HTTP.</strong> The 3D scenes and the landing page load ES modules, which browsers block on <code>file://</code>. From the repo root:
+    <pre><code>python3 -m http.server -d docs/site 8000</code></pre>
+    then open <code>http://127.0.0.1:8000/</code>.
+  </div>
+
+  <div class="grid">
+    <a class="card" href="walkthrough.html">
+      <figure><img src="assets/crab/one-wire.webp" alt="A crab messenger running along a single wire" loading="lazy"></figure>
+      <div class="body"><span class="tag">Read first</span><h2>Repo walkthrough</h2>
+        <p>Crate map, the request path from host to <code>crabd</code>, workspace lifecycle, security gates, with links into the code.</p></div>
+    </a>
+    <a class="card" href="presentation.html">
+      <figure><img src="assets/crab/molting.webp" alt="A crab leaving its old shell behind" loading="lazy"></figure>
+      <div class="body"><span class="tag">3D</span><h2>How Sandcrab works</h2>
+        <p>Interactive three.js presentation: sandbox lifecycle, protocol path, workspace mounts, Docker vs. Firecracker isolation, benchmark results.</p></div>
+    </a>
+    <a class="card" href="bench-report.html">
+      <figure><img src="assets/crab/tide-clock.webp" alt="A crab beside a tide clock" loading="lazy"></figure>
+      <div class="body"><span class="tag">Results</span><h2>Benchmark report</h2>
+        <p>DockerDev measured on the V1 host: spawn, first call, teardown, resources, density. Firecracker columns are pending a KVM host.</p></div>
+    </a>
+    <a class="card" href="symbology.html">
+      <figure><img src="assets/crab/isolation.webp" alt="A crab in a sealed jar next to crabs in a shared tide pool" loading="lazy"></figure>
+      <div class="body"><span class="tag">Design</span><h2>Crab symbology</h2>
+        <p>One illustrated scene and glyph per concept: molt, shell, burrow, claws, tide clock, one wire, jar vs. tide pool.</p></div>
+    </a>
+    <a class="card" href="landing/index.html">
+      <figure><img src="presentation/landing-shot.webp" alt="Screenshot of the crabagent-built landing page" loading="lazy"></figure>
+      <div class="body"><span class="tag">Built by crabagent</span><h2>Landing page</h2>
+        <p>The page crabagent wrote inside a Sandcrab sandbox during the V1 live check, copied unchanged.</p></div>
+    </a>
+    <a class="card" href="3d/index.html">
+      <figure><img src="assets/crab/toolbelt.webp" alt="A crab wearing a tool belt" loading="lazy"></figure>
+      <div class="body"><span class="tag">Kit</span><h2>3D kit</h2>
+        <p>The reusable three.js crab scenes (vendored, no CDN) used by the presentation and the landing page. Add <code>?tune</code> for the tuning panel.</p></div>
+    </a>
+  </div>
+
+  <section class="docs">
+    <h2>Reference docs</h2>
+    <ul>
+      <li><a href="../../README.md">README</a>: status, quickstart, SDK example</li>
+      <li><a href="../protocol.md">Protocol and tool reference</a></li>
+      <li><a href="../cli.md">CLI reference</a></li>
+      <li><a href="../crabagent.md">crabagent guide</a></li>
+      <li><a href="../hosting.md">Dev host and KVM host setup</a></li>
+      <li><a href="../ROADMAP.md">Roadmap and V1 status</a></li>
+      <li><a href="../bench/live-check.md">Live check report</a></li>
+    </ul>
+  </section>
+
+  <footer>Sandcrab V1 · Apache-2.0 · local static site, nothing here is fetched at runtime except web fonts.</footer>
+</div>
+<script>
+(function () {
+  var order = ['auto', 'light', 'dark'];
+  var btn = document.getElementById('theme');
+  var saved = 'auto';
+  try { saved = localStorage.getItem('sandcrab-theme') || 'auto'; } catch (e) {}
+  function apply(mode) {
+    if (mode === 'auto') document.documentElement.removeAttribute('data-theme');
+    else document.documentElement.setAttribute('data-theme', mode);
+    btn.textContent = 'Theme: ' + mode;
+  }
+  apply(order.indexOf(saved) >= 0 ? saved : 'auto');
+  btn.addEventListener('click', function () {
+    var cur = document.documentElement.getAttribute('data-theme') || 'auto';
+    var next = order[(order.indexOf(cur) + 1) % order.length];
+    apply(next);
+    try { localStorage.setItem('sandcrab-theme', next); } catch (e) {}
+  });
+})();
+</script>
+</body>
+</html>

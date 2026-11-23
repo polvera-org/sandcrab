@@ -39,10 +39,13 @@ Before planning or writing code, read:
 | `sandcrab-guest` (`crabd`) | Static Linux binary running inside sandboxes; implements all agent tools | `sandcrab-protocol`, async runtime, Rust FS/search/PTY crates; keep binary small & `musl`-compatible |
 | `sandcrab-core` | `RuntimeBackend` trait, `Workspace` registry & mount model, `TemplateManifest`, `SandboxConfig`, `SandboxManager` | `sandcrab-protocol`, core async/IO crates; **no** backend-specific crates (`bollard`, Firecracker, etc.) |
 | `sandcrab-backend-docker` | Dev/CI `RuntimeBackend` via Docker (`bollard`) running real `crabd` | `sandcrab-core`, `sandcrab-protocol`, `bollard` |
-| `sandcrab-sdk` | Public ergonomic Rust SDK (`Sandcrab`, `Sandbox`) | `sandcrab-core`, `sandcrab-protocol` (optional backend re-exports via feature flags) |
-| `sandcrab-cli` (`sandcrab`) | Operator & developer CLI (`doctor`, `workspace`, `template`, `run`) | `sandcrab-sdk`, `sandcrab-core`, `clap`, enabled backends |
+| `sandcrab-backend-firecracker` | Linux KVM `RuntimeBackend`: owned HTTP-over-UDS Firecracker API client, vsock `CONNECT` transport, OCI → ext4 rootfs pipeline (`sandcrab-rootfs` bin), pinned kernel/binary, block-volume workspaces, tap pool | `sandcrab-core`, `sandcrab-protocol`, Tokio, `rustix`, `tar`/`flate2`, `sha2`; drives the `firecracker`, `mke2fs`, `docker` and `curl` binaries. **No** Firecracker/VMM SDK crates, **no** `bollard` |
+| `sandcrab-sdk` | Public ergonomic Rust SDK (`Sandcrab`, `Sandbox`, `WorkspaceClient`) | `sandcrab-core`, `sandcrab-protocol`; backends only behind feature flags (`docker` default, `firecracker` opt-in, Linux only) |
+| `sandcrab-cli` (`sandcrab`) | Operator & developer CLI (`doctor`, `workspace`, `template`, `rootfs`, `run`, `tool`, `tools schema`) | `sandcrab-sdk` (backends via its features), `clap`, `anyhow`, `tokio` |
+| `sandcrab-agent` (`crabagent`) | Test harness: Claude coding agent (Anthropic Messages API) whose tools are exactly the Sandcrab tools | `sandcrab-sdk` (`docker` feature), `reqwest`, `rustyline`, `clap`, `dotenvy`; never a backend crate directly |
+| `sandcrab-bench` | Backend benchmark runner (scenarios, cgroup/`/proc` sampling, JSON results + schema) | `sandcrab-sdk`, `clap`, `schemars`; `bollard` (optional, `docker` feature) for resource sampling only |
 
-Future crates (Phase 2+): `sandcrab-backend-firecracker`, `sandcrab-backend-cloud-hypervisor`, `sandcrab-backend-libkrun`, `sandcrab-server`, `sandcrab-mcp`.
+Future crates (Phase 2+): `sandcrab-backend-cloud-hypervisor`, `sandcrab-backend-libkrun`, `sandcrab-server`, `sandcrab-mcp`.
 
 ---
 
