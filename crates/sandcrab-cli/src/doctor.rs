@@ -1,4 +1,4 @@
-//! `sandcrab doctor [--fix]`.
+//! `sandcrab doctor [--fix [--all [--yes]]]`.
 
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
@@ -26,6 +26,39 @@ struct Check {
 
 #[derive(Default)]
 pub struct Report(Vec<Check>);
+
+/// Orphan reaping requested by `doctor --fix [--all [--yes]]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reap {
+    None,
+    /// This uid + state dir, owning process gone.
+    Owned,
+    /// Every managed container on the host; `confirmed` skips the prompt (`--yes`).
+    All {
+        confirmed: bool,
+    },
+}
+
+/// Ask before the host-wide sweep. Without a terminal, refuse unless `--yes`.
+#[cfg(feature = "docker")]
+fn confirm_reap_all() -> anyhow::Result<bool> {
+    use std::io::{BufRead, IsTerminal, Write};
+
+    eprintln!(
+        "WARNING: `doctor --fix --all` removes EVERY sandcrab docker container on this host,\n\
+         including live sandboxes of other sandcrab processes and other users. Running\n\
+         commands inside them are killed and unsaved sandbox state is lost."
+    );
+    if !std::io::stdin().is_terminal() {
+        eprintln!("refusing without a terminal to confirm; pass --yes to proceed");
+        return Ok(false);
+    }
+    eprint!("Remove all sandcrab containers? Type `yes` to continue: ");
+    std::io::stderr().flush()?;
+    let mut answer = String::new();
+    std::io::stdin().lock().read_line(&mut answer)?;
+    Ok(answer.trim() == "yes")
+}
 
 impl Report {
     pub fn add(&mut self, name: impl Into<String>, status: Status, detail: impl Into<String>) {
@@ -121,11 +154,11 @@ fn state_dir(g: &Global, r: &mut Report, fix: bool) {
 }
 
 #[cfg(feature = "docker")]
-async fn docker(g: &Global, r: &mut Report, fix: bool) {
+async fn docker(g: &Global, r: &mut Report, reap: Reap) {
     use sandcrab_sdk::docker::{
         DockerDevBackend, DockerDevConfig, DockerImageVerifier, check_static_crabd,
     };
-    use sandcrab_sdk::{PinStatus, SandboxError};
+    use sandcrab_sdk::{PinStatus, ReapScope, SandboxError};
 
     let crabd = util::crabd_path(g);
     let crabd_ok = match check_static_crabd(&crabd) {
@@ -248,34 +281,57 @@ async fn docker(g: &Global, r: &mut Report, fix: bool) {
         }
     }
 
-    if fix {
-        match &backend {
-            Some(b) => match b.reap_orphans(&Default::default()).await {
-                Ok(rep) => r.add(
+    let scope = match reap {
+        Reap::None => return,
+        Reap::Owned => ReapScope::Owned,
+        Reap::All { confirmed } => {
+            if !(confirmed || confirm_reap_all().unwrap_or(false)) {
+                return r.add(
                     "orphans",
-                    Status::Ok,
-                    format!(
-                        "reaped {} container(s), {} socket dir(s)",
-                        rep.containers.len(),
-                        rep.socket_dirs.len()
-                    ),
-                ),
-                Err(e) => r.add("orphans", Status::Fail, e.to_string()),
-            },
-            None => r.add(
-                "orphans",
-                Status::Fail,
-                "cannot reap: Docker backend unavailable",
-            ),
+                    Status::Warn,
+                    "host-wide reaping not confirmed; nothing removed",
+                );
+            }
+            ReapScope::All
         }
+    };
+    match &backend {
+        Some(b) => match b.reap_orphans(&Default::default(), scope).await {
+            Ok(rep) => r.add(
+                "orphans",
+                Status::Ok,
+                format!(
+                    "reaped {} container(s), {} socket dir(s){}",
+                    rep.containers.len(),
+                    rep.socket_dirs.len(),
+                    if rep.kept > 0 {
+                        format!(
+                            "; kept {} not provably orphaned (live owner, other user / \
+                                 state dir, or pre-owner-label; `--fix --all` removes them)",
+                            rep.kept
+                        )
+                    } else {
+                        String::new()
+                    }
+                ),
+            ),
+            Err(e) => r.add("orphans", Status::Fail, e.to_string()),
+        },
+        None => r.add(
+            "orphans",
+            Status::Fail,
+            "cannot reap: Docker backend unavailable",
+        ),
     }
 }
 
-pub async fn doctor(g: &Global, fix: bool) -> anyhow::Result<u8> {
+pub async fn doctor(g: &Global, fix: bool, reap: Reap) -> anyhow::Result<u8> {
     let mut r = Report::default();
     rust(&mut r);
     #[cfg(feature = "docker")]
-    docker(g, &mut r, fix).await;
+    docker(g, &mut r, reap).await;
+    #[cfg(not(feature = "docker"))]
+    let _ = reap;
     #[cfg(not(all(feature = "firecracker", target_os = "linux")))]
     kvm(&mut r);
     #[cfg(all(feature = "firecracker", target_os = "linux"))]

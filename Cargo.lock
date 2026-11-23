@@ -1605,6 +1605,7 @@ dependencies = [
  "sandcrab-core",
  "sandcrab-protocol",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
  "tracing",

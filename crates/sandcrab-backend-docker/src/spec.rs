@@ -30,7 +30,7 @@ use sandcrab_core::{
     WorkspaceBacking, validate_mount_target,
 };
 
-use crate::DockerLimits;
+use crate::{DockerLimits, Owner};
 
 /// Where the host `crabd` binary is bind-mounted (read-only) inside the container.
 pub const GUEST_CRABD: &str = "/opt/sandcrab/crabd";
@@ -47,6 +47,12 @@ pub const LABEL_TEMPLATE: &str = "sandcrab.template";
 pub const LABEL_BACKEND: &str = "sandcrab.backend";
 /// Value of [`LABEL_BACKEND`].
 pub const BACKEND_LABEL_VALUE: &str = "docker-dev";
+/// Owner labels (see [`crate::Owner`]): host uid, pid and boot id of the spawning process,
+/// and a hash of its socket state directory.
+pub const LABEL_OWNER_UID: &str = "sandcrab.owner_uid";
+pub const LABEL_OWNER_PID: &str = "sandcrab.owner_pid";
+pub const LABEL_OWNER_BOOT_ID: &str = "sandcrab.owner_boot_id";
+pub const LABEL_STATE_DIR: &str = "sandcrab.state_dir";
 
 /// Host-side facts the container definition depends on.
 #[derive(Debug, Clone, Copy)]
@@ -60,6 +66,8 @@ pub struct SpecContext<'a> {
     /// uid:gid of the host process; the default container user.
     pub host_user: UserSpec,
     pub limits: &'a DockerLimits,
+    /// The spawning process, recorded as owner labels for scoped orphan reaping.
+    pub owner: &'a Owner,
 }
 
 /// Docker `network_mode` for a policy. `egress_restricted` cannot be enforced by plain
@@ -213,12 +221,18 @@ pub fn build_container_spec(
 
     let cwd = guest_str(&spec.default_cwd)?.to_owned();
     let user = effective_user(spec, ctx.host_user);
-    let labels = HashMap::from([
+    let mut labels = HashMap::from([
         (LABEL_MANAGED.to_owned(), "true".to_owned()),
         (LABEL_SANDBOX_ID.to_owned(), spec.id.to_string()),
         (LABEL_TEMPLATE.to_owned(), spec.template.name().to_owned()),
         (LABEL_BACKEND.to_owned(), BACKEND_LABEL_VALUE.to_owned()),
     ]);
+    labels.extend(
+        ctx.owner
+            .labels()
+            .into_iter()
+            .map(|(k, v)| (k.to_owned(), v)),
+    );
     let stop_grace = i64::try_from(ctx.limits.stop_grace.as_secs()).unwrap_or(i64::MAX);
 
     Ok(ContainerCreateBody {
@@ -338,6 +352,12 @@ image = "sandcrab/base:0.1.0"
                 image: "sha256:feed",
                 host_user: UserSpec::new(1234, 5678),
                 limits: &limits,
+                owner: &Owner {
+                    uid: 1234,
+                    pid: 42,
+                    boot_id: "boot-a".into(),
+                    state_dir: "0123456789abcdef".into(),
+                },
             },
         )
     }
@@ -413,6 +433,10 @@ image = "sandcrab/base:0.1.0"
         assert_eq!(labels[LABEL_SANDBOX_ID], s.id.to_string());
         assert_eq!(labels[LABEL_TEMPLATE], "base");
         assert_eq!(labels[LABEL_BACKEND], "docker-dev");
+        assert_eq!(labels[LABEL_OWNER_UID], "1234");
+        assert_eq!(labels[LABEL_OWNER_PID], "42");
+        assert_eq!(labels[LABEL_OWNER_BOOT_ID], "boot-a");
+        assert_eq!(labels[LABEL_STATE_DIR], "0123456789abcdef");
         assert_eq!(body.hostname.unwrap(), container_name(s.id));
         assert_eq!(body.stop_timeout, Some(2));
 

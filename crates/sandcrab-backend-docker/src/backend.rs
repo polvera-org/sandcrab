@@ -212,6 +212,7 @@ impl DockerDevBackend {
                 image: image_id,
                 host_user: self.host_user,
                 limits: &self.config.limits,
+                owner: &self.owner(),
             },
         )?;
         let timings = &spec.timings;

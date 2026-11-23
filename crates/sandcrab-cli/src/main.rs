@@ -79,11 +79,21 @@ pub enum Commands {
     /// Check the host: crabd, Docker, template images + pins, Firecracker prerequisites
     /// (/dev/kvm, pinned artifacts, rootfs cache, tap pool), state dir.
     Doctor {
-        /// Remove orphaned sandcrab containers (host-wide: also those of other running
-        /// sandcrab processes) and Firecracker run dirs of dead sandcrab processes, download
-        /// + verify the pinned Firecracker kernel and binary, tighten state dir permissions.
+        /// Remove orphaned sandcrab containers — only this user's, for this state dir, whose
+        /// sandcrab process is gone — and Firecracker run dirs of dead sandcrab processes,
+        /// download + verify the pinned Firecracker kernel and binary, tighten state dir
+        /// permissions.
         #[arg(long)]
         fix: bool,
+
+        /// With --fix: remove EVERY sandcrab docker container on the host, including live
+        /// sandboxes of other processes and users (asks for confirmation).
+        #[arg(long, requires = "fix")]
+        all: bool,
+
+        /// With --all: skip the confirmation prompt.
+        #[arg(long, short = 'y', requires = "all")]
+        yes: bool,
     },
 
     /// Manage persistent workspaces.
@@ -185,7 +195,14 @@ fn main() -> ExitCode {
 async fn dispatch(cli: Cli) -> anyhow::Result<u8> {
     let g = &cli.global;
     match cli.command {
-        Commands::Doctor { fix } => doctor::doctor(g, fix).await,
+        Commands::Doctor { fix, all, yes } => {
+            let reap = match (fix, all) {
+                (false, _) => doctor::Reap::None,
+                (true, false) => doctor::Reap::Owned,
+                (true, true) => doctor::Reap::All { confirmed: yes },
+            };
+            doctor::doctor(g, fix, reap).await
+        }
         Commands::Workspace { action } => workspace::workspace(g, action),
         Commands::Template { action } => workspace::template(g, action),
         #[cfg(all(feature = "firecracker", target_os = "linux"))]

@@ -511,6 +511,52 @@ fn signal_tears_down(sig: &str, num: i32) {
     );
 }
 
+/// `doctor --fix` must not touch a live sandbox of another sandcrab process (same user,
+/// same or other state dir), and must reap it once that process is gone (SIGKILL: no
+/// cleanup ran).
+#[test]
+#[ignore = "needs Docker, sandcrab/base:0.1.0 and a static crabd"]
+fn docker_doctor_fix_spares_live_sandboxes_of_other_processes() {
+    let cli = Cli::new(true);
+    let other_home = Cli::new(true);
+    let (mut child, id) = spawn_sleeper(&cli);
+
+    cli.run(&["doctor", "--fix"]);
+    assert_eq!(containers_of(&id), 1, "doctor --fix reaped a live sandbox");
+    other_home.run(&["doctor", "--fix"]);
+    assert_eq!(
+        containers_of(&id),
+        1,
+        "doctor --fix of another state dir reaped it"
+    );
+    // --all without confirmation (no terminal, no --yes) removes nothing.
+    let out = other_home.run(&["doctor", "--fix", "--all"]);
+    assert!(stderr(&out).contains("WARNING"), "{}", stderr(&out));
+    assert_eq!(containers_of(&id), 1, "unconfirmed --all reaped it");
+
+    kill("KILL", &child);
+    child.wait().unwrap();
+    assert_eq!(
+        containers_of(&id),
+        1,
+        "expected a leaked container after SIGKILL"
+    );
+    other_home.run(&["doctor", "--fix"]);
+    assert_eq!(containers_of(&id), 1, "another state dir reaped our orphan");
+    cli.run(&["doctor", "--fix"]);
+    assert_eq!(containers_of(&id), 0, "orphan of a dead process not reaped");
+}
+
+#[test]
+fn doctor_all_requires_fix() {
+    let cli = Cli::new(false);
+    assert_eq!(cli.run(&["doctor", "--all"]).status.code(), Some(2));
+    assert_eq!(
+        cli.run(&["doctor", "--fix", "--yes"]).status.code(),
+        Some(2)
+    );
+}
+
 #[test]
 #[ignore = "needs Docker, sandcrab/base:0.1.0 and a static crabd"]
 fn docker_run_sigterm_destroys_the_sandbox() {

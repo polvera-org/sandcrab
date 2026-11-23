@@ -32,4 +32,4 @@ pub use config::{
     CRABD_ENV, DockerDevConfig, DockerLimits, check_static_crabd, default_crabd_path,
     default_state_dir,
 };
-pub use reap::{ReapReport, ReapedContainer};
+pub use reap::{Owner, ReapReport, ReapScope, ReapedContainer, boot_id, state_dir_key};

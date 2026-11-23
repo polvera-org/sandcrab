@@ -102,7 +102,9 @@ pub use sandcrab_core as core;
 pub use sandcrab_protocol as protocol;
 
 #[cfg(feature = "docker")]
-pub use sandcrab_backend_docker::{self as docker, DockerDevBackend, DockerDevConfig, ReapReport};
+pub use sandcrab_backend_docker::{
+    self as docker, DockerDevBackend, DockerDevConfig, ReapReport, ReapScope,
+};
 
 /// The Firecracker backend crate (config types, artifacts, rootfs pipeline, orphan reaping).
 #[cfg(all(feature = "firecracker", target_os = "linux"))]
@@ -431,10 +433,11 @@ impl Sandcrab {
     }
 
     /// Remove Sandcrab-managed DockerDev containers that this instance does not track
-    /// (crash / cancelled-spawn leftovers). **Host-wide**: also removes sandboxes owned by
-    /// *other* running Sandcrab processes on the same daemon.
+    /// (crash / cancelled-spawn leftovers). [`ReapScope::Owned`] only removes containers of
+    /// this uid and state dir whose spawning process is gone; [`ReapScope::All`] is
+    /// **host-wide** and also removes live sandboxes of other processes and users.
     #[cfg(feature = "docker")]
-    pub async fn reap_orphans(&self) -> Result<ReapReport> {
+    pub async fn reap_orphans(&self, scope: ReapScope) -> Result<ReapReport> {
         let docker = self.docker.as_ref().ok_or_else(|| {
             SandboxError::InvalidConfig("orphan reaping needs the docker backend".into())
         })?;
@@ -444,7 +447,7 @@ impl Sandcrab {
             .into_iter()
             .map(|i| i.id)
             .collect();
-        docker.reap_orphans(&tracked).await
+        docker.reap_orphans(&tracked, scope).await
     }
 }
 
