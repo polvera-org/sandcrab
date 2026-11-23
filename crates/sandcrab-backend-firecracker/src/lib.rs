@@ -13,9 +13,11 @@
 
 pub mod api;
 pub mod artifacts;
+pub mod control;
 mod error;
 pub mod hash;
 pub mod rootfs;
+pub mod vsock;
 
 pub use error::{Error, Result};
 

@@ -14,6 +14,9 @@ name = "sandcrab-rootfs"
 path = "src/bin/sandcrab-rootfs.rs"
 
 [dependencies]
+sandcrab-core.workspace = true
+sandcrab-protocol.workspace = true
+async-trait.workspace = true
 tokio.workspace = true
 chrono.workspace = true
 clap.workspace = true
@@ -27,6 +30,7 @@ toml.workspace = true
 uuid = { workspace = true, features = ["v5"] }
 
 [dev-dependencies]
+sandcrab-core = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true
 
 [lints]
