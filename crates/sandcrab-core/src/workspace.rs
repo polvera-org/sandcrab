@@ -217,6 +217,19 @@ pub struct Workspace {
     pub state: WorkspaceState,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// `(dev, ino)` of the backing directory, recorded at registration. Every host op and
+    /// lease checks the root still is that directory. `None` for block volumes and for
+    /// workspaces registered before this was recorded (the symlink-free walk still applies).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_identity: Option<RootIdentity>,
+}
+
+/// Identity of a directory (`st_dev`, `st_ino`): detects a workspace root that was replaced
+/// (renamed away, swapped for another directory) after registration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct RootIdentity {
+    pub dev: u64,
+    pub ino: u64,
 }
 
 /// Mount instruction binding a workspace into a sandbox at spawn time.

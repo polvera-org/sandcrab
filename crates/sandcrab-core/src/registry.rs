@@ -20,6 +20,17 @@
 //! workspace — is refused with [`SandboxError::PathEscape`]. `list_files` reports symlinks
 //! and `delete_file` removes the link itself; neither follows it.
 //!
+//! # Workspace roots
+//!
+//! Directory roots are stored canonical at registration together with their `(dev, ino)`
+//! ([`RootIdentity`]). Every host op and lease opens the stored path by walking from `/`
+//! with `O_NOFOLLOW | O_DIRECTORY` per component — never `canonicalize` again — so a root
+//! (or any ancestor) later replaced by a symlink, removed, or swapped for another directory
+//! fails with [`SandboxError::WorkspaceRootChanged`]. Workspace roots may not overlap each
+//! other or the state root (equal, ancestor or descendant): otherwise a sandbox holding
+//! the outer workspace read-write could swap the inner one's root. Registries written
+//! before this rule are tolerated, but overlapping workspaces cannot be leased.
+//!
 //! # Leases
 //!
 //! Mount leases are enforced across processes with `flock` on the per-workspace lock files
@@ -40,11 +51,13 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
+use std::os::fd::OwnedFd;
+
 use crate::fsx;
 use crate::workspace::validate_workspace_name;
 use crate::{
-    MountMode, Result, SafeRelPath, SandboxError, SandboxId, Workspace, WorkspaceBacking,
-    WorkspaceId, WorkspaceRef, WorkspaceState,
+    MountMode, Result, RootIdentity, SafeRelPath, SandboxError, SandboxId, Workspace,
+    WorkspaceBacking, WorkspaceId, WorkspaceRef, WorkspaceState,
 };
 
 /// Environment variable overriding the default state root.
@@ -57,6 +70,8 @@ const REGISTRY_VERSION: u32 = 1;
 const MOUNT_LOCK: &str = "mount.lock";
 /// Per-workspace flock held exclusively by a rw lease; host mutation probes it.
 const RW_LOCK: &str = "rw.lock";
+/// `ManagedDir` contents under `<root>/workspaces/<id>/`.
+const MANAGED_DATA: &str = "data";
 
 /// Options for host-side mutation (`put_file_with`, `delete_file_with`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -343,30 +358,138 @@ fn touch(ws: &mut Workspace) {
     ws.updated_at = Utc::now();
 }
 
-/// Canonical root directory of a directory-backed workspace.
-fn dir_root(ws: &Workspace) -> Result<PathBuf> {
+/// Open the stored root of a directory-backed workspace without following any symlink
+/// (see the module docs) and check its identity. Returns the handle and observed identity.
+fn open_verified(
+    name: &str,
+    path: &Path,
+    expected: Option<RootIdentity>,
+) -> Result<(OwnedFd, RootIdentity)> {
+    let changed = |why: String| {
+        SandboxError::WorkspaceRootChanged(format!(
+            "workspace `{name}` root {}: {why}; it is no longer the registered directory, \
+             refusing to use it (if this is intended, `workspace rm` and register it again)",
+            path.display()
+        ))
+    };
+    let fd = match fsx::open_root_nofollow(path) {
+        Ok(fd) => fd,
+        Err(fsx::RootOpenError::Changed(why)) => return Err(changed(why)),
+        Err(fsx::RootOpenError::Io(e)) => return Err(SandboxError::io_at(path, e)),
+    };
+    let (dev, ino) = fsx::identity(&fd).map_err(|e| SandboxError::io_at(path, e))?;
+    let got = RootIdentity { dev, ino };
+    if let Some(want) = expected
+        && want != got
+    {
+        return Err(changed(format!(
+            "device/inode changed ({}:{} at registration, now {}:{})",
+            want.dev, want.ino, got.dev, got.ino
+        )));
+    }
+    Ok((fd, got))
+}
+
+/// Re-check, right before use, that `path` (a workspace root from a lease or
+/// [`crate::ResolvedMount`]) is still a symlink-free path to the directory with identity
+/// `expected`. Backends call this immediately before bind-mounting, packing or syncing back.
+/// Errors with [`SandboxError::WorkspaceRootChanged`] otherwise.
+pub fn verify_workspace_root(
+    name: &str,
+    path: &Path,
+    expected: Option<RootIdentity>,
+) -> Result<RootIdentity> {
+    open_verified(name, path, expected).map(|(_, id)| id)
+}
+
+/// Open the root of a directory-backed workspace (verified, see [`open_verified`]).
+fn open_ws_root(ws: &Workspace) -> Result<OwnedFd> {
     match &ws.backing {
         WorkspaceBacking::HostDir(p) | WorkspaceBacking::ManagedDir(p) => {
-            let canon = fs::canonicalize(p).map_err(|e| {
-                SandboxError::Workspace(format!(
-                    "backing directory {} of workspace `{}` is unavailable: {e}",
-                    p.display(),
-                    ws.name
-                ))
-            })?;
-            if !canon.is_dir() {
-                return Err(SandboxError::Workspace(format!(
-                    "backing path {} of workspace `{}` is not a directory",
-                    canon.display(),
-                    ws.name
-                )));
-            }
-            Ok(canon)
+            open_verified(&ws.name, p, ws.root_identity).map(|(fd, _)| fd)
         }
         WorkspaceBacking::BlockVolume(_) => {
             Err(SandboxError::Unimplemented("block volume host mutation"))
         }
     }
+}
+
+fn paths_overlap(a: &Path, b: &Path) -> bool {
+    a.starts_with(b) || b.starts_with(a)
+}
+
+/// Refuse a new directory root `canon` that is equal to, inside, or contains an existing
+/// directory-backed workspace.
+fn ensure_no_overlap(db: &RegistryDb, canon: &Path) -> Result<()> {
+    for w in db.workspaces.iter().filter(|w| w.backing.is_dir()) {
+        let p = w.backing.path();
+        if p == canon {
+            return Err(SandboxError::AlreadyExists {
+                kind: "host dir workspace",
+                id: format!("{} (registered as `{}`)", canon.display(), w.name),
+            });
+        }
+        if canon.starts_with(p) {
+            return Err(SandboxError::InvalidConfig(format!(
+                "refusing to register `{}`: it is inside workspace `{}` ({}); nested \
+                 workspaces are not allowed (a sandbox with the outer one mounted read-write \
+                 could swap the inner root). Mount `{}` instead, at a different guest path \
+                 if needed",
+                canon.display(),
+                w.name,
+                p.display(),
+                w.name
+            )));
+        }
+        if p.starts_with(canon) {
+            return Err(SandboxError::InvalidConfig(format!(
+                "refusing to register `{}`: it contains workspace `{}` ({}); nested \
+                 workspaces are not allowed. Remove it first with `sandcrab workspace rm {}`",
+                canon.display(),
+                w.name,
+                p.display(),
+                w.name
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// For registries written before overlaps were refused: the first other workspace whose
+/// root overlaps `ws`'s (or the state root, for a host dir), as an error.
+fn legacy_overlap(db: &RegistryDb, ws: &Workspace, state_root: &Path) -> Result<()> {
+    if !ws.backing.is_dir() {
+        return Ok(());
+    }
+    let mine = ws.backing.path();
+    if let Some(other) = db
+        .workspaces
+        .iter()
+        .filter(|w| w.id != ws.id && w.backing.is_dir())
+        .find(|w| paths_overlap(mine, w.backing.path()))
+    {
+        return Err(SandboxError::Workspace(format!(
+            "workspace `{}` ({}) overlaps workspace `{}` ({}); overlapping workspaces cannot \
+             be mounted. Run `sandcrab workspace rm {}` (or `{}`) to fix the registry",
+            ws.name,
+            mine.display(),
+            other.name,
+            other.backing.path().display(),
+            other.name,
+            ws.name
+        )));
+    }
+    if matches!(ws.backing, WorkspaceBacking::HostDir(_)) && paths_overlap(mine, state_root) {
+        return Err(SandboxError::Workspace(format!(
+            "workspace `{}` ({}) overlaps the Sandcrab state root {}; it cannot be mounted. \
+             Run `sandcrab workspace rm {}`",
+            ws.name,
+            mine.display(),
+            state_root.display(),
+            ws.name
+        )));
+    }
+    Ok(())
 }
 
 /// Persistent registry of workspaces. Cheap to clone (shared state).
@@ -416,9 +539,12 @@ impl WorkspaceRegistry {
         let ws = self.inner.with_db(true, |db| {
             ensure_unique_name(db, name)?;
             let id = WorkspaceId::new();
-            let data = self.inner.workspace_dir(id).join("data");
+            let data = self.inner.workspace_dir(id).join(MANAGED_DATA);
+            ensure_no_overlap(db, &data)?;
             create_private_dir_all(&data)?;
-            let ws = new_workspace(id, name, WorkspaceBacking::ManagedDir(data));
+            let (_, identity) = open_verified(name, &data, None)?;
+            let mut ws = new_workspace(id, name, WorkspaceBacking::ManagedDir(data));
+            ws.root_identity = Some(identity);
             db.workspaces.push(ws.clone());
             Ok(ws)
         })?;
@@ -427,7 +553,9 @@ impl WorkspaceRegistry {
 
     /// Register an existing host directory as a workspace. The path is canonicalized; `/`,
     /// the state root, and anything overlapping it are refused, as is a directory that is
-    /// already registered.
+    /// already registered ([`SandboxError::AlreadyExists`]) or that is inside / contains
+    /// another workspace ([`SandboxError::InvalidConfig`] naming it). Its `(dev, ino)` is
+    /// recorded.
     pub fn register_host_dir(&self, name: &str, path: impl AsRef<Path>) -> Result<Workspace> {
         validate_workspace_name(name)?;
         let path = path.as_ref();
@@ -455,17 +583,10 @@ impl WorkspaceRegistry {
         }
         self.inner.with_db(true, |db| {
             ensure_unique_name(db, name)?;
-            if let Some(other) = db
-                .workspaces
-                .iter()
-                .find(|w| w.backing == WorkspaceBacking::HostDir(canon.clone()))
-            {
-                return Err(SandboxError::AlreadyExists {
-                    kind: "host dir workspace",
-                    id: format!("{} (registered as `{}`)", canon.display(), other.name),
-                });
-            }
-            let ws = new_workspace(WorkspaceId::new(), name, WorkspaceBacking::HostDir(canon));
+            ensure_no_overlap(db, &canon)?;
+            let (_, identity) = open_verified(name, &canon, None)?;
+            let mut ws = new_workspace(WorkspaceId::new(), name, WorkspaceBacking::HostDir(canon));
+            ws.root_identity = Some(identity);
             db.workspaces.push(ws.clone());
             Ok(ws)
         })
@@ -546,6 +667,7 @@ impl WorkspaceRegistry {
     pub fn set_dirty(&self, r: &WorkspaceRef, dirty: bool) -> Result<Workspace> {
         self.inner.with_db(true, |db| {
             let ws = find(db, r)?;
+            refresh_managed_identity(ws);
             ws.state = if dirty {
                 WorkspaceState::DirtySession
             } else {
@@ -590,7 +712,7 @@ impl WorkspaceRegistry {
         self.inner.with_db(true, |db| {
             let ws = find(db, r)?;
             let _guard = self.inner.ensure_mutable(ws, opts)?;
-            let root = fsx::open_root(&dir_root(ws)?)?;
+            let root = open_ws_root(ws)?;
             fsx::write_file(&root, &rel, bytes)?;
             touch(ws);
             Ok(())
@@ -604,8 +726,7 @@ impl WorkspaceRegistry {
         let ws = self
             .inner
             .with_db(false, |db| find(db, r).map(|w| w.clone()))?;
-        let root = fsx::open_root(&dir_root(&ws)?)?;
-        fsx::read_file(&root, &rel)
+        fsx::read_file(&open_ws_root(&ws)?, &rel)
     }
 
     /// Delete a file, symlink (the link itself, never its target) or directory (recursively).
@@ -624,7 +745,7 @@ impl WorkspaceRegistry {
         self.inner.with_db(true, |db| {
             let ws = find(db, r)?;
             let _guard = self.inner.ensure_mutable(ws, opts)?;
-            let root = fsx::open_root(&dir_root(ws)?)?;
+            let root = open_ws_root(ws)?;
             fsx::delete(&root, &rel)?;
             touch(ws);
             Ok(())
@@ -642,7 +763,7 @@ impl WorkspaceRegistry {
         let ws = self
             .inner
             .with_db(false, |db| find(db, r).map(|w| w.clone()))?;
-        let root = fsx::open_root(&dir_root(&ws)?)?;
+        let root = open_ws_root(&ws)?;
         let mut out: Vec<_> = fsx::list_dir(&root, &rel)?
             .into_iter()
             .map(|(name, kind, size)| FileEntry {
@@ -659,6 +780,11 @@ impl WorkspaceRegistry {
     /// lease), read-only is shared — across processes, via `flock` on the workspace's lock
     /// files. Dropping the lease releases it; releasing a read-write lease bumps the
     /// generation (the guest may have changed the contents).
+    ///
+    /// A directory root is opened without following symlinks and its `(dev, ino)` checked
+    /// ([`SandboxError::WorkspaceRootChanged`] otherwise); the lease carries the verified
+    /// path and identity for the backend to re-check right before use. A workspace whose
+    /// root overlaps another's (legacy registries) is refused.
     pub fn lease(
         &self,
         r: &WorkspaceRef,
@@ -673,11 +799,16 @@ impl WorkspaceRegistry {
                     ws.name
                 )));
             }
-            let root = match &ws.backing {
-                WorkspaceBacking::BlockVolume(p) => {
-                    fs::canonicalize(p).map_err(|e| SandboxError::io_at(p, e))?
+            legacy_overlap(db, &ws, &self.inner.root)?;
+            let (root, root_identity) = match &ws.backing {
+                WorkspaceBacking::BlockVolume(p) => (
+                    fs::canonicalize(p).map_err(|e| SandboxError::io_at(p, e))?,
+                    None,
+                ),
+                WorkspaceBacking::HostDir(p) | WorkspaceBacking::ManagedDir(p) => {
+                    let (_, id) = open_verified(&ws.name, p, ws.root_identity)?;
+                    (p.clone(), Some(id))
                 }
-                _ => dir_root(&ws)?,
             };
             let mut leases = lock(&self.inner.leases);
             let entry = leases.entry(ws.id).or_default();
@@ -735,11 +866,25 @@ impl WorkspaceRegistry {
                 workspace: ws,
                 mode,
                 root,
+                root_identity,
                 sandbox: by,
                 failed: false,
                 _locks: locks,
             })
         })
+    }
+}
+
+/// A `ManagedDir` is legitimately replaced by Sandcrab itself (Firecracker sync-back swaps
+/// the committed tree in with `RENAME_EXCHANGE`), so its pinned identity is re-recorded when
+/// a rw session ends or its dirty flag changes. It lives in the private state root, out of
+/// any sandbox's reach; the symlink-free walk still applies. Host dirs are never re-pinned.
+fn refresh_managed_identity(ws: &mut Workspace) {
+    if let WorkspaceBacking::ManagedDir(p) = &ws.backing
+        && let Ok(fd) = fsx::open_root_nofollow(p)
+        && let Ok((dev, ino)) = fsx::identity(&fd)
+    {
+        ws.root_identity = Some(RootIdentity { dev, ino });
     }
 }
 
@@ -764,6 +909,7 @@ fn new_workspace(id: WorkspaceId, name: &str, backing: WorkspaceBacking) -> Work
         state: WorkspaceState::Idle,
         created_at: now,
         updated_at: now,
+        root_identity: None,
     }
 }
 
@@ -784,6 +930,7 @@ pub struct WorkspaceLease {
     workspace: Workspace,
     mode: MountMode,
     root: PathBuf,
+    root_identity: Option<RootIdentity>,
     generation: u64,
     sandbox: SandboxId,
     failed: bool,
@@ -804,10 +951,26 @@ impl WorkspaceLease {
         self.mode
     }
 
-    /// Canonical host path: the backing directory, or the image file for a block volume.
+    /// Verified host path: the backing directory (opened symlink-free at lease time), or
+    /// the image file for a block volume.
     #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// `(dev, ino)` of the directory root observed at lease time (`None` for a block volume).
+    #[must_use]
+    pub fn root_identity(&self) -> Option<RootIdentity> {
+        self.root_identity
+    }
+
+    /// Re-check that [`Self::root`] is still the leased directory (see
+    /// [`verify_workspace_root`]). No-op for a block volume.
+    pub fn verify_root(&self) -> Result<()> {
+        if self.workspace.backing.is_dir() {
+            verify_workspace_root(&self.workspace.name, &self.root, self.root_identity)?;
+        }
+        Ok(())
     }
 
     /// Generation at lease time (read-only image cache key).
@@ -836,6 +999,7 @@ impl Drop for WorkspaceLease {
             // Best effort: Drop cannot report errors.
             let _ = self.inner.with_db(true, |db| {
                 if let Some(ws) = db.workspaces.iter_mut().find(|w| w.id == id) {
+                    refresh_managed_identity(ws);
                     if failed {
                         ws.state = WorkspaceState::DirtySession;
                         ws.updated_at = Utc::now();
@@ -939,6 +1103,191 @@ mod tests {
         let ws = f.reg.create("keepme").unwrap();
         f.reg.remove(&"keepme".into(), false).unwrap();
         assert!(ws.backing.path().is_dir());
+    }
+
+    #[test]
+    fn overlapping_registrations_refused() {
+        let f = fixture();
+        let tmp_root = f.host.parent().unwrap().to_path_buf();
+        fs::create_dir_all(f.host.join("inner/deeper")).unwrap();
+        let outer_parent = tmp_root.join("wrap");
+        fs::create_dir_all(&outer_parent).unwrap();
+        // Equal (also through a `.` alias): AlreadyExists naming `proj`.
+        match f.reg.register_host_dir("eq", f.host.join(".")) {
+            Err(SandboxError::AlreadyExists { id, .. }) => assert!(id.contains("proj"), "{id}"),
+            other => panic!("equal: {other:?}"),
+        }
+        // Descendant of an existing workspace.
+        match f
+            .reg
+            .register_host_dir("inner", f.host.join("inner/deeper"))
+        {
+            Err(SandboxError::InvalidConfig(m)) => {
+                assert!(m.contains("inside workspace `proj`"), "{m}");
+            }
+            other => panic!("descendant: {other:?}"),
+        }
+        // Ancestor of an existing workspace.
+        match f.reg.register_host_dir("anc", &tmp_root) {
+            Err(SandboxError::InvalidConfig(m)) => assert!(m.contains("overlaps"), "{m}"),
+            other => panic!("ancestor (also of the state root): {other:?}"),
+        }
+        let sub = f.outside.join("ws");
+        fs::create_dir_all(sub.join("x")).unwrap();
+        f.reg.register_host_dir("sub", &sub).unwrap();
+        match f.reg.register_host_dir("anc2", &f.outside) {
+            Err(SandboxError::InvalidConfig(m)) => {
+                assert!(m.contains("contains workspace `sub`"), "{m}");
+            }
+            other => panic!("ancestor: {other:?}"),
+        }
+        assert!(matches!(
+            f.reg.register_host_dir("desc2", sub.join("x")),
+            Err(SandboxError::InvalidConfig(_))
+        ));
+        // State dir and everything in it (including managed data dirs).
+        let managed = f.reg.create("m").unwrap();
+        for bad in [
+            f.reg.state_root().to_path_buf(),
+            managed.backing.path().to_path_buf(),
+        ] {
+            assert!(
+                matches!(
+                    f.reg.register_host_dir("st", &bad),
+                    Err(SandboxError::InvalidConfig(_))
+                ),
+                "{}",
+                bad.display()
+            );
+        }
+        // Disjoint siblings are fine, and managed workspaces record their identity.
+        f.reg.register_host_dir("wrap", &outer_parent).unwrap();
+        assert!(managed.root_identity.is_some());
+        assert!(f.reg.get(&proj()).unwrap().root_identity.is_some());
+    }
+
+    fn assert_root_changed<T: std::fmt::Debug>(r: Result<T>, what: &str) {
+        assert!(
+            matches!(r, Err(SandboxError::WorkspaceRootChanged(_))),
+            "{what}: {r:?}"
+        );
+    }
+
+    /// Every host op and lease on `proj` must refuse, and `outside` must be untouched.
+    fn assert_all_ops_refused(f: &Fixture) {
+        assert_root_changed(f.reg.read_file(&proj(), "secret"), "read");
+        assert_root_changed(f.reg.put_file(&proj(), "planted", b"x"), "put");
+        assert_root_changed(f.reg.delete_file(&proj(), "secret"), "delete");
+        assert_root_changed(f.reg.list_files(&proj(), ""), "list");
+        for mode in [MountMode::ReadWrite, MountMode::ReadOnly] {
+            assert_root_changed(f.reg.lease(&proj(), mode, SandboxId::new()), "lease");
+        }
+        assert_eq!(fs::read(f.outside.join("secret")).unwrap(), b"top secret");
+        assert!(!f.outside.join("planted").exists());
+    }
+
+    #[test]
+    fn root_replaced_by_symlink_refused() {
+        let f = fixture();
+        fs::remove_dir(&f.host).unwrap();
+        symlink(&f.outside, &f.host).unwrap();
+        assert_all_ops_refused(&f);
+    }
+
+    #[test]
+    fn root_ancestor_replaced_by_symlink_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = fs::canonicalize(tmp.path()).unwrap();
+        let reg = WorkspaceRegistry::open(base.join("state")).unwrap();
+        fs::create_dir_all(base.join("a/ws")).unwrap();
+        fs::create_dir_all(base.join("evil/ws")).unwrap();
+        fs::write(base.join("evil/ws/secret"), b"victim").unwrap();
+        reg.register_host_dir("w", base.join("a/ws")).unwrap();
+        fs::rename(base.join("a"), base.join("a-old")).unwrap();
+        symlink(base.join("evil"), base.join("a")).unwrap();
+        let w = WorkspaceRef::from("w");
+        assert_root_changed(reg.read_file(&w, "secret"), "read");
+        assert_root_changed(
+            reg.lease(&w, MountMode::ReadOnly, SandboxId::new()),
+            "lease",
+        );
+        assert_root_changed(reg.delete_file(&w, "secret"), "delete");
+        assert!(base.join("evil/ws/secret").exists());
+    }
+
+    #[test]
+    fn root_dev_ino_mismatch_refused() {
+        let f = fixture();
+        let lease = f
+            .reg
+            .lease(&proj(), MountMode::ReadOnly, SandboxId::new())
+            .unwrap();
+        lease.verify_root().unwrap();
+        // Same path, different directory (renamed away, a new one created in its place).
+        fs::rename(&f.host, f.host.with_file_name("project-old")).unwrap();
+        fs::create_dir(&f.host).unwrap();
+        fs::write(f.host.join("secret"), b"impostor").unwrap();
+        assert_root_changed(lease.verify_root(), "verify after swap");
+        drop(lease);
+        assert_all_ops_refused(&f);
+        assert_root_changed(
+            verify_workspace_root("proj", &f.host, f.reg.get(&proj()).unwrap().root_identity),
+            "verify_workspace_root",
+        );
+        // Missing root.
+        fs::remove_dir_all(&f.host).unwrap();
+        assert_root_changed(f.reg.list_files(&proj(), ""), "missing");
+    }
+
+    #[test]
+    fn lease_root_reverify_catches_symlink_swap() {
+        let f = fixture();
+        let lease = f
+            .reg
+            .lease(&proj(), MountMode::ReadWrite, SandboxId::new())
+            .unwrap();
+        assert_eq!(lease.root(), f.host);
+        assert!(lease.root_identity().is_some());
+        fs::rename(&f.host, f.host.with_file_name("moved")).unwrap();
+        symlink(&f.outside, &f.host).unwrap();
+        assert_root_changed(lease.verify_root(), "verify");
+    }
+
+    #[test]
+    fn legacy_overlapping_registry_refused_at_lease() {
+        let f = fixture();
+        fs::create_dir_all(f.host.join("inner")).unwrap();
+        let elsewhere = f.outside.join("tmp-inner");
+        fs::create_dir_all(&elsewhere).unwrap();
+        f.reg.register_host_dir("inner", &elsewhere).unwrap();
+        // Rewrite the registry as an older build would have allowed: `inner` nested in `proj`.
+        let path = f.reg.state_root().join(REGISTRY_FILE);
+        let text = fs::read_to_string(&path).unwrap();
+        let mut db: serde_json::Value = serde_json::from_str(&text).unwrap();
+        for w in db["workspaces"].as_array_mut().unwrap() {
+            if w["name"] == "inner" {
+                w["backing"]["path"] = f.host.join("inner").to_string_lossy().into();
+                w.as_object_mut().unwrap().remove("root_identity");
+            }
+        }
+        fs::write(&path, serde_json::to_vec(&db).unwrap()).unwrap();
+        let reg = WorkspaceRegistry::open(f.reg.state_root()).unwrap();
+        for name in ["proj", "inner"] {
+            for mode in [MountMode::ReadWrite, MountMode::ReadOnly] {
+                match reg.lease(&name.into(), mode, SandboxId::new()) {
+                    Err(SandboxError::Workspace(m)) => {
+                        assert!(m.contains("overlaps") && m.contains("workspace rm"), "{m}");
+                    }
+                    other => panic!("{name}: {other:?}"),
+                }
+            }
+        }
+        // Fixing it by removing one makes the other mountable again.
+        reg.remove(&"inner".into(), false).unwrap();
+        drop(
+            reg.lease(&proj(), MountMode::ReadWrite, SandboxId::new())
+                .unwrap(),
+        );
     }
 
     #[test]

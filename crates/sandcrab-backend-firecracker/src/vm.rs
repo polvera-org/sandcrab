@@ -456,12 +456,16 @@ impl FirecrackerSandbox {
             // Idle timeout + overall deadline: a slow-dripping guest cannot stall destroy.
             let reader = workspace::DeadlineReader::new(std, cfg.export_idle_timeout, deadline);
             let (backing, host, stg) = (m.backing.clone(), m.host_path.clone(), staging.clone());
+            let (name, identity) = (m.workspace_name.clone(), m.root_identity);
             tokio::task::spawn_blocking(move || {
                 let stats = workspace::receive_export(
                     std::io::BufReader::with_capacity(256 * 1024, reader),
                     &stg,
                     &limits,
                 )?;
+                // Re-check the root right before writing into it: a root replaced by a
+                // symlink (or another directory) since the lease is never synced into.
+                sandcrab_core::verify_workspace_root(&name, &host, identity)?;
                 workspace::commit(&backing, &stg, &host)?;
                 Ok::<_, SandboxError>(stats)
             })

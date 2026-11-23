@@ -235,6 +235,7 @@ impl DockerDevBackend {
             },
         )?;
         let timings = &spec.timings;
+        verify_mount_roots(spec)?;
         self.docker
             .create_container(
                 Some(CreateContainerOptionsBuilder::new().name(name).build()),
@@ -243,6 +244,8 @@ impl DockerDevBackend {
             .await
             .map_err(|e| backend_err(&format!("create container `{name}`"), e))?;
         timings.mark_custom("container_created");
+        // The daemon resolves bind sources at start: re-check the roots right before.
+        verify_mount_roots(spec)?;
         self.docker
             .start_container(name, None)
             .await
@@ -528,6 +531,15 @@ impl ImageVerifier for DockerImageVerifier {
             Err(e) => Err(backend_err(&format!("inspect image `{image}`"), e)),
         }
     }
+}
+
+/// Re-check every directory workspace root (symlink-free path, dev/ino from the lease)
+/// immediately before Docker uses it as a bind source.
+fn verify_mount_roots(spec: &ResolvedSpec) -> Result<()> {
+    for m in spec.mounts.iter().filter(|m| m.backing.is_dir()) {
+        sandcrab_core::verify_workspace_root(&m.workspace_name, &m.host_path, m.root_identity)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

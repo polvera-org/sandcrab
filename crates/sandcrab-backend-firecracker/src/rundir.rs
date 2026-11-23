@@ -7,7 +7,7 @@ use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
-use sandcrab_core::{Result, SandboxError, SandboxId, WorkspaceBacking};
+use sandcrab_core::{Result, RootIdentity, SandboxError, SandboxId, WorkspaceBacking};
 use serde::{Deserialize, Serialize};
 
 use crate::proc::ProcId;
@@ -31,6 +31,9 @@ pub struct RwDriveMeta {
     pub backing: WorkspaceBacking,
     pub host_path: PathBuf,
     pub guest_path: PathBuf,
+    /// `(dev, ino)` of `host_path` at lease time; re-checked before sync-back.
+    #[serde(default)]
+    pub root_identity: Option<RootIdentity>,
 }
 
 /// `meta.json`: what an orphan reaper needs to clean up after a dead owner.
@@ -247,6 +250,7 @@ mod tests {
             backing: WorkspaceBacking::HostDir("/p".into()),
             host_path: "/p".into(),
             guest_path: "/workspace".into(),
+            root_identity: None,
         };
         let missing = RwDriveMeta {
             image: tmp.path().join("ws-1.ext4"),

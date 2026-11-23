@@ -84,10 +84,85 @@ fn split(rel: &SafeRelPath) -> Result<(Vec<&OsStr>, &OsStr)> {
     Ok((comps, name))
 }
 
-/// Open the (canonical, host-trusted) workspace root directory.
+/// Open a directory by plain path (tests only; production opens roots with
+/// [`open_root_nofollow`]).
+#[cfg(test)]
 pub(crate) fn open_root(path: &Path) -> Result<OwnedFd> {
     rustix::fs::openat(CWD, path, DIR_FLAGS, Mode::empty())
         .map_err(|e| SandboxError::io_at(path, e.into()))
+}
+
+/// Why [`open_root_nofollow`] refused a stored workspace root.
+#[derive(Debug)]
+pub(crate) enum RootOpenError {
+    /// A component is a symlink, missing, or not a directory: the root is not what was
+    /// registered. Carries a human-readable reason.
+    Changed(String),
+    Io(io::Error),
+}
+
+/// Open the stored (canonical, absolute) workspace root by walking from `/`, one
+/// `openat(O_DIRECTORY | O_NOFOLLOW)` per component. Never follows a symlink and never
+/// re-resolves the path: a symlink or missing component anywhere is [`RootOpenError::Changed`].
+pub(crate) fn open_root_nofollow(path: &Path) -> std::result::Result<OwnedFd, RootOpenError> {
+    if !path.is_absolute() {
+        return Err(RootOpenError::Changed(format!(
+            "`{}` is not an absolute path",
+            path.display()
+        )));
+    }
+    let mut cur = rustix::fs::openat(CWD, "/", DIR_FLAGS, Mode::empty())
+        .map_err(|e| RootOpenError::Io(e.into()))?;
+    let mut walked = PathBuf::from("/");
+    for c in path.components() {
+        let name = match c {
+            Component::RootDir => continue,
+            Component::Normal(n) => n,
+            _ => {
+                return Err(RootOpenError::Changed(format!(
+                    "`{}` is not a canonical path",
+                    path.display()
+                )));
+            }
+        };
+        walked.push(name);
+        cur = match rustix::fs::openat(&cur, name, DIR_FLAGS, Mode::empty()) {
+            Ok(fd) => fd,
+            Err(Errno::LOOP) => {
+                return Err(RootOpenError::Changed(format!(
+                    "`{}` is now a symlink",
+                    walked.display()
+                )));
+            }
+            Err(Errno::NOTDIR) if is_symlink(&cur, name) => {
+                return Err(RootOpenError::Changed(format!(
+                    "`{}` is now a symlink",
+                    walked.display()
+                )));
+            }
+            Err(Errno::NOTDIR) => {
+                return Err(RootOpenError::Changed(format!(
+                    "`{}` is not a directory",
+                    walked.display()
+                )));
+            }
+            Err(Errno::NOENT) => {
+                return Err(RootOpenError::Changed(format!(
+                    "`{}` does not exist",
+                    walked.display()
+                )));
+            }
+            Err(e) => return Err(RootOpenError::Io(io::Error::from(e))),
+        };
+    }
+    Ok(cur)
+}
+
+/// `(st_dev, st_ino)` of an open descriptor.
+pub(crate) fn identity(fd: &OwnedFd) -> io::Result<(u64, u64)> {
+    let st = rustix::fs::fstat(fd)?;
+    #[allow(clippy::useless_conversion, clippy::unnecessary_cast)]
+    Ok((st.st_dev as u64, st.st_ino as u64))
 }
 
 /// Open the directory `comps` beneath `root` without following any symlink, optionally
@@ -397,5 +472,23 @@ mod tests {
             .map(|e| e.unwrap().file_name())
             .collect();
         assert_eq!(names, ["run.sh"]);
+    }
+
+    #[test]
+    fn root_open_refuses_symlink_components() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = fs::canonicalize(tmp.path()).unwrap();
+        fs::create_dir_all(base.join("real/ws")).unwrap();
+        symlink(base.join("real"), base.join("link")).unwrap();
+        assert!(open_root_nofollow(&base.join("real/ws")).is_ok());
+        for bad in ["link/ws", "link", "missing", "real/../real/ws"] {
+            assert!(
+                matches!(
+                    open_root_nofollow(&base.join(bad)),
+                    Err(RootOpenError::Changed(_))
+                ),
+                "{bad}"
+            );
+        }
     }
 }

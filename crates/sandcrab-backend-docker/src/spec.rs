@@ -339,6 +339,7 @@ image = "sandcrab/base:0.1.0"
             guest_path: guest.into(),
             mode,
             generation: 1,
+            root_identity: None,
         }
     }
 
