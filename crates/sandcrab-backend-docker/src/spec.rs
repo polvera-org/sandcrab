@@ -7,7 +7,10 @@
 //! - `cap_drop: ALL`, `no-new-privileges`, never privileged, private IPC namespace;
 //! - `init: true` (docker-init as PID 1 reaps zombies and forwards SIGTERM to `crabd`);
 //! - `pids_limit`, `memory` with `memory_swap == memory` (no swap), `nano_cpus`;
-//! - size-limited `nosuid,nodev` tmpfs at `/tmp`;
+//! - size-limited `nosuid,nodev,noexec` tmpfs at `/tmp` (stated explicitly, not left to
+//!   Docker's tmpfs default): scripts and shared objects under `/tmp` cannot be executed or
+//!   mapped. Tools that unpack and run binaries from a temp dir should get
+//!   `TMPDIR=$HOME/.tmp` (or a dir under the workspace) instead;
 //! - core dumps disabled (`RLIMIT_CORE` soft = hard = 0): a crashing process must not
 //!   drop `core.*` files into the cwd, which is usually a persistent workspace;
 //! - runs as the **host** uid:gid unless the spec overrides it, so files written to
@@ -275,7 +278,10 @@ pub fn build_container_spec(
             nano_cpus: Some(nano_cpus),
             tmpfs: Some(HashMap::from([(
                 "/tmp".to_owned(),
-                format!("rw,nosuid,nodev,size={}m,mode=1777", ctx.limits.tmp_size_mb),
+                format!(
+                    "rw,nosuid,nodev,noexec,size={}m,mode=1777",
+                    ctx.limits.tmp_size_mb
+                ),
             )])),
             ulimits: Some(vec![ResourcesUlimits {
                 name: Some("core".into()),
@@ -410,7 +416,7 @@ image = "sandcrab/base:0.1.0"
         assert!(hc.port_bindings.is_none());
         assert_eq!(
             hc.tmpfs.unwrap()["/tmp"],
-            "rw,nosuid,nodev,size=256m,mode=1777"
+            "rw,nosuid,nodev,noexec,size=256m,mode=1777"
         );
         let ulimits = hc.ulimits.unwrap();
         assert_eq!(ulimits.len(), 1);

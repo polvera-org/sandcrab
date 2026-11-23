@@ -266,6 +266,13 @@ async fn base_lifecycle_tools_mounts_and_hardening() {
     )
     .await;
     assert!(r.stdout.contains("tmpfs"), "{}", r.stdout);
+    assert!(r.stdout.contains("noexec"), "{}", r.stdout);
+    let r = bash(
+        &sb,
+        "printf '#!/bin/sh\necho ran\n' > /tmp/x.sh; chmod +x /tmp/x.sh; /tmp/x.sh",
+    )
+    .await;
+    assert_eq!(r.exit_code, Some(126), "/tmp is executable: {r:?}");
 
     // Core dumps are disabled (soft and hard), so crashes leave no core.* in the workspace.
     let r = bash(&sb, "echo $(ulimit -c) $(ulimit -Hc)").await;
