@@ -1,0 +1,23 @@
+[package]
+name = "sandcrab-guest"
+description = "crabd: static Rust guest daemon executing computer-use tools inside Sandcrab sandboxes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "crabd"
+path = "src/main.rs"
+
+[dependencies]
+sandcrab-protocol.workspace = true
+clap.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

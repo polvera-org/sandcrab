@@ -1,0 +1,25 @@
+[package]
+name = "sandcrab-cli"
+description = "CLI for managing Sandcrab templates, persistent workspaces, and ephemeral sandboxes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "sandcrab"
+path = "src/main.rs"
+
+[dependencies]
+sandcrab-core.workspace = true
+sandcrab-protocol.workspace = true
+sandcrab-sdk.workspace = true
+clap.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true
