@@ -1,0 +1,306 @@
+# ministack execution flow — Sandcrab V1: DockerDev + Firecracker, benchmarked.
+# RULE: parallelism is the ABSENCE of a dependency edge.
+# Validate with: node scripts/validate-flow.mjs docs/plans/phase-1-mvp.flow.yaml
+#
+# Execution host: user@dev-vps:~/workspace/code/sandcrab (branch feat/phase-1).
+# Firecracker + benchmarks run on kvm-homelab (Proxmox, tailnet) — step kvm-host. Parallel Ada steps use
+# git worktrees under ~/workspace/code/sandcrab-wt/<step-id>.
+# All HTML deliverables are local static files under docs/site/ (never Claude artifacts).
+
+slug: phase-1-mvp
+name: Sandcrab V1 — DockerDev + Firecracker
+summary: >-
+  Working V1 on two backends: crabd native tools over length-prefixed JSON-RPC 2.0, persistent
+  workspaces, DockerDev and Firecracker (vsock) backends, SDK + CLI + crabagent harness. Ends with a
+  boot/teardown/resource benchmark report that picks the recommended default backend, a repo
+  walkthrough, a 3D interactive explainer, and a crab symbology set.
+created: "2026-11-23"
+phases: [plan, implement, verify, document]
+
+steps:
+  # ================================================================ plan
+  - id: env
+    phase: plan
+    agent: nova
+    title: Bootstrap VPS (Rust 1.100 + musl, Docker 29, ufw, fail2ban, ssh hardening) and clone repo
+    depends_on: []
+    status: done
+    notes: >-
+      Baseline cargo check FAILS on main (schemars `uuid1` feature) → fixed in `protocol`.
+      VPS is a KVM guest (AMD EPYC 9354P) with NO nested virt → no /dev/kvm → Firecracker cannot run here.
+
+  - id: decisions
+    phase: plan
+    agent: nova
+    title: Lock BRIEF §4 decisions 1-6 (incl. Firecracker pulled into V1) in an ADR
+    depends_on: []
+    artifacts: [docs/decisions/0001-phase-1-decisions.md]
+    status: done
+    notes: Approved by human 2026-11-23.
+
+  - id: kvm-host
+    phase: plan
+    agent: nova
+    title: Spike + bootstrap kvm-homelab (Proxmox, tailnet) as the KVM host for Firecracker and benchmarks
+    depends_on: []
+    status: doing
+    notes: >-
+      Subagent spike in progress: host type, /dev/kvm access, nested virt, Firecracker smoke boot. Benchmarks must run BOTH backends on this same
+      host (bare metal → credible numbers; nested virt adds overhead and skews FC results).
+
+  - id: fc-design
+    phase: plan
+    agent: turing
+    title: "Firecracker backend design: rootfs pipeline, pinned kernel, crabd-as-PID1, vsock UDS handshake, block-volume workspaces, tap/NAT, jailer scope"
+    depends_on: [decisions]
+    artifacts: [docs/design/firecracker-backend.md]
+    status: todo
+    notes: >-
+      Key decision: Firecracker has no virtio-fs, so how do host-dir workspaces become ext4 block
+      devices (build-on-spawn + sync-back on teardown vs. persistent ext4 image as the source of
+      truth) while keeping host-side mutation between turns? The cost shows up in the benchmark.
+
+  - id: bench-spec
+    phase: plan
+    agent: kepler
+    title: "Benchmark methodology: metrics, scenarios, run counts, fairness rules, acceptance criteria"
+    depends_on: [decisions]
+    artifacts: [docs/plans/phase-1-mvp.bench-spec.md]
+    status: todo
+    notes: >-
+      Metrics: spawn→crabd-ready, first-tool-call latency, teardown, host RSS/PSS per sandbox at
+      idle and under load, CPU overhead, disk footprint, density (N concurrent until limit),
+      workspace mount/sync cost. N≥30 runs, p50/p95/p99, cold vs. warm cache, same host, same template.
+
+  # =========================================================== implement
+  - id: protocol
+    phase: implement
+    agent: ada
+    title: "1A: JSON-RPC 2.0 envelope + u32 framing codec, typed per-tool results, error codes, schema snapshot tests"
+    depends_on: [env, decisions]
+    artifacts: [crates/sandcrab-protocol/]
+    status: todo
+    notes: >-
+      Sync codec, no tokio. deny_unknown_fields on params. Adds process_list, upload, download.
+      Fix schemars uuid1. Max frame guard (16 MiB).
+
+  - id: templates
+    phase: implement
+    agent: ada
+    title: Pin template Dockerfiles (versions + digests), finish render (Playwright, Typst), build all 4 images
+    depends_on: [env, decisions]
+    artifacts: [templates/]
+    status: todo
+    notes: crabd is injected at runtime (bind mount / rootfs pipeline), not baked into the image.
+
+  - id: guest-server
+    phase: implement
+    agent: ada
+    title: "1B.1: crabd async server (--unix/--tcp), framed dispatch loop, per-tool module stubs, musl build"
+    depends_on: [protocol]
+    artifacts: [crates/sandcrab-guest/src/main.rs, crates/sandcrab-guest/src/server.rs, crates/sandcrab-guest/src/tools/mod.rs]
+    status: todo
+
+  - id: guest-exec
+    phase: implement
+    agent: ada
+    title: "1B.2: bash (setsid + killpg TERM→KILL, head+tail truncation) and process_* (ring buffers, optional PTY)"
+    depends_on: [guest-server]
+    artifacts: [crates/sandcrab-guest/src/tools/exec.rs, crates/sandcrab-guest/src/tools/process.rs]
+    status: todo
+
+  - id: guest-fs
+    phase: implement
+    agent: ada
+    title: "1B.3: file_read/write/edit/delete/move + upload/download (atomic rename, binary detect, ambiguous-edit errors, diff)"
+    depends_on: [guest-server]
+    artifacts: [crates/sandcrab-guest/src/tools/fs.rs, crates/sandcrab-guest/src/tools/transfer.rs]
+    status: todo
+
+  - id: guest-search
+    phase: implement
+    agent: ada
+    title: "1B.4: list_dir, glob, grep via ignore + globset + grep-searcher (gitignore-aware, bounded results)"
+    depends_on: [guest-server]
+    artifacts: [crates/sandcrab-guest/src/tools/search.rs]
+    status: todo
+
+  - id: guest-vsock-init
+    phase: implement
+    agent: ada
+    title: "crabd --vsock listener + PID1 mode (mount proc/sys/dev, zombie reaping, mount workspace drives, net up, clean poweroff)"
+    depends_on: [guest-server, fc-design]
+    artifacts: [crates/sandcrab-guest/src/vsock.rs, crates/sandcrab-guest/src/init.rs]
+    status: todo
+
+  - id: core
+    phase: implement
+    agent: ada
+    title: "1C: WorkspaceRegistry (path guards, BlockVolume backing), TemplateRegistry (pins), SandboxManager, CrabdClient"
+    depends_on: [protocol, fc-design]
+    artifacts: [crates/sandcrab-core/]
+    status: todo
+    notes: >-
+      Depends on fc-design so the workspace model covers block volumes from day one (no rework).
+      SandboxConfig gains network{policy,allow_domains}, reserved secrets, ports. Lifecycle
+      timing hooks (spawn/ready/teardown timestamps) feed the benchmark.
+
+  - id: rootfs-pipeline
+    phase: implement
+    agent: ada
+    title: "OCI image → ext4 rootfs with crabd as /sbin/init, pinned Firecracker guest kernel, SHA-256 manifest pins"
+    depends_on: [templates, fc-design]
+    artifacts: [crates/sandcrab-core/src/rootfs/, scripts/build-rootfs.sh]
+    status: todo
+
+  - id: docker-backend
+    phase: implement
+    agent: ada
+    title: "1D: DockerDevBackend via bollard: hardened container, host uid:gid, rw/ro bind mounts, crabd via UDS, ports"
+    depends_on: [core, guest-exec, guest-fs, guest-search, templates]
+    artifacts: [crates/sandcrab-backend-docker/]
+    status: todo
+    notes: allow_insecure_dev_backend defaults to false; unenforceable network policy → explicit error.
+
+  - id: fc-backend
+    phase: implement
+    agent: ada
+    title: "sandcrab-backend-firecracker: owned HTTP-over-UDS API client, vsock CONNECT handshake, block-volume workspaces rw/ro, tap/NAT, teardown"
+    depends_on: [core, guest-vsock-init, guest-exec, guest-fs, guest-search, rootfs-pipeline, kvm-host]
+    artifacts: [crates/sandcrab-backend-firecracker/]
+    status: todo
+    notes: >-
+      capabilities: hardware_isolated=true, multi_tenant_safe=false until jailer lands (honest flag),
+      supports_snapshots=false in V1, supports_host_dir_mounts=false (block volumes only).
+
+  - id: sdk-cli
+    phase: implement
+    agent: ada
+    title: "1E: SDK (Sandcrab, Sandbox, WorkspaceClient) + CLI (doctor, workspace, template, run, tool, --backend)"
+    depends_on: [docker-backend]
+    artifacts: [crates/sandcrab-sdk/, crates/sandcrab-cli/]
+    status: todo
+
+  - id: e2e-tests
+    phase: implement
+    agent: ada
+    title: "Backend-generic e2e suite (--ignored): multi-turn workspace mutation across 2 sandboxes, ro enforcement, killpg; run on Docker"
+    depends_on: [sdk-cli]
+    artifacts: [crates/sandcrab-sdk/tests/]
+    status: todo
+
+  - id: fc-wire
+    phase: implement
+    agent: ada
+    title: Wire Firecracker into SDK feature flag + CLI --backend firecracker; doctor checks /dev/kvm, kernel, rootfs pins
+    depends_on: [fc-backend, sdk-cli]
+    artifacts: [crates/sandcrab-sdk/, crates/sandcrab-cli/]
+    status: todo
+
+  - id: fc-e2e
+    phase: implement
+    agent: ada
+    title: Run the same e2e suite against Firecracker on the KVM host; fix backend gaps
+    depends_on: [fc-wire, e2e-tests]
+    artifacts: [crates/sandcrab-sdk/tests/]
+    status: todo
+
+  - id: three-kit
+    phase: implement
+    agent: ada
+    title: "Shared three.js kit: reusable 3D crab/shell/jar/burrow/wire scenes as ES modules, used by the landing page AND the presentation"
+    depends_on: [symbology]
+    artifacts: [docs/site/3d/]
+    status: todo
+    notes: Load mstack-3d-animations skill. Vendored three.js (pinned), no CDN at runtime inside the sandbox.
+
+  - id: harness
+    phase: implement
+    agent: ada
+    title: "1F: crabagent — pi-style coding-agent REPL (LLM + all sandcrab tools) on a persistent workspace, --backend selectable"
+    depends_on: [sdk-cli]
+    artifacts: [crates/sandcrab-agent/]
+    status: todo
+
+  - id: bench-harness
+    phase: implement
+    agent: ada
+    title: "sandcrab-bench: scenario runner across backends, cgroup/proc sampling, JSON results per bench-spec"
+    depends_on: [bench-spec, sdk-cli]
+    artifacts: [crates/sandcrab-bench/]
+    status: todo
+
+  # ============================================================== verify
+  - id: review
+    phase: verify
+    agent: nebula
+    title: QA + security review (invariants, path traversal, killpg, insecure-backend gate, container + VM hardening, capability honesty)
+    depends_on: [e2e-tests, fc-e2e, harness]
+    status: todo
+
+  - id: live-check
+    phase: verify
+    agent: nova
+    title: "Live run — crabagent builds the crabagent/Sandcrab landing page (open-source production agent sandboxing, 3D via three-kit) on Docker AND Firecracker; full fmt/clippy/test/--ignored gate"
+    depends_on: [e2e-tests, fc-e2e, harness, three-kit]
+    artifacts: [docs/site/landing/]
+    status: todo
+    notes: >-
+      Workspace `landing` (rw, default_cwd) + three-kit mounted read-only → also proves multi-mount + ro.
+      Agent's prompt: landing page about crabagent itself, promoting Sandcrab as open-source production
+      agent sandboxing, using the shared 3D elements. Best output copied into docs/site/landing/.
+
+  - id: bench-run
+    phase: verify
+    agent: nova
+    title: Execute benchmarks for both backends on the same KVM host; capture raw JSON + host specs
+    depends_on: [bench-harness, fc-e2e, e2e-tests]
+    artifacts: [docs/bench/results/]
+    status: todo
+
+  # ============================================================ document
+  - id: bench-report
+    phase: document
+    agent: rosetta
+    title: "Backend comparison report (HTML): boot, teardown, resources, density, isolation trade-offs → recommended default"
+    depends_on: [bench-run, review]
+    artifacts: [docs/site/bench-report.html]
+    status: todo
+
+  - id: symbology
+    phase: implement
+    agent: rosetta
+    title: "Crab symbology set: illustrated crab scenes per concept (molt, shell, burrow, claws, tide, hermit swap, jar vs. tidepool)"
+    depends_on: [decisions]
+    artifacts: [docs/site/assets/crab/, docs/site/symbology.html]
+    status: todo
+    notes: >-
+      Concept map: molting = ephemeral sandbox teardown; shell = isolation boundary; sealed jar
+      (microVM) vs. shared tide pool (Docker shared kernel); burrow = persistent workspace;
+      claws = crabd tools; hermit crab swapping shells = cross-template workspace handoff;
+      tide clock = TTL; crab messenger on a single wire = one guest protocol.
+
+  - id: walkthrough
+    phase: document
+    agent: rosetta
+    title: "Repo walkthrough (HTML): crate map, request path host→crabd, workspace lifecycle, annotated code links"
+    depends_on: [review, symbology]
+    artifacts: [docs/site/walkthrough.html]
+    status: todo
+
+  - id: presentation-3d
+    phase: document
+    agent: ada
+    title: "3D interactive presentation (three.js): sandbox lifecycle, protocol path, workspace mounts, Docker vs. FC isolation, bench results"
+    depends_on: [three-kit, live-check, bench-report]
+    artifacts: [docs/site/presentation.html]
+    status: todo
+    notes: Load mstack-3d-animations skill (house style, tuning panel, seamless loops).
+
+  - id: docs
+    phase: document
+    agent: rosetta
+    title: README quickstart, protocol + tool reference, VPS/KVM host setup, crabagent usage, docs/site index
+    depends_on: [review, live-check, bench-report, walkthrough, presentation-3d]
+    artifacts: [README.md, docs/]
+    status: todo
