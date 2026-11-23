@@ -4,6 +4,57 @@ This document captures the detailed technical blueprint for executing Sandcrab a
 
 ---
 
+## V1 status
+
+Phase 1 was extended into **V1**: DockerDev plus a Firecracker backend, benchmarked
+(decisions: [ADR 0001](decisions/0001-phase-1-decisions.md); execution flow:
+[`plans/phase-1-mvp.flow.yaml`](plans/phase-1-mvp.flow.yaml)). State on branch `feat/phase-1`:
+
+**Done**
+
+- `sandcrab-protocol`: u32 big-endian length-prefixed JSON-RPC 2.0 (16 MiB max frame),
+  typed params/results, error codes, JSON Schema export. Reference: [protocol.md](protocol.md).
+- `crabd`: all Tier 1 tools, `process_start/poll/stdin/kill/list`, `upload`/`download`
+  (single file, base64), `--unix` / `--tcp` / `--vsock`, PID 1 `init` mode for microVMs.
+- `sandcrab-core`: `WorkspaceRegistry` (managed and host-dir workspaces, cross-process
+  leases, traversal/symlink guards, overlap refusal), `TemplateRegistry` with pins,
+  `SandboxManager` with TTL reaper and lifecycle timings.
+- `sandcrab-backend-docker`: hardened DockerDev backend (explicit `--allow-insecure`).
+- `sandcrab-backend-firecracker`: owned API client, rootfs pipeline (OCI → ext4 with
+  `crabd` as init), pinned kernel/binary, vsock, block-volume workspaces with sync-back,
+  tap pool + nftables networking. Tested against a fake VMM.
+- `sandcrab-sdk`, `sandcrab` CLI ([cli.md](cli.md)), `crabagent` harness
+  ([crabagent.md](crabagent.md)), `sandcrab-bench`.
+- Templates `base`, `python-dev`, `ts-dev` (now with `python3`), `render`, pinned.
+- Verification: QA + security review (3 rounds, PASS), live crabagent run
+  ([bench/live-check.md](bench/live-check.md)) and its fixes (core dumps off, `/tmp noexec`
+  documented, image blocks, `--keep-alive`, workspace caches, lock files moved to
+  `<state root>/locks/`), DockerDev benchmark ([site/bench-report.html](site/bench-report.html)).
+
+**Pending (blocked on a KVM host)**
+
+- A KVM host: the planned Proxmox VM has no `vmx`/`svm` (QEMU 2.5+ CPU type). It needs
+  nested virtualization and `cpu: host`, or a bare-metal host. See [hosting.md](hosting.md#2-kvm-host-firecracker).
+- Firecracker end-to-end tests on real KVM (`firecracker_kvm.rs`, currently ignored) and
+  fixes for any gaps they find.
+- Firecracker benchmark columns, run on the same host as DockerDev.
+
+**Deferred to Phase 2**
+
+- MEDIUM (review): two registries with different `SANDCRAB_HOME` can nest workspace roots;
+  the overlap check is per registry.
+- MEDIUM (review): the DockerDev bind and the Firecracker pack resolve the workspace path
+  after verification (a narrow race, 4 wins in 80 attempts). Fix: pack/commit through the
+  verified root fd, and a `crabd` dev/ino check after start.
+- Firecracker `jailer` confinement (until then `multi_tenant_safe = false`), snapshots,
+  published ports on Firecracker, `tar.zst` transfers, `stream_event` output streaming.
+- Cloud Hypervisor and libkrun backends; Tier 3 browser tools.
+
+**Phase 3** still owns the egress allowlist and secret-injection proxy:
+`egress_restricted` and `secrets` are refused at spawn time in V1.
+
+---
+
 ## Tool Catalog (Target Agent Interface)
 
 Every tool exports a JSON Schema via `schemars` so LLM tool-calling (Anthropic, OpenAI, Gemini) and MCP servers bind directly to `sandcrab-protocol`.

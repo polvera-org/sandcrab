@@ -753,7 +753,7 @@ guard.kill(<span class="t">Signal</span>::KILL);</pre></figure>
   </ul>
 
   <h3>Leases across processes</h3>
-  <p><code>WorkspaceRegistry::lease</code> (<a class="ref" href="../../crates/sandcrab-core/src/registry.rs">registry.rs:818</a>) takes non-blocking <code>flock</code>s under <code>&lt;root&gt;/workspaces/&lt;id&gt;/</code>: <code>mount.lock</code> exclusive for rw and shared for ro, plus <code>rw.lock</code> held exclusive by the rw lease (host mutation probes it). <code>registry.json</code> is written atomically (tmp + fsync + rename) under <code>registry.lock</code>. Releasing a rw lease bumps the generation.</p>
+  <p><code>WorkspaceRegistry::lease</code> (<a class="ref" href="../../crates/sandcrab-core/src/registry.rs">registry.rs:837</a>) takes non-blocking <code>flock</code>s on <code>&lt;state root&gt;/locks/&lt;id&gt;.mount.lock</code> (exclusive for rw, shared for ro) and <code>&lt;state root&gt;/locks/&lt;id&gt;.rw.lock</code> (held exclusive by the rw lease; host mutation probes it). The lock files live outside the workspace directory, so leasing a registered host directory creates no <code>workspaces/&lt;id&gt;/</code> entry; <code>remove</code> deletes them. <code>registry.json</code> is written atomically (tmp + fsync + rename) under <code>registry.lock</code>. Releasing a rw lease bumps the generation.</p>
 
   <h3>Firecracker: block-volume pack and sync-back</h3>
   <p>Firecracker has no virtio-fs, so <code>supports_host_dir_mounts = false</code>: the host directory stays the source of truth, copied in at spawn and synced back at teardown (<a class="ref" href="../../docs/design/firecracker-backend.md">docs/design/firecracker-backend.md</a> §5).</p>
@@ -815,7 +815,7 @@ guard.kill(<span class="t">Signal</span>::KILL);</pre></figure>
 
   <h3>DockerDev hardening</h3>
   <p>Built as pure data in <code>build_container_spec</code>, so the whole matrix is unit-tested without a daemon:</p>
-  <figure class="code"><figcaption><a href="../../crates/sandcrab-backend-docker/src/spec.rs">crates/sandcrab-backend-docker/src/spec.rs:260</a><span>Rust · trimmed</span></figcaption>
+  <figure class="code"><figcaption><a href="../../crates/sandcrab-backend-docker/src/spec.rs">crates/sandcrab-backend-docker/src/spec.rs:265</a><span>Rust · trimmed</span></figcaption>
 <pre>host_config: <span class="t">Some</span>(<span class="t">HostConfig</span> {
     network_mode: <span class="t">Some</span>(mode.to_owned()),          <span class="c">// "none" unless unrestricted</span>
     cap_drop: <span class="t">Some</span>(vec![<span class="s">"ALL"</span>.into()]),
@@ -830,11 +830,14 @@ guard.kill(<span class="t">Signal</span>::KILL);</pre></figure>
     nano_cpus: <span class="t">Some</span>(nano_cpus),
     tmpfs: <span class="t">Some</span>(HashMap::from([(
         <span class="s">"/tmp"</span>.to_owned(),
-        format!(<span class="s">"rw,nosuid,nodev,size={}m,mode=1777"</span>, ctx.limits.tmp_size_mb),
+        format!(<span class="s">"rw,nosuid,nodev,noexec,size={}m,mode=1777"</span>, ctx.limits.tmp_size_mb),
     )])),
+    ulimits: <span class="t">Some</span>(vec![<span class="t">ResourcesUlimits</span> {       <span class="c">// no core dumps</span>
+        name: <span class="t">Some</span>(<span class="s">"core"</span>.into()), soft: <span class="t">Some</span>(0), hard: <span class="t">Some</span>(0),
+    }]),
     <span class="e">// …</span>
 }),</pre></figure>
-  <p class="muted" style="font-size:14px">Also: runs as the host uid:gid (so bind-mounted files stay editable on the host), published ports bind to <code>127.0.0.1</code> only, the entrypoint is pinned to <code>crabd</code>, and <code>disk_mb</code> is <strong>not</strong> enforced (a warning is logged; overlay2 would need xfs + pquota). The root filesystem stays writable on purpose: templates need a writable <code>HOME</code> and caches, and the layer is discarded on destroy.</p>
+  <p class="muted" style="font-size:14px">Also: runs as the host uid:gid (so bind-mounted files stay editable on the host), published ports bind to <code>127.0.0.1</code> only, <code>/tmp</code> is <code>noexec</code> (binaries and shared objects cannot run from it; use <code>$HOME</code> or the workspace), core dumps are disabled so crashes never drop <code>core.*</code> files into a workspace, the entrypoint is pinned to <code>crabd</code>, and <code>disk_mb</code> is <strong>not</strong> enforced (a warning is logged; overlay2 would need xfs + pquota). The root filesystem stays writable on purpose: templates need a writable <code>HOME</code> and caches, and the layer is discarded on destroy.</p>
 
   <h3>Review rounds</h3>
   <p>The Nebula QA + security review (flow step <code>review</code>) took three rounds:</p>
@@ -873,7 +876,7 @@ guard.kill(<span class="t">Signal</span>::KILL);</pre></figure>
     <tbody>
       <tr><td><code>base</code></td><td><code>debian:trixie-20261104-slim@sha256:…</code></td><td>Debian 13 + core utilities</td></tr>
       <tr><td><code>python-dev</code></td><td><code>sandcrab/base:0.1.0</code> (+ <code>uv</code> stage pinned by digest)</td><td>Python 3.15, uv, ruff, pytest, mypy</td></tr>
-      <tr><td><code>ts-dev</code></td><td><code>sandcrab/base:0.1.0</code> (+ Node 26 and bun stages pinned by digest)</td><td>Node.js 26, pnpm, bun, TypeScript</td></tr>
+      <tr><td><code>ts-dev</code></td><td><code>sandcrab/base:0.1.0</code> (+ Node 26 and bun stages pinned by digest)</td><td>Node.js 26, pnpm, bun, TypeScript, vitest, biome, Debian <code>python3</code>; no browser (use <code>render</code>)</td></tr>
       <tr><td><code>render</code></td><td><code>sandcrab/base:0.1.0</code> (+ Node and typst stages)</td><td>Chromium, Playwright, ffmpeg, ImageMagick, Typst</td></tr>
     </tbody>
   </table></div>
@@ -940,7 +943,8 @@ tiers = [<span class="s">"core"</span>, <span class="s">"process"</span>]</pre><
       <ul>
         <li><code>llm::anthropic</code>: Messages API client with SSE streaming, prompt caching and retries; default model <code>claude-sonnet-5-5</code> (<code>--model</code> / <code>CRABAGENT_MODEL</code>).</li>
         <li><code>agent</code>: the tool-use loop, running parallel tool calls through <code>Sandbox::tool_dispatch</code>.</li>
-        <li><code>session</code>: workspace resolution (<code>-w</code>, <code>--mount</code>, <code>--mount-host</code>), sandbox lifecycle, REPL or one-shot <code>-p</code>; template default <code>ts-dev</code>.</li>
+        <li><code>session</code>: workspace resolution (<code>-w</code>, <code>--mount</code>, <code>--mount-host</code>), sandbox lifecycle, REPL or one-shot <code>-p</code> (with <code>--keep-alive SECS</code> to hold published ports after the task); template default <code>ts-dev</code>. With a managed workspace at the cwd, npm / pip / Playwright caches go to <code>&lt;cwd&gt;/.cache</code> so installs survive sessions.</li>
+        <li><code>media</code>: images returned by <code>download</code> (or a binary <code>file_read</code>) reach the model as <code>image</code> blocks, never as base64 text; other binaries are summarised.</li>
         <li><code>llm::fake</code>: a scripted LLM, so the loop is tested on the fake backend and real Docker without an API key.</li>
       </ul></div>
     <div class="card"><h4><span class="glyph sm"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="glyph-svg" aria-hidden="true" focusable="false">
