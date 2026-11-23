@@ -1,8 +1,19 @@
 //! The agent loop: prompt → model → tool calls (in parallel, in the sandbox) → tool
 //! results → model … until `end_turn` or the turn limit.
 //!
-//! History is append-only (never edited), so cached prefixes and thinking blocks stay
-//! valid across requests.
+//! History is append-only, so cached prefixes and thinking blocks stay valid across
+//! requests, with three bounded exceptions, each of which keeps the history sendable:
+//!
+//! - **image elision**: past [`media::MAX_IMAGES_IN_HISTORY`] image blocks, the oldest are
+//!   replaced by text placeholders (see [`Agent::bound_images`]);
+//! - **image rejection recovery**: if the API rejects a request over an image, the images
+//!   are replaced by a note and the request is retried once;
+//! - **rollback**: a turn the API rejects outright is removed, so one bad request does not
+//!   fail every later turn.
+//!
+//! Every edit of an earlier message also strips the `thinking` blocks that follow it (see
+//! [`strip_thinking_from`]): models with preserved thinking reject a thinking block whose
+//! preceding history changed.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -14,7 +25,7 @@ use tokio::sync::watch;
 use tokio::task::JoinSet;
 
 use crate::cost::UsageTotals;
-use crate::llm::{LlmClient, Request};
+use crate::llm::{LlmClient, LlmError, Request};
 use crate::media;
 use crate::tools::ToolOutcome;
 use crate::transcript::Transcript;
@@ -253,6 +264,7 @@ impl Agent {
     /// Run one user turn to completion.
     pub async fn run(&mut self, prompt: &str, intr: &Interrupt) -> TurnOutcome {
         let base = intr.count();
+        let turn_start = self.messages.len();
         self.messages
             .push(json!({"role": "user", "content": prompt}));
         self.log("user", json!({ "text": prompt }));
@@ -273,14 +285,28 @@ impl Agent {
 
             let started = Instant::now();
             let llm = self.llm.clone();
-            let req = Request {
-                system: &self.system,
-                tools: &self.tools,
-                messages: &self.messages,
-            };
-            let res = tokio::select! {
-                r = llm.send(&req, &mut self.ui) => Some(r),
-                () = intr.beyond(base) => None,
+            let mut retried = false;
+            let res = loop {
+                let req = Request {
+                    system: &self.system,
+                    tools: &self.tools,
+                    messages: &self.messages,
+                };
+                let r = tokio::select! {
+                    r = llm.send(&req, &mut self.ui) => Some(r),
+                    () = intr.beyond(base) => None,
+                };
+                match r {
+                    // One automatic retry per request, without the images.
+                    Some(Err(e)) if !retried && e.is_image_rejection() => {
+                        retried = true;
+                        if self.drop_rejected_images(turn_start, &e) {
+                            continue;
+                        }
+                        break Some(Err(e));
+                    }
+                    other => break other,
+                }
             };
             let ms = started.elapsed().as_millis() as u64;
             let resp = match res {
@@ -293,6 +319,9 @@ impl Agent {
                     let msg = e.to_string();
                     self.ui.line(&format!("error: {msg}"));
                     self.log("error", json!({ "step": step, "error": msg, "ms": ms }));
+                    if e.is_request_rejection() {
+                        self.rollback(turn_start, e.is_image_rejection());
+                    }
                     return TurnOutcome::Failed(msg);
                 }
                 Some(Ok(r)) => r,
@@ -421,6 +450,82 @@ impl Agent {
         let blocks: Vec<Value> = results.iter().map(ToolOutcome::result_block).collect();
         self.messages
             .push(json!({"role": "user", "content": blocks}));
+        if results.iter().any(|r| r.image.is_some()) {
+            self.bound_images();
+        }
+    }
+
+    /// Keep at most [`media::MAX_IMAGES_IN_HISTORY`] image blocks in history: past that, the
+    /// oldest are replaced by `[image elided: …]` placeholders, down to
+    /// [`media::KEEP_IMAGES_AFTER_ELISION`]. This keeps every request under the API's
+    /// 20-image threshold (above which each image must be ≤ 2000 px per side) and stops
+    /// screenshots from being re-sent (and re-billed) on every request.
+    ///
+    /// Trade-off: eliding edits an earlier message, which invalidates the prompt cache from
+    /// that message on and (with preserved thinking) every later thinking block, which
+    /// [`strip_thinking_from`] removes. Eliding one image per new image would pay that on
+    /// every request; eliding in a batch (8 → 4) pays it once per 5 new images, and the
+    /// requests in between hit the cache as usual.
+    fn bound_images(&mut self) {
+        if count_images(&self.messages) <= media::MAX_IMAGES_IN_HISTORY {
+            return;
+        }
+        if let Some(first) = replace_images(
+            &mut self.messages,
+            0,
+            media::KEEP_IMAGES_AFTER_ELISION,
+            "elided to save context; download it again to look at it",
+        ) {
+            strip_thinking_from(&mut self.messages, first);
+            self.log(
+                "images_elided",
+                json!({ "first_message": first, "kept": media::KEEP_IMAGES_AFTER_ELISION }),
+            );
+        }
+    }
+
+    /// After the API rejected a request over an image: replace the images added this turn
+    /// (or, if there are none, every image) with a note. `true` if anything changed.
+    fn drop_rejected_images(&mut self, turn_start: usize, e: &LlmError) -> bool {
+        let why = format!(
+            "removed: the API rejected it ({})",
+            short(&e.to_string(), 160)
+        );
+        let first = replace_images(&mut self.messages, turn_start, 0, &why)
+            .or_else(|| replace_images(&mut self.messages, 0, 0, &why));
+        let Some(first) = first else {
+            return false;
+        };
+        strip_thinking_from(&mut self.messages, first);
+        self.ui
+            .info("⚠ the API rejected an image; retrying without it");
+        self.log(
+            "image_rejected",
+            json!({ "error": e.to_string(), "first_message": first }),
+        );
+        true
+    }
+
+    /// Undo a turn the API rejected, so the next turn starts from a history that worked.
+    /// After an image rejection, the images left in history go too.
+    fn rollback(&mut self, turn_start: usize, image: bool) {
+        self.messages.truncate(turn_start);
+        self.logged = self.logged.min(turn_start);
+        if image
+            && let Some(first) = replace_images(
+                &mut self.messages,
+                0,
+                0,
+                "removed after the API rejected a request",
+            )
+        {
+            strip_thinking_from(&mut self.messages, first);
+        }
+        self.ui.info(
+            "this turn was rolled back; the conversation continues from before it \
+             (sandbox changes made during the turn remain)",
+        );
+        self.log("rollback", json!({ "n_messages": self.messages.len() }));
     }
 
     /// Run every call of one turn concurrently; returns results in call order.
@@ -513,6 +618,119 @@ impl Agent {
     }
 }
 
+fn short(s: &str, max: usize) -> String {
+    match s.char_indices().nth(max) {
+        Some((i, _)) => format!("{}…", &s[..i]),
+        None => s.to_owned(),
+    }
+}
+
+/// Number of `image` blocks in user messages (top level or inside a `tool_result`).
+#[must_use]
+pub fn count_images(messages: &[Value]) -> usize {
+    fn count(content: &[Value]) -> usize {
+        content
+            .iter()
+            .map(|b| match b["type"].as_str() {
+                Some("image") => 1,
+                Some("tool_result") => b["content"].as_array().map_or(0, |c| count(c)),
+                _ => 0,
+            })
+            .sum()
+    }
+    messages
+        .iter()
+        .filter(|m| m["role"] == "user")
+        .filter_map(|m| m["content"].as_array())
+        .map(|c| count(c))
+        .sum()
+}
+
+/// Replace image blocks in `messages[from..]`, oldest first, with a text placeholder
+/// `[image <why>: <path> <W>x<H>]`, until at most `keep` images remain in that range.
+/// Returns the index of the first message changed.
+pub fn replace_images(
+    messages: &mut [Value],
+    from: usize,
+    keep: usize,
+    why: &str,
+) -> Option<usize> {
+    let tail = messages.get_mut(from..)?;
+    let mut budget = count_images(tail).saturating_sub(keep);
+    let mut first = None;
+    for (i, m) in tail.iter_mut().enumerate() {
+        if budget == 0 {
+            break;
+        }
+        if m["role"] != "user" {
+            continue;
+        }
+        if let Some(c) = m["content"].as_array_mut()
+            && replace_in(c, &mut budget, why) > 0
+        {
+            first.get_or_insert(from + i);
+        }
+    }
+    first
+}
+
+fn replace_in(content: &mut [Value], budget: &mut usize, why: &str) -> usize {
+    let mut n = 0;
+    for b in content.iter_mut() {
+        if b["type"] == "tool_result"
+            && let Some(inner) = b["content"].as_array_mut()
+        {
+            n += replace_in(inner, budget, why);
+        }
+    }
+    let label = image_label(content);
+    for b in content.iter_mut() {
+        if *budget == 0 {
+            break;
+        }
+        if b["type"] == "image" {
+            *b = json!({"type": "text", "text": format!("[image {why}: {label}]")});
+            *budget -= 1;
+            n += 1;
+        }
+    }
+    n
+}
+
+/// `<path> <W>x<H>` from the JSON note next to an image in a `tool_result`.
+fn image_label(content: &[Value]) -> String {
+    let note = content
+        .iter()
+        .filter_map(|b| b["text"].as_str())
+        .filter_map(|t| serde_json::from_str::<Value>(t).ok())
+        .find(|v| v.get("path").is_some());
+    let Some(v) = note else {
+        return "image".into();
+    };
+    let path = v["path"].as_str().unwrap_or("image");
+    match (v["width"].as_u64(), v["height"].as_u64()) {
+        (Some(w), Some(h)) => format!("{path} {w}x{h}"),
+        _ => path.to_owned(),
+    }
+}
+
+/// Drop `thinking` / `redacted_thinking` blocks from the assistant messages at or after
+/// `from`: their preceding history was just edited, so models with preserved thinking
+/// would reject them. An assistant message left empty gets a placeholder text block.
+pub fn strip_thinking_from(messages: &mut [Value], from: usize) {
+    for m in messages.iter_mut().skip(from) {
+        if m["role"] != "assistant" {
+            continue;
+        }
+        if let Some(c) = m["content"].as_array_mut() {
+            c.retain(|b| !matches!(b["type"].as_str(), Some("thinking" | "redacted_thinking")));
+            if c.is_empty() {
+                c.push(json!({"type": "text", "text": "…"}));
+            }
+        }
+    }
+}
+
 /// Images reach the model as `image` blocks, never as base64 text: a `download` is
 /// reshaped; a binary `file_read` of an image path fetches the bytes with `download`.
 async fn attach_media(sb: &Sandbox, o: &mut ToolOutcome) {
@@ -584,5 +802,179 @@ mod tests {
         assert_eq!(i.termination(), Some(15));
         // A terminating signal also interrupts the running turn.
         assert_eq!(i.count(), 2);
+    }
+
+    fn image_result(id: &str, path: &str) -> Value {
+        let note = json!({"path": path, "width": 1280, "height": 800, "mime": "image/png"});
+        json!({"role": "user", "content": [{
+            "type": "tool_result",
+            "tool_use_id": id,
+            "content": [
+                {"type": "text", "text": note.to_string()},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}},
+            ],
+        }]})
+    }
+
+    fn assistant_with_thinking(id: &str) -> Value {
+        json!({"role": "assistant", "content": [
+            {"type": "thinking", "thinking": "", "signature": "sig"},
+            {"type": "tool_use", "id": id, "name": "download", "input": {}},
+        ]})
+    }
+
+    /// user prompt, then `n` rounds of (assistant with thinking, image tool_result).
+    fn history(n: usize) -> Vec<Value> {
+        let mut m = vec![json!({"role": "user", "content": "go"})];
+        for i in 0..n {
+            m.push(assistant_with_thinking(&format!("t{i}")));
+            m.push(image_result(&format!("t{i}"), &format!("shot{i}.png")));
+        }
+        m
+    }
+
+    #[test]
+    fn elision_keeps_the_most_recent_images() {
+        let mut m = history(9);
+        assert_eq!(count_images(&m), 9);
+        let first = replace_images(&mut m, 0, 4, "elided").unwrap();
+        assert_eq!(first, 2, "the oldest image is in message 2");
+        assert_eq!(count_images(&m), 4);
+        let t = m[2]["content"][0]["content"][1]["text"].as_str().unwrap();
+        assert_eq!(t, "[image elided: shot0.png 1280x800]");
+        // the newest images are untouched
+        assert_eq!(m[18]["content"][0]["content"][1]["type"], "image");
+        assert_eq!(m[12]["content"][0]["content"][1]["type"], "image");
+        assert_eq!(m[10]["content"][0]["content"][1]["type"], "text");
+        // nothing to do when under the cap
+        assert!(replace_images(&mut m, 0, 4, "elided").is_none());
+
+        strip_thinking_from(&mut m, first);
+        assert_eq!(
+            m[1]["content"][0]["type"], "thinking",
+            "before the edit: kept"
+        );
+        for a in m.iter().skip(first).filter(|x| x["role"] == "assistant") {
+            assert_eq!(a["content"].as_array().unwrap().len(), 1);
+            assert_eq!(a["content"][0]["type"], "tool_use");
+        }
+        let mut only = vec![
+            json!({"role": "assistant", "content": [{"type": "thinking", "thinking": "", "signature": "s"}]}),
+        ];
+        strip_thinking_from(&mut only, 0);
+        assert_eq!(only[0]["content"][0]["type"], "text");
+    }
+
+    #[tokio::test]
+    async fn bounded_images_edit_history_in_batches() {
+        let dir = tempfile::tempdir().unwrap();
+        let sc = fake_sandcrab(dir.path());
+        let sb = Arc::new(
+            sc.spawn(sandcrab_sdk::SandboxConfig::from_template("base"))
+                .await
+                .unwrap(),
+        );
+        let llm = Arc::new(crate::llm::fake::ScriptedLlm::new(Vec::new()));
+        let mut agent = Agent::new(llm, sb.clone(), "sys".into(), Vec::new()).with_ui(Ui::quiet());
+        let mut edits = 0;
+        for i in 0..20 {
+            agent
+                .messages
+                .push(assistant_with_thinking(&format!("t{i}")));
+            let before = agent.messages.clone();
+            agent.messages.push(image_result(&format!("t{i}"), "s.png"));
+            agent.bound_images();
+            assert!(count_images(&agent.messages) <= media::MAX_IMAGES_IN_HISTORY);
+            if agent.messages[..before.len()] != before[..] {
+                edits += 1;
+            }
+        }
+        // 20 images: elide at the 9th, 14th and 19th → 3 cache-breaking edits, not 12.
+        assert_eq!(edits, 3);
+        assert_eq!(count_images(&agent.messages), 5);
+        drop(agent);
+        Arc::try_unwrap(sb).unwrap().destroy().await.unwrap();
+    }
+
+    fn fake_sandcrab(dir: &std::path::Path) -> sandcrab_sdk::Sandcrab {
+        let t = dir.join("templates/base");
+        std::fs::create_dir_all(&t).unwrap();
+        std::fs::write(
+            t.join("sandcrab.toml"),
+            "[template]\nname = \"base\"\nversion = \"0.1.0\"\nimage = \"sandcrab/base:0.1.0\"\n\
+             [resources]\nvcpu = 1\nmemory_mb = 512\ndisk_mb = 2048\n",
+        )
+        .unwrap();
+        sandcrab_sdk::Sandcrab::builder()
+            .state_dir(dir.join("state"))
+            .templates_dir(dir.join("templates"))
+            .ready_timeout(std::time::Duration::from_secs(5))
+            .backend(sandcrab_core::testing::FakeBackend::new())
+            .build()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn image_rejection_strips_the_images_and_retries_once() {
+        use crate::llm::fake::{ScriptedLlm, bad_request, reply, text};
+        let dir = tempfile::tempdir().unwrap();
+        let sc = fake_sandcrab(dir.path());
+        let llm = Arc::new(ScriptedLlm::with_results(vec![
+            Err(bad_request(
+                "messages.2.content.0.content.1.image.source.base64: image dimensions exceed max allowed size for many-image requests: 2000 pixels",
+            )),
+            Ok(reply(vec![text("ok")], "end_turn")),
+        ]));
+        let sb = Arc::new(
+            sc.spawn(sandcrab_sdk::SandboxConfig::from_template("base"))
+                .await
+                .unwrap(),
+        );
+        let mut agent =
+            Agent::new(llm.clone(), sb.clone(), "sys".into(), Vec::new()).with_ui(Ui::quiet());
+        agent.messages = history(1);
+        agent.messages.push(json!({"role": "assistant", "content": [
+            {"type": "thinking", "thinking": "", "signature": "late"},
+            {"type": "text", "text": "looked"},
+        ]}));
+        let out = agent.run("again", &Interrupt::default()).await;
+        assert_eq!(out, TurnOutcome::Done);
+        let reqs = llm.requests();
+        assert_eq!(reqs.len(), 2, "exactly one retry");
+        assert_eq!(count_images(&reqs[0]), 1);
+        assert_eq!(count_images(&reqs[1]), 0);
+        let note = reqs[1][2]["content"][0]["content"][1]["text"]
+            .as_str()
+            .unwrap();
+        assert!(
+            note.starts_with("[image removed: the API rejected it"),
+            "{note}"
+        );
+        assert!(note.contains("shot0.png 1280x800"), "{note}");
+        // thinking after the edit is gone, thinking before it stays
+        assert_eq!(reqs[1][1]["content"][0]["type"], "thinking");
+        assert_eq!(reqs[1][3]["content"][0]["type"], "text");
+        assert_eq!(agent.messages().len(), 6);
+
+        drop(agent);
+
+        // A second image rejection on the retry is not retried again: the turn fails and
+        // is rolled back, and no image is left to fail the next turn.
+        let llm2 = Arc::new(ScriptedLlm::with_results(vec![
+            Err(bad_request("Could not process image")),
+            Err(bad_request("Could not process image")),
+        ]));
+        let mut agent =
+            Agent::new(llm2.clone(), sb.clone(), "sys".into(), Vec::new()).with_ui(Ui::quiet());
+        agent.messages = history(2);
+        let n = agent.messages.len();
+        let out = agent.run("again", &Interrupt::default()).await;
+        assert!(matches!(out, TurnOutcome::Failed(_)), "{out:?}");
+        assert_eq!(llm2.requests().len(), 2);
+        assert_eq!(agent.messages().len(), n, "turn rolled back");
+        assert_eq!(count_images(agent.messages()), 0);
+
+        drop(agent);
+        Arc::try_unwrap(sb).unwrap().destroy().await.unwrap();
     }
 }

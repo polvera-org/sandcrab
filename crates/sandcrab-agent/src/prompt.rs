@@ -138,7 +138,8 @@ pub fn system_prompt(ctx: &PromptContext) -> String {
          to ~3.75 MB and {} px per side), so you can inspect screenshots and assets. Take \
          viewport-sized screenshots, not full-page ones. Other binary files, and images that \
          are too large or truncated, come back as a summary (size, sha256, type), never as \
-         base64.",
+         base64. Only the last few images stay in the conversation; older ones become \
+         `[image elided: …]` notes, so write down what you saw that matters.",
         crate::media::MAX_IMAGE_SIDE
     );
     let _ = writeln!(s, "\n# Tools\n{}", ctx.tools.join(", "));
@@ -207,6 +208,7 @@ mod tests {
             "`render` template",
             "image itself",
             "8000 px",
+            "image elided",
         ] {
             assert!(p.contains(needle), "missing {needle}:\n{p}");
         }
