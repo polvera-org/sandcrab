@@ -1,5 +1,11 @@
 //! Guest side of workspace sync-back: pack a tree into the `sandcrab-tar-v1` archive format
 //! (see [`sandcrab_protocol::init::archive`]) and stream it over an async connection.
+//!
+//! Before acking an export, the control handler runs [`precheck`]: a stat-only walk that
+//! refuses (with a clear JSON-RPC error, while one can still be sent) a tree whose archive
+//! would exceed the drive's capacity — sparse files and hard links are stored at their full
+//! apparent size, so a 15 GiB `truncate -s` on a 1 GiB drive is refused here, naming the
+//! file. The host enforces the same bound independently (`UnpackLimits::for_capacity`).
 
 use std::{
     fs::{self, Metadata},
@@ -112,6 +118,97 @@ pub fn pack_tree<W: Write>(root: &Path, owner: Option<(u32, u32)>, w: W) -> io::
     let mut w = builder.into_inner()?;
     w.flush()?;
     Ok(stats)
+}
+
+/// What a [`precheck`] walk saw (same filters as [`pack_tree`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TreeScan {
+    /// Directories + files + symlinks.
+    pub entries: u64,
+    /// Sum of regular-file apparent sizes (what the archive will carry).
+    pub apparent_bytes: u64,
+    /// Sum of regular-file allocated sizes.
+    pub allocated_bytes: u64,
+    /// The file whose apparent size exceeds its allocation the most:
+    /// (relative path, apparent, allocated).
+    pub most_sparse: Option<(PathBuf, u64, u64)>,
+}
+
+/// Stat-only walk of `root` (no file contents read).
+pub fn scan_tree(root: &Path) -> io::Result<TreeScan> {
+    let root_dev = fs::symlink_metadata(root)?.dev();
+    let mut scan = TreeScan::default();
+    let mut stack: Vec<(PathBuf, PathBuf)> = Vec::new();
+    push_children(root, Path::new(""), true, &mut stack)?;
+    while let Some((rel, abs)) = stack.pop() {
+        let md = match fs::symlink_metadata(&abs) {
+            Ok(md) => md,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e),
+        };
+        let ft = md.file_type();
+        if md.dev() != root_dev || !(ft.is_dir() || ft.is_file() || ft.is_symlink()) {
+            continue;
+        }
+        scan.entries += 1;
+        if ft.is_dir() {
+            match push_children(&abs, &rel, false, &mut stack) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
+        } else if ft.is_file() {
+            let (size, alloc) = (md.len(), md.blocks().saturating_mul(512));
+            scan.apparent_bytes = scan.apparent_bytes.saturating_add(size);
+            scan.allocated_bytes = scan.allocated_bytes.saturating_add(alloc);
+            let gap = size.saturating_sub(alloc);
+            if gap > 0
+                && scan
+                    .most_sparse
+                    .as_ref()
+                    .is_none_or(|(_, s, a)| gap > s.saturating_sub(*a))
+            {
+                scan.most_sparse = Some((rel, size, alloc));
+            }
+        }
+    }
+    Ok(scan)
+}
+
+/// Refuse an export whose archive content would exceed `capacity` bytes.
+pub fn check_fits(scan: &TreeScan, capacity: u64) -> io::Result<()> {
+    if scan.apparent_bytes <= capacity {
+        return Ok(());
+    }
+    let hint = match &scan.most_sparse {
+        Some((p, size, alloc)) => format!(
+            "; sparse file `{}` alone is {size} bytes apparent / {alloc} allocated",
+            p.display()
+        ),
+        None => String::new(),
+    };
+    Err(io::Error::new(
+        io::ErrorKind::FileTooLarge,
+        format!(
+            "workspace export would carry {} bytes of file content but the drive holds {capacity} \
+             (sparse files and hard links are exported at their full apparent size){hint}; \
+             shrink or delete them before the sandbox is destroyed",
+            scan.apparent_bytes
+        ),
+    ))
+}
+
+/// Size of the filesystem holding `root` (`statvfs`: blocks × fragment size).
+pub fn fs_capacity(root: &Path) -> io::Result<u64> {
+    let st = rustix::fs::statvfs(root).map_err(io::Error::from)?;
+    Ok(st.f_blocks.saturating_mul(st.f_frsize))
+}
+
+/// [`scan_tree`] + [`check_fits`] against the capacity of `root`'s filesystem.
+pub fn precheck(root: &Path) -> io::Result<TreeScan> {
+    let scan = scan_tree(root)?;
+    check_fits(&scan, fs_capacity(root)?)?;
+    Ok(scan)
 }
 
 fn push_children(
@@ -355,6 +452,36 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         fs::write(t.path().join("f"), b"").unwrap();
         assert!(pack_tree(&t.path().join("f"), None, io::sink()).is_err());
+    }
+
+    #[test]
+    fn precheck_refuses_sparse_file_bigger_than_drive() {
+        let t = tree();
+        let f = fs::File::create(t.path().join("huge")).unwrap();
+        f.set_len(15 << 30).unwrap(); // `truncate -s 15G huge`
+        let scan = scan_tree(t.path()).unwrap();
+        assert!(scan.apparent_bytes >= 15 << 30);
+        let (p, size, alloc) = scan.most_sparse.clone().unwrap();
+        assert_eq!((p.as_path(), size), (Path::new("huge"), 15 << 30));
+        assert!(alloc < size);
+        assert_eq!(scan.entries, 11, "socket not counted");
+        let err = check_fits(&scan, 1 << 30).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::FileTooLarge);
+        assert!(err.to_string().contains("`huge`"), "{err}");
+        check_fits(&scan, 16 << 30).unwrap();
+        assert!(fs_capacity(t.path()).unwrap() > 0);
+    }
+
+    #[test]
+    fn precheck_counts_hard_links_per_name() {
+        let t = tempfile::tempdir().unwrap();
+        fs::write(t.path().join("a"), vec![1u8; 4096]).unwrap();
+        for i in 0..9 {
+            fs::hard_link(t.path().join("a"), t.path().join(format!("h{i}"))).unwrap();
+        }
+        let scan = scan_tree(t.path()).unwrap();
+        assert_eq!(scan.apparent_bytes, 10 * 4096);
+        assert!(check_fits(&scan, 5 * 4096).is_err());
     }
 
     #[tokio::test]

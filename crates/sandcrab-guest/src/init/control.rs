@@ -108,6 +108,23 @@ where
                         continue;
                     }
                 };
+                // Refuse an archive bigger than the drive while an error can still be sent.
+                let checked = {
+                    let root = root.clone();
+                    tokio::task::spawn_blocking(move || export::precheck(&root))
+                        .await
+                        .unwrap_or_else(|e| Err(io::Error::other(e.to_string())))
+                };
+                if let Err(e) = checked {
+                    warn!(root = %root.display(), error = %e, "export refused");
+                    let err = to_protocol(&e);
+                    write(
+                        &mut stream,
+                        &RpcResponse::failure(Some(req.id.clone()), &err),
+                    )
+                    .await?;
+                    continue;
+                }
                 let ack = InitExportAck {
                     format: archive::FORMAT.to_owned(),
                     guest_path: root.clone(),

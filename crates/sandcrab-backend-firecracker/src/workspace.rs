@@ -577,6 +577,79 @@ pub(crate) fn create_private_dir_all(p: &Path) -> Result<()> {
 
 /// Default idle timeout while reading an export stream.
 pub const EXPORT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Default fixed part of the overall export deadline.
+pub const EXPORT_TIMEOUT: Duration = Duration::from_secs(120);
+/// Default throughput the overall export deadline assumes on top of [`EXPORT_TIMEOUT`]
+/// (a full 10 GiB drive gets 120 s + 320 s).
+pub const EXPORT_MIN_BYTES_PER_SEC: u64 = 32 * MIB;
+
+/// Overall deadline for exporting a drive of `capacity` bytes: `base + capacity / rate`.
+#[must_use]
+pub fn export_deadline(base: Duration, capacity: u64, min_bytes_per_sec: u64) -> Duration {
+    base.saturating_add(Duration::from_secs(capacity / min_bytes_per_sec.max(1)))
+}
+
+/// Blocking export-stream reader with an idle timeout **and** an overall deadline: each read
+/// waits at most `min(idle, time left)`, and once the deadline passes every read fails with
+/// `TimedOut`, so a guest dripping one byte at a time cannot stall teardown.
+#[derive(Debug)]
+pub struct DeadlineReader {
+    inner: std::os::unix::net::UnixStream,
+    idle: Duration,
+    deadline: std::time::Instant,
+}
+
+impl DeadlineReader {
+    pub fn new(
+        inner: std::os::unix::net::UnixStream,
+        idle: Duration,
+        deadline: std::time::Instant,
+    ) -> Self {
+        Self {
+            inner,
+            idle,
+            deadline,
+        }
+    }
+
+    fn expired() -> io::Error {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            "workspace export exceeded its overall deadline",
+        )
+    }
+}
+
+impl Read for DeadlineReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let left = self
+            .deadline
+            .saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return Err(Self::expired());
+        }
+        // `set_read_timeout(Some(0))` is an error; `left` is non-zero here.
+        self.inner.set_read_timeout(Some(left.min(self.idle)))?;
+        match self.inner.read(buf) {
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                if std::time::Instant::now() >= self.deadline {
+                    Err(Self::expired())
+                } else {
+                    Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        format!("workspace export idle for {:?}", self.idle),
+                    ))
+                }
+            }
+            r => r,
+        }
+    }
+}
 
 pub(crate) fn io_at(path: &Path, e: io::Error) -> SandboxError {
     SandboxError::Io(io::Error::new(e.kind(), format!("{}: {e}", path.display())))
@@ -666,6 +739,53 @@ mod tests {
         assert_eq!(a, fingerprint(dir.path()).unwrap());
         fs::write(dir.path().join("src/new.txt"), "x").unwrap();
         assert_ne!(a, fingerprint(dir.path()).unwrap());
+    }
+
+    #[test]
+    fn deadline_reader_aborts_a_slow_drip() {
+        use std::io::Write as _;
+        let (mut tx, rx) = std::os::unix::net::UnixStream::pair().unwrap();
+        let dripper = std::thread::spawn(move || {
+            // One byte every 20 ms, far longer than the deadline.
+            for _ in 0..200 {
+                if tx.write_all(b"x").is_err() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        });
+        let t0 = std::time::Instant::now();
+        let deadline = t0 + Duration::from_millis(300);
+        let mut r = DeadlineReader::new(rx, Duration::from_secs(5), deadline);
+        let mut sink = Vec::new();
+        let err = r.read_to_end(&mut sink).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+        assert!(err.to_string().contains("overall deadline"), "{err}");
+        assert!(t0.elapsed() < Duration::from_secs(2), "{:?}", t0.elapsed());
+        assert!(!sink.is_empty(), "idle timeout never fired");
+        drop(r);
+        dripper.join().unwrap();
+    }
+
+    #[test]
+    fn deadline_reader_idle_timeout() {
+        let (_tx, rx) = std::os::unix::net::UnixStream::pair().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut r = DeadlineReader::new(rx, Duration::from_millis(50), deadline);
+        let err = r.read(&mut [0u8; 8]).unwrap_err();
+        assert!(err.to_string().contains("idle"), "{err}");
+    }
+
+    #[test]
+    fn export_deadline_scales_with_capacity() {
+        assert_eq!(
+            export_deadline(EXPORT_TIMEOUT, 10 * GIB, EXPORT_MIN_BYTES_PER_SEC),
+            Duration::from_secs(120 + 320)
+        );
+        assert_eq!(
+            export_deadline(Duration::from_secs(1), 1, 0),
+            Duration::from_secs(2)
+        );
     }
 
     #[test]

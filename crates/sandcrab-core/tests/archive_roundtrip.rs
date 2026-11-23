@@ -7,7 +7,7 @@ use std::{
     path::Path,
 };
 
-use sandcrab_core::archive::{UnpackLimits, unpack_safe};
+use sandcrab_core::archive::{UnpackLimits, mask_mode, unpack_safe};
 use sandcrab_guest::init::export::pack_tree;
 
 fn snapshot(root: &Path) -> Vec<(String, String)> {
@@ -71,6 +71,18 @@ fn pack_then_unpack_round_trips() {
 
     let mut want = snapshot(r);
     want.retain(|(p, _)| p != "lost+found");
+    // The host masks guest modes (umask 022, owner always rw / rwx).
+    for (_, d) in &mut want {
+        let (kind, rest) = d.split_once(' ').unwrap();
+        if kind == "dir" || kind == "file" {
+            let (mode, tail) = rest.split_once(' ').unwrap_or((rest, ""));
+            let m = mask_mode(u32::from_str_radix(mode, 8).unwrap(), kind == "dir", 0o022);
+            *d = format!(
+                "{kind} {m:o}{}{tail}",
+                if tail.is_empty() { "" } else { " " }
+            );
+        }
+    }
     assert_eq!(snapshot(&staging), want);
 
     // Restore write permission so the tempdirs can be cleaned up.

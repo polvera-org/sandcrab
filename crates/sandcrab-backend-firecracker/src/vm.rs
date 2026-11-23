@@ -390,6 +390,20 @@ pub(crate) struct SyncDrive {
     pub tag: String,
 }
 
+/// Unpack caps for one drive: the configured caps bounded by the drive image's size (the
+/// most the guest can legitimately hold) and the optional host quota. Also returns that
+/// capacity.
+pub(crate) fn sync_back_limits(
+    cfg: &FirecrackerConfig,
+    image: &Path,
+) -> Result<(sandcrab_core::archive::UnpackLimits, u64)> {
+    let size = fs::metadata(image)
+        .map_err(|e| workspace::io_at(image, e))?
+        .len();
+    let capacity = cfg.sync_back_quota.map_or(size, |q| q.min(size));
+    Ok((cfg.unpack_limits.bounded_by(capacity), capacity))
+}
+
 /// Live Firecracker sandbox.
 pub(crate) struct FirecrackerSandbox {
     pub vm: Vm,
@@ -416,25 +430,38 @@ impl FirecrackerSandbox {
         let staging = workspace::staging_dir(&m.backing, &m.host_path, &self.vm.dir, &d.tag);
         workspace::fresh_staging(&staging)?;
         let res = async {
+            let (limits, capacity) = sync_back_limits(cfg, &m.image)?;
+            let budget = workspace::export_deadline(
+                cfg.export_timeout,
+                capacity,
+                cfg.export_min_bytes_per_sec,
+            );
+            let deadline = Instant::now() + budget;
             let (ctl, _) = connect_control(
                 &self.vm.vsock(),
                 CONTROL_PORT,
                 Instant::now() + Duration::from_secs(5),
             )
             .await?;
-            let (_ack, stream) = ctl.export(&m.drive_id, Duration::from_secs(10)).await?;
+            // The guest pre-scans the tree before acking: allow up to 60 s of the budget.
+            let ack_timeout = deadline
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_secs(60))
+                .max(Duration::from_secs(1));
+            let (_ack, stream) = ctl.export(&m.drive_id, ack_timeout).await?;
             let std = stream
                 .into_std()
                 .and_then(|s| s.set_nonblocking(false).map(|()| s))
-                .and_then(|s| {
-                    s.set_read_timeout(Some(cfg.export_idle_timeout))
-                        .map(|()| s)
-                })
                 .map_err(|e| SandboxError::Transport(format!("export stream: {e}")))?;
-            let limits = cfg.unpack_limits.clone();
+            // Idle timeout + overall deadline: a slow-dripping guest cannot stall destroy.
+            let reader = workspace::DeadlineReader::new(std, cfg.export_idle_timeout, deadline);
             let (backing, host, stg) = (m.backing.clone(), m.host_path.clone(), staging.clone());
             tokio::task::spawn_blocking(move || {
-                let stats = workspace::receive_export(std::io::BufReader::new(std), &stg, &limits)?;
+                let stats = workspace::receive_export(
+                    std::io::BufReader::with_capacity(256 * 1024, reader),
+                    &stg,
+                    &limits,
+                )?;
                 workspace::commit(&backing, &stg, &host)?;
                 Ok::<_, SandboxError>(stats)
             })
@@ -503,5 +530,30 @@ impl SandboxHandle for FirecrackerSandbox {
             "sync-back failed for {detail}; the guest's writes were not (fully) committed and \
              the guest image(s) were preserved at {moved:?}"
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sync_back_limits_follow_drive_size_and_quota() {
+        let t = tempfile::tempdir().unwrap();
+        let img = t.path().join("ws.ext4");
+        fs::File::create(&img)
+            .unwrap()
+            .set_len(2 << 30) // sparse 2 GiB image
+            .unwrap();
+        let mut cfg = FirecrackerConfig::with_home(t.path(), "/c");
+        let (l, cap) = sync_back_limits(&cfg, &img).unwrap();
+        assert_eq!(cap, 2 << 30);
+        let slack = sandcrab_core::archive::CAPACITY_SLACK_BYTES;
+        assert_eq!(l.max_total_bytes, (2 << 30) + slack);
+        assert_eq!(l.max_file_bytes, l.max_total_bytes);
+        cfg.sync_back_quota = Some(100 << 20);
+        let (l, _) = sync_back_limits(&cfg, &img).unwrap();
+        assert_eq!(l.max_total_bytes, (100 << 20) + slack);
+        assert!(sync_back_limits(&cfg, &t.path().join("missing")).is_err());
     }
 }
