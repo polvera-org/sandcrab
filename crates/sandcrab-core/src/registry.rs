@@ -1160,6 +1160,181 @@ mod tests {
         assert!(f.host.join("real/x.txt").exists());
     }
 
+    /// The reviewer's PoC, in-process: a "guest" thread loops `renameat2(RENAME_EXCHANGE)`
+    /// swapping a real directory with a symlink to outside while the host runs file ops.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rename_exchange_race_never_escapes() {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+        use rustix::fs::{CWD, Mode, OFlags, RenameFlags};
+
+        let f = fixture();
+        fs::create_dir_all(f.host.join("real")).unwrap();
+        fs::write(f.host.join("real/secret"), b"SAFE").unwrap();
+        fs::write(f.outside.join("victim"), b"keep").unwrap();
+        symlink(&f.outside, f.host.join("y")).unwrap();
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let swaps = Arc::new(AtomicU64::new(0));
+        let guest = {
+            let (stop, swaps) = (Arc::clone(&stop), Arc::clone(&swaps));
+            let dir = rustix::fs::openat(
+                CWD,
+                &f.host,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .unwrap();
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    // Errors once the test has failed and its tempdir is gone.
+                    if rustix::fs::renameat_with(&dir, "real", &dir, "y", RenameFlags::EXCHANGE)
+                        .is_err()
+                    {
+                        break;
+                    }
+                    swaps.fetch_add(1, Ordering::Relaxed);
+                }
+            })
+        };
+
+        let (mut ok, mut refused) = (0u32, 0u32);
+        for i in 0..2000 {
+            match f.reg.read_file(&proj(), "real/secret") {
+                Ok(bytes) => {
+                    assert_eq!(bytes, b"SAFE", "read escaped at iteration {i}");
+                    ok += 1;
+                }
+                // Symlink refused, or a component swapped mid-walk (not a directory).
+                Err(SandboxError::PathEscape(_) | SandboxError::Workspace(_)) => refused += 1,
+                Err(e) => panic!("unexpected read error: {e}"),
+            }
+            let _ = f.reg.put_file(&proj(), "real/pwned", b"PWNED");
+            let _ = f.reg.delete_file(&proj(), "real/victim");
+            if let Ok(entries) = f.reg.list_files(&proj(), "real") {
+                assert!(
+                    entries.iter().all(|e| e.path != Path::new("real/victim")),
+                    "list escaped at iteration {i}"
+                );
+            }
+            assert!(!f.outside.join("pwned").exists(), "write escaped at {i}");
+            assert!(f.outside.join("victim").exists(), "delete escaped at {i}");
+        }
+        stop.store(true, Ordering::Relaxed);
+        guest.join().unwrap();
+        assert!(swaps.load(Ordering::Relaxed) > 0);
+        assert!(
+            refused > 0,
+            "race never observed (ok={ok}); test is not exercising it"
+        );
+        assert_eq!(fs::read(f.outside.join("secret")).unwrap(), b"top secret");
+    }
+
+    /// Child half of `leases_are_cross_process`: holds a rw lease until stdin closes.
+    #[test]
+    fn lease_holder_child() {
+        let Some(root) = std::env::var_os("SANDCRAB_TEST_LEASE_ROOT") else {
+            return;
+        };
+        let reg = WorkspaceRegistry::open(root).unwrap();
+        let _lease = reg
+            .lease(&proj(), MountMode::ReadWrite, SandboxId::new())
+            .unwrap();
+        println!("LEASE-READY");
+        let mut sink = String::new();
+        let _ = io::stdin().read_line(&mut sink);
+    }
+
+    #[test]
+    fn leases_are_cross_process() {
+        use std::io::BufRead;
+        use std::process::{Command, Stdio};
+
+        let f = fixture();
+        fs::write(f.host.join("a.txt"), b"a").unwrap();
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "registry::tests::lease_holder_child",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("SANDCRAB_TEST_LEASE_ROOT", f.reg.state_root())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut lines = io::BufReader::new(child.stdout.take().unwrap()).lines();
+        assert!(
+            // libtest prints `test <name> ... ` without a newline before the child output.
+            lines.any(|l| l.unwrap().contains("LEASE-READY")),
+            "child never took the lease"
+        );
+
+        // This process has no in-memory lease; only the flock tells it about the child's.
+        let busy = |r: Result<()>| matches!(r, Err(SandboxError::WorkspaceBusy(_)));
+        assert!(busy(f.reg.put_file(&proj(), "b.txt", b"b")));
+        assert!(busy(f.reg.delete_file(&proj(), "a.txt")));
+        assert!(busy(f.reg.remove(&proj(), false).map(drop)));
+        assert!(busy(
+            f.reg
+                .lease(&proj(), MountMode::ReadWrite, SandboxId::new())
+                .map(drop)
+        ));
+        assert!(busy(
+            f.reg
+                .lease(&proj(), MountMode::ReadOnly, SandboxId::new())
+                .map(drop)
+        ));
+        // Reads stay allowed; forced writes go through.
+        assert_eq!(f.reg.read_file(&proj(), "a.txt").unwrap(), b"a");
+        f.reg.list_files(&proj(), "").unwrap();
+        f.reg
+            .put_file_with(&proj(), "b.txt", b"b", HostWriteOptions { force: true })
+            .unwrap();
+        assert_eq!(fs::read(f.host.join("b.txt")).unwrap(), b"b");
+
+        drop(child.stdin.take());
+        assert!(child.wait().unwrap().success());
+        f.reg.put_file(&proj(), "c.txt", b"c").unwrap();
+        drop(
+            f.reg
+                .lease(&proj(), MountMode::ReadWrite, SandboxId::new())
+                .unwrap(),
+        );
+    }
+
+    #[test]
+    fn ro_lease_in_other_process_blocks_rw_only() {
+        let f = fixture();
+        let other = WorkspaceRegistry::open(f.reg.state_root()).unwrap();
+        let ro = other
+            .lease(&proj(), MountMode::ReadOnly, SandboxId::new())
+            .unwrap();
+        // A second registry instance has its own in-memory state: like another process.
+        f.reg.put_file(&proj(), "x", b"x").unwrap();
+        let ro2 = f
+            .reg
+            .lease(&proj(), MountMode::ReadOnly, SandboxId::new())
+            .unwrap();
+        assert!(matches!(
+            f.reg.lease(&proj(), MountMode::ReadWrite, SandboxId::new()),
+            Err(SandboxError::WorkspaceBusy(_))
+        ));
+        drop((ro, ro2));
+        let rw = f
+            .reg
+            .lease(&proj(), MountMode::ReadWrite, SandboxId::new())
+            .unwrap();
+        assert!(matches!(
+            other.put_file(&proj(), "x", b"y"),
+            Err(SandboxError::WorkspaceBusy(_))
+        ));
+        drop(rw);
+        other.put_file(&proj(), "x", b"y").unwrap();
+    }
+
     #[test]
     fn leases() {
         let f = fixture();
