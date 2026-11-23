@@ -4,10 +4,13 @@
 
 mod common;
 
+use std::sync::Arc;
+
 use common::{docker_config, docker_ps, host_uid, run, run_exclusive, sh};
 use sandcrab_sdk::{
     BackendKind, MountMode, NetworkConfig, NetworkPolicy, SandboxConfig, SandboxError,
 };
+use tokio::task::JoinSet;
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "e2e: needs a sandbox backend (SANDCRAB_E2E_BACKEND, default docker)"]
@@ -163,6 +166,62 @@ async fn sandbox_hardening_network_user_capabilities() {
                 .to_path_buf();
             let meta = std::fs::metadata(root.join("owned.txt")).unwrap();
             assert_eq!(meta.uid(), host_uid());
+        }
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "e2e: needs a sandbox backend (SANDCRAB_E2E_BACKEND, default docker)"]
+async fn concurrent_sandboxes_isolated_and_leak_free() {
+    const N: usize = 4;
+    run_exclusive("concurrency", |h| async move {
+        let names: Vec<String> = (0..N).map(|i| h.name(&format!("c{i}"))).collect();
+        for n in &names {
+            h.ws().create(n).unwrap();
+        }
+        let mut set = JoinSet::new();
+        for (i, name) in names.iter().cloned().enumerate() {
+            let h = Arc::clone(&h);
+            set.spawn(async move {
+                let sb =
+                    h.sc.spawn(
+                        SandboxConfig::from_template("base")
+                            .mount(name.as_str(), "/workspace", MountMode::ReadWrite)
+                            .default_cwd("/workspace"),
+                    )
+                    .await
+                    .unwrap_or_else(|e| panic!("spawn {i}: {e}"));
+                let id = sb.id();
+                sb.file_write("mine.txt", format!("sandbox {i}\n"))
+                    .await
+                    .unwrap();
+                sh(&sb, &format!("echo {i} >> mine.txt && ls /workspace")).await;
+                sb.destroy().await.unwrap();
+                id
+            });
+        }
+        let mut ids = Vec::new();
+        while let Some(res) = set.join_next().await {
+            ids.push(res.expect("sandbox task panicked"));
+        }
+        assert_eq!(ids.len(), N);
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), N, "sandbox ids must be unique");
+
+        h.assert_none_running(&ids);
+        for (i, name) in names.iter().enumerate() {
+            let files = h.ws().list_files(name.as_str(), "").unwrap();
+            assert_eq!(files.len(), 1, "{name}: {files:?}");
+            assert_eq!(
+                h.ws().read_file(name.as_str(), "mine.txt").unwrap(),
+                format!("sandbox {i}\n{i}\n").as_bytes()
+            );
+        }
+        if h.is_docker() {
+            let left = docker_ps("sandcrab.managed=true");
+            assert!(left.is_empty(), "managed containers leaked: {left:?}");
         }
     })
     .await;
