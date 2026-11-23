@@ -66,6 +66,16 @@ pub struct NetworkConfig {
     pub allow_domains: Vec<String>,
 }
 
+impl From<NetworkPolicy> for NetworkConfig {
+    /// A policy with no domain allow-list (`SandboxConfig::network(NetworkPolicy::Unrestricted)`).
+    fn from(policy: NetworkPolicy) -> Self {
+        Self {
+            policy,
+            allow_domains: Vec::new(),
+        }
+    }
+}
+
 impl NetworkConfig {
     #[must_use]
     pub fn disabled() -> Self {

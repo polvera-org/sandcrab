@@ -123,8 +123,8 @@ impl SandboxConfig {
     }
 
     #[must_use]
-    pub fn network(mut self, network: NetworkConfig) -> Self {
-        self.network = Some(network);
+    pub fn network(mut self, network: impl Into<NetworkConfig>) -> Self {
+        self.network = Some(network.into());
         self
     }
 
@@ -221,6 +221,8 @@ mod tests {
             .ttl(Some(Duration::from_secs(60)));
         c.validate().unwrap();
         assert_eq!(c.network, None);
+        let c = c.network(crate::NetworkPolicy::Unrestricted);
+        assert_eq!(c.network, Some(NetworkConfig::unrestricted()));
         assert_eq!(c.ttl_duration(), Some(Duration::from_secs(60)));
 
         let parsed: SandboxConfig = serde_json::from_str(r#"{"template":"base"}"#).unwrap();
