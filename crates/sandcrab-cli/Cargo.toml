@@ -13,9 +13,12 @@ name = "sandcrab"
 path = "src/main.rs"
 
 [features]
-default = ["docker"]
+default = ["docker", "firecracker"]
 # DockerDev backend (`--backend docker`). Future backends are added the same way.
 docker = ["sandcrab-sdk/docker"]
+# Firecracker microVM backend (`--backend firecracker`, `sandcrab rootfs`, doctor checks).
+# On by default; it only compiles in on Linux targets (a no-op elsewhere).
+firecracker = ["sandcrab-sdk/firecracker"]
 
 [dependencies]
 sandcrab-sdk = { workspace = true, default-features = false }

@@ -6,6 +6,8 @@
 
 mod args;
 mod doctor;
+#[cfg(all(feature = "firecracker", target_os = "linux"))]
+mod firecracker;
 mod run;
 mod util;
 mod workspace;
@@ -23,7 +25,10 @@ use crate::args::{BackendArg, SpawnArgs, parse_backend};
     version,
     about = "Ephemeral sandboxes with persistent workspaces for AI agents",
     after_help = "DockerDev (`--backend docker`) shares the host kernel: it is for local dev / CI \
-                  only and requires --allow-insecure or SANDCRAB_ALLOW_INSECURE=1."
+                  only and requires --allow-insecure or SANDCRAB_ALLOW_INSECURE=1.\n\
+                  Firecracker (`--backend firecracker`, Linux) is hardware isolated and needs a \
+                  read-writable /dev/kvm; `sandcrab doctor` checks its prerequisites. A backend \
+                  that cannot start is an error: sandcrab never falls back to another one."
 )]
 pub struct Cli {
     #[command(flatten)]
@@ -45,7 +50,7 @@ pub struct Global {
     #[arg(long = "templates-dir", global = true)]
     pub templates_dirs: Vec<PathBuf>,
 
-    /// Runtime backend (explicit; no fallback). Available: docker.
+    /// Runtime backend (explicit; no fallback): docker | firecracker (Linux builds).
     #[arg(long, global = true, env = "SANDCRAB_BACKEND", value_parser = parse_backend)]
     pub backend: Option<BackendArg>,
 
@@ -70,10 +75,12 @@ pub struct Global {
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
-    /// Check the host: crabd, Docker, template images + pins, /dev/kvm, state dir.
+    /// Check the host: crabd, Docker, template images + pins, Firecracker prerequisites
+    /// (/dev/kvm, pinned artifacts, rootfs cache, tap pool), state dir.
     Doctor {
         /// Remove orphaned sandcrab containers (host-wide: also those of other running
-        /// sandcrab processes) and tighten state dir permissions.
+        /// sandcrab processes) and Firecracker run dirs of dead sandcrab processes, download
+        /// + verify the pinned Firecracker kernel and binary, tighten state dir permissions.
         #[arg(long)]
         fix: bool,
     },

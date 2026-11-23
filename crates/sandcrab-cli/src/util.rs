@@ -11,6 +11,7 @@ use tokio::sync::watch;
 use crate::Global;
 use crate::args::{self, BackendArg};
 
+#[cfg(feature = "docker")]
 pub const INSECURE_ENV: &str = "SANDCRAB_ALLOW_INSECURE";
 
 pub fn state_root(g: &Global) -> anyhow::Result<PathBuf> {
@@ -28,6 +29,7 @@ pub fn templates_dirs(g: &Global) -> anyhow::Result<Vec<PathBuf>> {
     }
 }
 
+#[cfg(feature = "docker")]
 pub fn allow_insecure(g: &Global) -> bool {
     g.allow_insecure || std::env::var(INSECURE_ENV).is_ok_and(|v| args::truthy(&v))
 }
@@ -40,11 +42,21 @@ pub fn templates(g: &Global) -> anyhow::Result<TemplateClient> {
     Ok(TemplateClient::load(&templates_dirs(g)?)?)
 }
 
-#[cfg(feature = "docker")]
+/// `--crabd`, else `$SANDCRAB_CRABD`, else `target/<arch>-unknown-linux-musl/release/crabd`.
 pub fn crabd_path(g: &Global) -> PathBuf {
-    g.crabd
-        .clone()
-        .unwrap_or_else(sandcrab_sdk::docker::default_crabd_path)
+    g.crabd.clone().unwrap_or_else(|| {
+        std::env::var_os("SANDCRAB_CRABD")
+            .filter(|v| !v.is_empty())
+            .map_or_else(
+                || {
+                    PathBuf::from(format!(
+                        "target/{}-unknown-linux-musl/release/crabd",
+                        std::env::consts::ARCH
+                    ))
+                },
+                PathBuf::from,
+            )
+    })
 }
 
 /// Build a [`Sandcrab`] on the explicitly selected backend.
@@ -73,6 +85,14 @@ pub fn sandcrab(g: &Global) -> anyhow::Result<Sandcrab> {
                 crabd_path: crabd_path(g),
                 ..sandcrab_sdk::DockerDevConfig::allow_insecure()
             });
+        }
+        #[cfg(all(feature = "firecracker", target_os = "linux"))]
+        BackendArg::Firecracker => {
+            // Hardware isolated: no insecure opt-in. Preflight first so a missing /dev/kvm
+            // or artifact is a precise, actionable error (never a fallback).
+            let config = crate::firecracker::config(g)?;
+            crate::firecracker::preflight(&config)?;
+            builder = builder.firecracker(config);
         }
     }
     builder.build().context("cannot initialise the backend")
