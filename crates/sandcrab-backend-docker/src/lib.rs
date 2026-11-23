@@ -1,81 +1,35 @@
-//! Docker/OCI local development and CI backend for Sandcrab.
+//! Docker/OCI local development and CI backend for Sandcrab (`docker-dev`).
 //!
-//! **Security note**: Containers share the host kernel. This backend explicitly reports
-//! `hardware_isolated = false` and `multi_tenant_safe = false` so callers can never
-//! accidentally treat it as a multi-tenant production isolation boundary.
+//! **Security note**: containers share the host kernel. This backend reports
+//! `hardware_isolated = false` and `multi_tenant_safe = false`, and
+//! [`DockerDevBackend::new`] refuses to construct it unless
+//! [`DockerDevConfig::allow_insecure_dev_backend`] is explicitly set (default `false`).
+//! It is never a fallback for a microVM backend.
+//!
+//! Each sandbox is one hardened container (see [`spec`] for the exact hardening) running
+//! the template image with the host's **static** `crabd` bind-mounted read-only at
+//! `/opt/sandcrab/crabd`. `crabd` listens on `/run/sandcrab/crabd.sock`, which is a
+//! per-sandbox host directory `<state_dir>/<sandbox id>/` (0700), so the host talks the
+//! real Sandcrab protocol over a Unix socket — the same `crabd` and wire format the
+//! microVM backends use. There is no `docker exec` anywhere.
+//!
+//! Requirements / limitations:
+//! - Linux host with a local, rootful Docker daemon (bind mounts use host paths; Unix
+//!   sockets do not cross Docker Desktop's VM file sharing, and rootless Docker remaps
+//!   uids so the socket / workspace ownership model breaks).
+//! - `egress_restricted` networking is refused (`PolicyUnenforceable`), never downgraded.
+//! - Template `disk_mb` is not enforced; the container root filesystem is writable.
+//! - A spawn future cancelled mid-create can leak a labeled container; see
+//!   [`DockerDevBackend::reap_orphans`].
 
-use async_trait::async_trait;
-use sandcrab_core::{
-    BackendCapabilities, BackendKind, NetworkConfig, NetworkPolicy, ResolvedSpec, Result,
-    RuntimeBackend, SandboxError, SandboxHandle,
+mod backend;
+mod config;
+mod reap;
+pub mod spec;
+
+pub use backend::{DockerDevBackend, DockerImageVerifier};
+pub use config::{
+    CRABD_ENV, DockerDevConfig, DockerLimits, check_static_crabd, default_crabd_path,
+    default_state_dir,
 };
-
-/// Configuration for [`DockerDevBackend`].
-#[derive(Debug, Clone)]
-pub struct DockerDevConfig {
-    /// Explicit acknowledgement required before spawning shared-kernel dev containers.
-    pub allow_insecure_dev_backend: bool,
-    /// Optional Docker socket URI override (defaults to local platform socket).
-    pub docker_host: Option<String>,
-}
-
-impl Default for DockerDevConfig {
-    fn default() -> Self {
-        Self {
-            allow_insecure_dev_backend: true,
-            docker_host: None,
-        }
-    }
-}
-
-/// Phase 1 local development backend powered by Docker + `crabd`.
-#[derive(Debug, Clone)]
-pub struct DockerDevBackend {
-    config: DockerDevConfig,
-}
-
-impl DockerDevBackend {
-    pub fn new(config: DockerDevConfig) -> Result<Self> {
-        if !config.allow_insecure_dev_backend {
-            return Err(SandboxError::InsecureBackendRejected(
-                "DockerDevBackend requires explicit `allow_insecure_dev_backend = true`".into(),
-            ));
-        }
-        Ok(Self { config })
-    }
-
-    #[must_use]
-    pub fn config(&self) -> &DockerDevConfig {
-        &self.config
-    }
-}
-
-#[async_trait]
-impl RuntimeBackend for DockerDevBackend {
-    fn kind(&self) -> BackendKind {
-        BackendKind::DockerDev
-    }
-
-    fn capabilities(&self) -> BackendCapabilities {
-        BackendCapabilities {
-            hardware_isolated: false,
-            multi_tenant_safe: false,
-            supports_snapshots: false,
-            supports_host_dir_mounts: true,
-        }
-    }
-
-    fn enforces_network_policy(&self, network: &NetworkConfig) -> bool {
-        // `--network none` / default bridge; domain allow-lists are not enforceable.
-        matches!(
-            network.policy,
-            NetworkPolicy::Disabled | NetworkPolicy::Unrestricted
-        )
-    }
-
-    async fn spawn(&self, _spec: &ResolvedSpec) -> Result<Box<dyn SandboxHandle>> {
-        Err(SandboxError::Unimplemented(
-            "DockerDevBackend::spawn (Phase 1D: bollard container + workspace bind mounts + crabd RPC)",
-        ))
-    }
-}
+pub use reap::{ReapReport, ReapedContainer};
