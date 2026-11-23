@@ -16,6 +16,7 @@ pub mod artifacts;
 pub mod control;
 mod error;
 pub mod hash;
+pub mod net;
 pub mod rootfs;
 pub mod vsock;
 pub mod workspace;
