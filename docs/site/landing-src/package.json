@@ -1,0 +1,18 @@
+{
+  "name": "crabagent-landing",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Landing page for crabagent / Sandcrab. Static build in dist/.",
+  "license": "Apache-2.0",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "playwright": "^1.65.1",
+    "pngjs": "^7.0.0",
+    "vite": "^8.3.8"
+  }
+}
