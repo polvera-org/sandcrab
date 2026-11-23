@@ -68,8 +68,11 @@ pub struct FirecrackerConfig {
     pub kill_after: Duration,
     /// Idle timeout while reading a workspace export stream.
     pub export_idle_timeout: Duration,
-    /// Caps for the (hostile) export archive.
+    /// Upper caps for the (hostile) export archive. Each sync-back further bounds them by the
+    /// workspace drive's size ([`UnpackLimits::bounded_by`]) and [`Self::sync_back_quota`].
     pub unpack_limits: UnpackLimits,
+    /// Optional host-side cap on the file content one workspace sync-back may write.
+    pub sync_back_quota: Option<u64>,
     /// Re-enable the serial console (drops `8250.nr_uarts=0 quiet`); output goes to
     /// `firecracker.log`.
     pub debug_console: bool,
@@ -118,6 +121,7 @@ impl FirecrackerConfig {
             kill_after: Duration::from_secs(3),
             export_idle_timeout: crate::workspace::EXPORT_IDLE_TIMEOUT,
             unpack_limits: UnpackLimits::default(),
+            sync_back_quota: None,
             debug_console: false,
             log_level: "Warn".into(),
             default_user: None,

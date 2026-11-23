@@ -14,6 +14,13 @@
 //! - more than [`UnpackLimits`] entries / bytes, or a stream that ends without the
 //!   end-of-archive marker (a guest that crashed mid-export).
 //!
+//! **Disk bound.** A guest can make the archive far bigger than its drive (a sparse
+//! `truncate -s 15G f`, or hard links, each stored as an independent file), so the byte caps
+//! must come from the drive, not from a fixed constant: backends pass
+//! [`UnpackLimits::for_capacity`] / [`UnpackLimits::bounded_by`] with the workspace drive
+//! size (and an optional host quota). Runs of zeros are written as holes, so host disk use
+//! tracks the real data even for legitimately sparse files.
+//!
 //! Symlinks are recreated verbatim (their targets may point anywhere); consumers of the
 //! staging tree must not follow them, exactly as for a live `HostDir` workspace.
 //!
@@ -47,6 +54,34 @@ pub struct UnpackLimits {
     pub max_path_len: usize,
     /// Max path depth (components).
     pub max_depth: usize,
+}
+
+/// Bytes allowed on top of a drive's capacity (tar content never exceeds the filesystem
+/// size, so this is only a safety margin for rounding).
+pub const CAPACITY_SLACK_BYTES: u64 = 16 * 1024 * 1024;
+
+impl UnpackLimits {
+    /// [`Self::default`] bounded by a drive of `capacity` bytes (see [`Self::bounded_by`]).
+    #[must_use]
+    pub fn for_capacity(capacity: u64) -> Self {
+        Self::default().bounded_by(capacity)
+    }
+
+    /// Tighten `self` for a drive of `capacity` bytes: total content ≤ `capacity` +
+    /// [`CAPACITY_SLACK_BYTES`], one file ≤ that total, and at most one entry per 512 bytes of
+    /// capacity (never fewer than 65 536). Existing tighter caps are kept.
+    #[must_use]
+    pub fn bounded_by(&self, capacity: u64) -> Self {
+        let total = self
+            .max_total_bytes
+            .min(capacity.saturating_add(CAPACITY_SLACK_BYTES));
+        Self {
+            max_total_bytes: total,
+            max_file_bytes: self.max_file_bytes.min(total),
+            max_entries: self.max_entries.min((capacity / 512).max(65_536)),
+            ..self.clone()
+        }
+    }
 }
 
 impl Default for UnpackLimits {
@@ -165,11 +200,12 @@ pub fn unpack_safe(r: impl Read, staging: &Path, limits: &UnpackLimits) -> Resul
             }
             tar::EntryType::Regular | tar::EntryType::Continuous => {
                 let size = entry.size();
-                if size > limits.max_file_bytes {
+                let file_cap = limits.max_file_bytes.min(limits.max_total_bytes);
+                if size > file_cap {
                     return Err(reject(format!(
-                        "`{}` is {size} bytes (limit {})",
+                        "`{}` is {size} bytes (limit {file_cap}; a sparse file counts at its \
+                         full apparent size)",
                         rel.display(),
-                        limits.max_file_bytes
                     )));
                 }
                 if stats.bytes + size > limits.max_total_bytes {
@@ -189,7 +225,7 @@ pub fn unpack_safe(r: impl Read, staging: &Path, limits: &UnpackLimits) -> Resul
                             e.into()
                         }
                     })?;
-                let copied = io::copy(&mut (&mut entry).take(size), &mut f)?;
+                let copied = copy_sparse(&mut (&mut entry).take(size), &mut f)?;
                 if copied != size {
                     return Err(reject(format!("`{}` is truncated", rel.display())));
                 }
@@ -246,6 +282,41 @@ pub fn unpack_safe(r: impl Read, staging: &Path, limits: &UnpackLimits) -> Resul
         fs::set_permissions(&dir, fs::Permissions::from_mode(mode))?;
     }
     Ok(stats)
+}
+
+/// Copy `r` to the start of the fresh file `f`, seeking over all-zero blocks so they become
+/// holes; returns the bytes consumed. The final length is set explicitly (a trailing hole).
+fn copy_sparse(r: &mut impl Read, f: &mut fs::File) -> io::Result<u64> {
+    use std::io::{Seek, SeekFrom, Write};
+    const BLOCK: usize = 64 * 1024;
+    let mut buf = vec![0u8; BLOCK];
+    let mut total = 0u64;
+    loop {
+        // Fill a whole block (or hit EOF) so hole detection sees aligned blocks.
+        let mut n = 0;
+        while n < BLOCK {
+            match r.read(&mut buf[n..]) {
+                Ok(0) => break,
+                Ok(k) => n += k,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+        if n == 0 {
+            break;
+        }
+        if buf[..n].iter().all(|&b| b == 0) {
+            f.seek(SeekFrom::Current(n as i64))?;
+        } else {
+            f.write_all(&buf[..n])?;
+        }
+        total += n as u64;
+        if n < BLOCK {
+            break;
+        }
+    }
+    f.set_len(total)?;
+    Ok(total)
 }
 
 /// Bytes → path (any non-NUL byte string is a valid Unix path).
@@ -587,6 +658,97 @@ mod tests {
             })
             .contains("deeper")
         );
+    }
+
+    #[test]
+    fn capacity_bounds_limits() {
+        let l = UnpackLimits::for_capacity(1024 * 1024 * 1024);
+        assert_eq!(l.max_total_bytes, 1024 * 1024 * 1024 + CAPACITY_SLACK_BYTES);
+        assert_eq!(l.max_file_bytes, l.max_total_bytes, "per-file <= total");
+        assert_eq!(l.max_entries, 1_000_000);
+        let tiny = UnpackLimits::for_capacity(1024 * 1024);
+        assert_eq!(tiny.max_entries, 65_536);
+        assert_eq!(tiny.max_file_bytes, 1024 * 1024 + CAPACITY_SLACK_BYTES);
+        // Tighter caps (a host quota) survive.
+        let quota = UnpackLimits {
+            max_total_bytes: 10,
+            ..UnpackLimits::default()
+        }
+        .bounded_by(1 << 40);
+        assert_eq!((quota.max_total_bytes, quota.max_file_bytes), (10, 10));
+    }
+
+    /// Header claiming `size` bytes, followed by `size` zero bytes streamed lazily (what a
+    /// guest exporting `truncate -s <size> f` produces).
+    fn sparse_attack(size: u64) -> impl Read {
+        let mut h = tar::Header::new_gnu();
+        h.set_path("huge").unwrap();
+        h.set_entry_type(tar::EntryType::Regular);
+        h.set_mode(0o644);
+        h.set_size(size);
+        h.set_cksum();
+        let head = h.as_bytes().to_vec();
+        io::Cursor::new(head)
+            .chain(io::repeat(0).take(size))
+            .chain(io::repeat(0).take(1024))
+    }
+
+    #[test]
+    fn sparse_file_bigger_than_drive_is_rejected_before_writing() {
+        let t = tempfile::tempdir().unwrap();
+        // 15 GiB apparent size into a 64 MiB drive: refused from the header alone.
+        let err = unpack_safe(
+            sparse_attack(15 << 30),
+            t.path(),
+            &UnpackLimits::for_capacity(64 << 20),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("apparent size"), "{err}");
+        assert_eq!(fs::read_dir(t.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn zero_runs_are_written_as_holes() {
+        let t = tempfile::tempdir().unwrap();
+        let size = 32u64 << 20;
+        unpack_safe(
+            sparse_attack(size),
+            t.path(),
+            &UnpackLimits::for_capacity(64 << 20),
+        )
+        .unwrap();
+        let md = fs::metadata(t.path().join("huge")).unwrap();
+        assert_eq!(md.len(), size);
+        assert!(
+            md.blocks() * 512 < size / 4,
+            "{} blocks allocated for {size} zero bytes",
+            md.blocks()
+        );
+    }
+
+    #[test]
+    fn over_quota_total_and_entry_count_are_rejected() {
+        let mut v = Vec::new();
+        for i in 0..5 {
+            v.extend(file(&format!("f{i}"), &[1u8; 1000]));
+        }
+        let bytes = finish(v);
+        let t = tempfile::tempdir().unwrap();
+        let quota = UnpackLimits {
+            max_total_bytes: 4000,
+            ..UnpackLimits::default()
+        };
+        let s = tempfile::tempdir_in(t.path()).unwrap();
+        let err = unpack_safe(&bytes[..], s.path(), &quota).unwrap_err();
+        assert!(err.to_string().contains("in total"), "{err}");
+        let few = UnpackLimits {
+            max_entries: 3,
+            ..UnpackLimits::default()
+        };
+        let s = tempfile::tempdir_in(t.path()).unwrap();
+        let err = unpack_safe(&bytes[..], s.path(), &few).unwrap_err();
+        assert!(err.to_string().contains("more than 3 entries"), "{err}");
     }
 
     #[test]

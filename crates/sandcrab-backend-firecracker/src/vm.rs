@@ -390,6 +390,19 @@ pub(crate) struct SyncDrive {
     pub tag: String,
 }
 
+/// Unpack caps for one drive: the configured caps bounded by the drive image's size (the
+/// most the guest can legitimately hold) and the optional host quota.
+pub(crate) fn sync_back_limits(
+    cfg: &FirecrackerConfig,
+    image: &Path,
+) -> Result<sandcrab_core::archive::UnpackLimits> {
+    let size = fs::metadata(image)
+        .map_err(|e| workspace::io_at(image, e))?
+        .len();
+    let capacity = cfg.sync_back_quota.map_or(size, |q| q.min(size));
+    Ok(cfg.unpack_limits.bounded_by(capacity))
+}
+
 /// Live Firecracker sandbox.
 pub(crate) struct FirecrackerSandbox {
     pub vm: Vm,
@@ -431,7 +444,7 @@ impl FirecrackerSandbox {
                         .map(|()| s)
                 })
                 .map_err(|e| SandboxError::Transport(format!("export stream: {e}")))?;
-            let limits = cfg.unpack_limits.clone();
+            let limits = sync_back_limits(cfg, &m.image)?;
             let (backing, host, stg) = (m.backing.clone(), m.host_path.clone(), staging.clone());
             tokio::task::spawn_blocking(move || {
                 let stats = workspace::receive_export(std::io::BufReader::new(std), &stg, &limits)?;
@@ -503,5 +516,29 @@ impl SandboxHandle for FirecrackerSandbox {
             "sync-back failed for {detail}; the guest's writes were not (fully) committed and \
              the guest image(s) were preserved at {moved:?}"
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sync_back_limits_follow_drive_size_and_quota() {
+        let t = tempfile::tempdir().unwrap();
+        let img = t.path().join("ws.ext4");
+        fs::File::create(&img)
+            .unwrap()
+            .set_len(2 << 30) // sparse 2 GiB image
+            .unwrap();
+        let mut cfg = FirecrackerConfig::with_home(t.path(), "/c");
+        let l = sync_back_limits(&cfg, &img).unwrap();
+        let slack = sandcrab_core::archive::CAPACITY_SLACK_BYTES;
+        assert_eq!(l.max_total_bytes, (2 << 30) + slack);
+        assert_eq!(l.max_file_bytes, l.max_total_bytes);
+        cfg.sync_back_quota = Some(100 << 20);
+        let l = sync_back_limits(&cfg, &img).unwrap();
+        assert_eq!(l.max_total_bytes, (100 << 20) + slack);
+        assert!(sync_back_limits(&cfg, &t.path().join("missing")).is_err());
     }
 }
