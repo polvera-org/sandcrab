@@ -56,7 +56,7 @@ steps:
     title: "Firecracker backend design: rootfs pipeline, pinned kernel, crabd-as-PID1, vsock UDS handshake, block-volume workspaces, tap/NAT, jailer scope"
     depends_on: [decisions]
     artifacts: [docs/design/firecracker-backend.md]
-    status: todo
+    status: done
     notes: >-
       Key decision: Firecracker has no virtio-fs, so how do host-dir workspaces become ext4 block
       devices (build-on-spawn + sync-back on teardown vs. persistent ext4 image as the source of
@@ -81,7 +81,7 @@ steps:
     title: "1A: JSON-RPC 2.0 envelope + u32 framing codec, typed per-tool results, error codes, schema snapshot tests"
     depends_on: [env, decisions]
     artifacts: [crates/sandcrab-protocol/]
-    status: todo
+    status: done
     notes: >-
       Sync codec, no tokio. deny_unknown_fields on params. Adds process_list, upload, download.
       Fix schemars uuid1. Max frame guard (16 MiB).
@@ -92,7 +92,7 @@ steps:
     title: Pin template Dockerfiles (versions + digests), finish render (Playwright, Typst), build all 4 images
     depends_on: [env, decisions]
     artifacts: [templates/]
-    status: todo
+    status: done
     notes: crabd is injected at runtime (bind mount / rootfs pipeline), not baked into the image.
 
   - id: guest-server
@@ -101,7 +101,7 @@ steps:
     title: "1B.1: crabd async server (--unix/--tcp), framed dispatch loop, per-tool module stubs, musl build"
     depends_on: [protocol]
     artifacts: [crates/sandcrab-guest/src/main.rs, crates/sandcrab-guest/src/server.rs, crates/sandcrab-guest/src/tools/mod.rs]
-    status: todo
+    status: done
 
   - id: guest-exec
     phase: implement
@@ -109,7 +109,7 @@ steps:
     title: "1B.2: bash (setsid + killpg TERM→KILL, head+tail truncation) and process_* (ring buffers, optional PTY)"
     depends_on: [guest-server]
     artifacts: [crates/sandcrab-guest/src/tools/exec.rs, crates/sandcrab-guest/src/tools/process.rs]
-    status: todo
+    status: done
 
   - id: guest-fs
     phase: implement
@@ -117,7 +117,7 @@ steps:
     title: "1B.3: file_read/write/edit/delete/move + upload/download (atomic rename, binary detect, ambiguous-edit errors, diff)"
     depends_on: [guest-server]
     artifacts: [crates/sandcrab-guest/src/tools/fs.rs, crates/sandcrab-guest/src/tools/transfer.rs]
-    status: todo
+    status: done
 
   - id: guest-search
     phase: implement
@@ -125,7 +125,7 @@ steps:
     title: "1B.4: list_dir, glob, grep via ignore + globset + grep-searcher (gitignore-aware, bounded results)"
     depends_on: [guest-server]
     artifacts: [crates/sandcrab-guest/src/tools/search.rs]
-    status: todo
+    status: done
 
   - id: guest-vsock-init
     phase: implement
@@ -133,7 +133,7 @@ steps:
     title: "crabd --vsock listener + PID1 mode (mount proc/sys/dev, zombie reaping, mount workspace drives, net up, clean poweroff)"
     depends_on: [guest-server, fc-design]
     artifacts: [crates/sandcrab-guest/src/vsock.rs, crates/sandcrab-guest/src/init.rs]
-    status: todo
+    status: done
 
   - id: core
     phase: implement
@@ -141,7 +141,7 @@ steps:
     title: "1C: WorkspaceRegistry (path guards, BlockVolume backing), TemplateRegistry (pins), SandboxManager, CrabdClient"
     depends_on: [protocol, fc-design]
     artifacts: [crates/sandcrab-core/]
-    status: todo
+    status: done
     notes: >-
       Depends on fc-design so the workspace model covers block volumes from day one (no rework).
       SandboxConfig gains network{policy,allow_domains}, reserved secrets, ports. Lifecycle
@@ -152,8 +152,8 @@ steps:
     agent: ada
     title: "OCI image → ext4 rootfs with crabd as /sbin/init, pinned Firecracker guest kernel, SHA-256 manifest pins"
     depends_on: [templates, fc-design]
-    artifacts: [crates/sandcrab-core/src/rootfs/, scripts/build-rootfs.sh]
-    status: todo
+    artifacts: [crates/sandcrab-backend-firecracker/src/rootfs/, scripts/build-rootfs.sh]
+    status: done
 
   - id: docker-backend
     phase: implement
@@ -161,7 +161,7 @@ steps:
     title: "1D: DockerDevBackend via bollard: hardened container, host uid:gid, rw/ro bind mounts, crabd via UDS, ports"
     depends_on: [core, guest-exec, guest-fs, guest-search, templates]
     artifacts: [crates/sandcrab-backend-docker/]
-    status: todo
+    status: done
     notes: allow_insecure_dev_backend defaults to false; unenforceable network policy → explicit error.
 
   - id: fc-backend
@@ -170,7 +170,7 @@ steps:
     title: "sandcrab-backend-firecracker: owned HTTP-over-UDS API client, vsock CONNECT handshake, block-volume workspaces rw/ro, tap/NAT, teardown"
     depends_on: [core, guest-vsock-init, guest-exec, guest-fs, guest-search, rootfs-pipeline]
     artifacts: [crates/sandcrab-backend-firecracker/]
-    status: todo
+    status: done
     notes: >-
       capabilities: hardware_isolated=true, multi_tenant_safe=false until jailer lands (honest flag),
       supports_snapshots=false in V1, supports_host_dir_mounts=false (block volumes only).
@@ -181,7 +181,7 @@ steps:
     title: "1E: SDK (Sandcrab, Sandbox, WorkspaceClient) + CLI (doctor, workspace, template, run, tool, --backend)"
     depends_on: [docker-backend]
     artifacts: [crates/sandcrab-sdk/, crates/sandcrab-cli/]
-    status: todo
+    status: done
 
   - id: e2e-tests
     phase: implement
@@ -189,7 +189,7 @@ steps:
     title: "Backend-generic e2e suite (--ignored): multi-turn workspace mutation across 2 sandboxes, ro enforcement, killpg; run on Docker"
     depends_on: [sdk-cli]
     artifacts: [crates/sandcrab-sdk/tests/]
-    status: todo
+    status: done
 
   - id: fc-wire
     phase: implement
@@ -197,7 +197,7 @@ steps:
     title: Wire Firecracker into SDK feature flag + CLI --backend firecracker; doctor checks /dev/kvm, kernel, rootfs pins
     depends_on: [fc-backend, sdk-cli]
     artifacts: [crates/sandcrab-sdk/, crates/sandcrab-cli/]
-    status: todo
+    status: done
 
   - id: fc-e2e
     phase: implement
@@ -214,7 +214,7 @@ steps:
     title: "Shared three.js kit: reusable 3D crab/shell/jar/burrow/wire scenes as ES modules, used by the landing page AND the presentation"
     depends_on: [symbology]
     artifacts: [docs/site/3d/]
-    status: todo
+    status: done
     notes: Load mstack-3d-animations skill. Vendored three.js (pinned), no CDN at runtime inside the sandbox.
 
   - id: harness
@@ -223,7 +223,7 @@ steps:
     title: "1F: crabagent — pi-style coding-agent REPL (LLM + all sandcrab tools) on a persistent workspace, --backend selectable"
     depends_on: [sdk-cli]
     artifacts: [crates/sandcrab-agent/]
-    status: todo
+    status: done
 
   - id: bench-harness
     phase: implement
@@ -231,7 +231,7 @@ steps:
     title: "sandcrab-bench: scenario runner across backends, cgroup/proc sampling, JSON results per bench-spec"
     depends_on: [bench-spec, sdk-cli]
     artifacts: [crates/sandcrab-bench/]
-    status: todo
+    status: done
 
   # ============================================================== verify
   - id: review
@@ -239,7 +239,12 @@ steps:
     agent: nebula
     title: QA + security review (invariants, path traversal, killpg, insecure-backend gate, container + VM hardening, capability honesty)
     depends_on: [e2e-tests, fc-wire, harness]
-    status: todo
+    status: done
+    notes: >-
+      3 rounds. Round 1: 1 HIGH (symlink/rename TOCTOU) + 5 MED + 5 LOW → fixed. Round 2: new HIGH
+      (nested-registration root swap) → fixed. Round 3: "V1 review: PASS". Deferred to Phase 2 (MEDIUM):
+      two registries with different SANDCRAB_HOME can nest roots; dockerd/FC pack resolve bind path after
+      verify (4/80 race wins) → pack/commit via verified root fd + crabd dev/ino check after start.
 
   - id: live-check
     phase: verify
@@ -247,11 +252,12 @@ steps:
     title: "Live run — crabagent builds the crabagent/Sandcrab landing page (open-source production agent sandboxing, 3D via three-kit) on Docker; full fmt/clippy/test/--ignored gate"
     depends_on: [e2e-tests, harness, three-kit]
     artifacts: [docs/site/landing/]
-    status: todo
+    status: done
     notes: >-
-      Workspace `landing` (rw, default_cwd) + three-kit mounted read-only → also proves multi-mount + ro.
-      Agent's prompt: landing page about crabagent itself, promoting Sandcrab as open-source production
-      agent sandboxing, using the shared 3D elements. Best output copied into docs/site/landing/.
+      Done. 3 one-shot sessions, 188 tool calls, 36m, $4.51; 0 tool-level errors. ro /kit enforced, host put
+      between turns visible, persistence OK. Bugs: B1 core dumps land in workspace (MED), B2 /tmp noexec undocumented,
+      B3 images returned as base64 text (MED), B4 dead preview URL in -p, B5 stray mount.lock dir. Friction: ts-dev lacks
+      browser/python3 → ~8 min Playwright install per session.
 
   - id: bench-run
     phase: verify
@@ -259,7 +265,11 @@ steps:
     title: Execute DockerDev benchmarks (VPS, declared host specs); capture raw JSON. Other backends = TODO
     depends_on: [bench-harness, e2e-tests]
     artifacts: [docs/bench/results/]
-    status: todo
+    status: done
+    notes: >-
+      2 full runs (n=30, w=5), both flagged invalid for host noise only; canonical
+      20261123T091401Z (load 0.89 at start, drift -8.7%). spawn_ready p50 227-258ms, teardown ~100ms,
+      first_call ~3.7ms, density hit cap 16. Commit a446138.
 
   # ============================================================ document
   - id: bench-report
@@ -268,7 +278,7 @@ steps:
     title: "Backend report (HTML): DockerDev measured; Firecracker / Cloud Hypervisor / libkrun columns marked TODO with what's pending"
     depends_on: [bench-run, review]
     artifacts: [docs/site/bench-report.html]
-    status: todo
+    status: done
 
   - id: symbology
     phase: implement
@@ -276,7 +286,7 @@ steps:
     title: "Crab symbology set: illustrated crab scenes per concept (molt, shell, burrow, claws, tide, hermit swap, jar vs. tidepool)"
     depends_on: [decisions]
     artifacts: [docs/site/assets/crab/, docs/site/symbology.html]
-    status: todo
+    status: done
     notes: >-
       Concept map: molting = ephemeral sandbox teardown; shell = isolation boundary; sealed jar
       (microVM) vs. shared tide pool (Docker shared kernel); burrow = persistent workspace;
@@ -289,7 +299,7 @@ steps:
     title: "Repo walkthrough (HTML): crate map, request path host→crabd, workspace lifecycle, annotated code links"
     depends_on: [review, symbology]
     artifacts: [docs/site/walkthrough.html]
-    status: todo
+    status: done
 
   - id: presentation-3d
     phase: document
@@ -297,7 +307,7 @@ steps:
     title: "3D interactive presentation (three.js): sandbox lifecycle, protocol path, workspace mounts, Docker vs. FC isolation, bench results"
     depends_on: [three-kit, live-check, bench-report]
     artifacts: [docs/site/presentation.html]
-    status: todo
+    status: doing
     notes: Load mstack-3d-animations skill (house style, tuning panel, seamless loops).
 
   - id: docs
