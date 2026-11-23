@@ -3,6 +3,9 @@ name = "render"
 version = "0.1.0"
 description = "Headless Chromium, Playwright, ffmpeg, ImageMagick, and Typst rendering sandbox"
 image = "sandcrab/render:0.1.0"
+# Pins the locally built image ID (docker image inspect --format {{.Id}}); not
+# reproducible across rebuilds yet. Refresh with: templates/build.sh --pin
+sha256 = "sha256:100b98afecb12cb4615d52bcf5a25d553d2151a30717d3a23ccefe16b86f4c4d"
 
 [resources]
 vcpu = 2
