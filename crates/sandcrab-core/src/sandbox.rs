@@ -207,24 +207,6 @@ impl SandboxConfig {
     }
 }
 
-/// Resolved launch specification passed to a [`crate::RuntimeBackend`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SandboxSpec {
-    pub id: SandboxId,
-    pub config: SandboxConfig,
-}
-
-/// Live handle to a running sandbox backed by `crabd`.
-#[async_trait::async_trait]
-pub trait SandboxHandle: Send + Sync {
-    fn id(&self) -> SandboxId;
-    async fn call_tool(
-        &self,
-        call: sandcrab_protocol::ToolCall,
-    ) -> Result<sandcrab_protocol::ToolResult>;
-    async fn destroy(self: Box<Self>) -> Result<()>;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

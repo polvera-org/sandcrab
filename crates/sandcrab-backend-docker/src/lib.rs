@@ -6,8 +6,8 @@
 
 use async_trait::async_trait;
 use sandcrab_core::{
-    BackendCapabilities, BackendKind, Result, RuntimeBackend, SandboxError, SandboxHandle,
-    SandboxId, SandboxSpec,
+    BackendCapabilities, BackendKind, NetworkConfig, NetworkPolicy, ResolvedSpec, Result,
+    RuntimeBackend, SandboxError, SandboxHandle,
 };
 
 /// Configuration for [`DockerDevBackend`].
@@ -65,15 +65,17 @@ impl RuntimeBackend for DockerDevBackend {
         }
     }
 
-    async fn spawn(&self, _spec: &SandboxSpec) -> Result<Box<dyn SandboxHandle>> {
-        Err(SandboxError::Unimplemented(
-            "DockerDevBackend::spawn (Phase 1D: bollard container + workspace bind mounts + crabd RPC)",
-        ))
+    fn enforces_network_policy(&self, network: &NetworkConfig) -> bool {
+        // `--network none` / default bridge; domain allow-lists are not enforceable.
+        matches!(
+            network.policy,
+            NetworkPolicy::Disabled | NetworkPolicy::Unrestricted
+        )
     }
 
-    async fn destroy(&self, _id: &SandboxId) -> Result<()> {
+    async fn spawn(&self, _spec: &ResolvedSpec) -> Result<Box<dyn SandboxHandle>> {
         Err(SandboxError::Unimplemented(
-            "DockerDevBackend::destroy (Phase 1D)",
+            "DockerDevBackend::spawn (Phase 1D: bollard container + workspace bind mounts + crabd RPC)",
         ))
     }
 }

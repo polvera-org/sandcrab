@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use sandcrab_core::{
-    BackendCapabilities, BackendKind, Result, RuntimeBackend, SandboxConfig, SandboxError,
-    SandboxHandle, SandboxId, SandboxSpec,
+    BackendCapabilities, BackendKind, ManagerConfig, Result, RuntimeBackend, SandboxConfig,
+    SandboxError, SandboxId, SandboxManager, TemplateRegistry, WorkspaceRegistry,
 };
 use sandcrab_protocol::{
     BashParams, BashResult, FileEditParams, FileEditResult, FileReadParams, FileReadResult,
@@ -15,10 +15,13 @@ use sandcrab_protocol::{
 };
 
 /// Builder for configuring a [`Sandcrab`] manager instance.
+#[derive(Default)]
 pub struct SandcrabBuilder {
     backend: Option<Arc<dyn RuntimeBackend>>,
-    workspace_root: Option<PathBuf>,
+    state_root: Option<PathBuf>,
+    template_dirs: Vec<PathBuf>,
     require_hardware_isolation: bool,
+    allow_insecure_backend: bool,
 }
 
 impl SandcrabBuilder {
@@ -28,15 +31,30 @@ impl SandcrabBuilder {
         self
     }
 
+    /// Sandcrab state root (workspace registry); defaults to `~/.sandcrab`.
     #[must_use]
     pub fn workspace_root(mut self, root: impl Into<PathBuf>) -> Self {
-        self.workspace_root = Some(root.into());
+        self.state_root = Some(root.into());
+        self
+    }
+
+    /// Add a directory of templates (`<dir>/<name>/sandcrab.toml`). Earlier dirs win.
+    #[must_use]
+    pub fn template_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.template_dirs.push(dir.into());
         self
     }
 
     #[must_use]
     pub fn require_hardware_isolation(mut self, required: bool) -> Self {
         self.require_hardware_isolation = required;
+        self
+    }
+
+    /// Explicitly allow a backend without hardware isolation (DockerDev, local dev/CI only).
+    #[must_use]
+    pub fn allow_insecure_backend(mut self, allow: bool) -> Self {
+        self.allow_insecure_backend = allow;
         self
     }
 
@@ -53,66 +71,76 @@ impl SandcrabBuilder {
             )));
         }
 
-        Ok(Sandcrab {
+        let workspaces = match self.state_root {
+            Some(root) => WorkspaceRegistry::open(root)?,
+            None => WorkspaceRegistry::open_default()?,
+        };
+        let templates = TemplateRegistry::load(&self.template_dirs)?;
+        let manager = SandboxManager::new(
             backend,
-            workspace_root: self
-                .workspace_root
-                .unwrap_or_else(|| PathBuf::from(".sandcrab/workspaces")),
+            workspaces,
+            templates,
+            ManagerConfig {
+                allow_insecure_backend: self.allow_insecure_backend,
+                ..ManagerConfig::default()
+            },
+        )?;
+        Ok(Sandcrab {
+            manager,
+            require_hardware_isolation: self.require_hardware_isolation,
         })
     }
 }
 
 /// Top-level Sandcrab sandbox & workspace manager.
 pub struct Sandcrab {
-    backend: Arc<dyn RuntimeBackend>,
-    workspace_root: PathBuf,
+    manager: SandboxManager,
+    require_hardware_isolation: bool,
 }
 
 impl Sandcrab {
     #[must_use]
     pub fn builder() -> SandcrabBuilder {
-        SandcrabBuilder {
-            backend: None,
-            workspace_root: None,
-            require_hardware_isolation: false,
-        }
+        SandcrabBuilder::default()
     }
 
     #[must_use]
     pub fn backend_kind(&self) -> BackendKind {
-        self.backend.kind()
+        self.manager.backend_kind()
     }
 
     #[must_use]
     pub fn backend_capabilities(&self) -> BackendCapabilities {
-        self.backend.capabilities()
+        self.manager.backend_capabilities()
     }
 
     #[must_use]
     pub fn workspace_root(&self) -> &std::path::Path {
-        &self.workspace_root
+        self.manager.workspaces().state_root()
+    }
+
+    #[must_use]
+    pub fn manager(&self) -> &SandboxManager {
+        &self.manager
     }
 
     /// Spawn a new ephemeral sandbox from `config`.
-    pub async fn create(&self, config: SandboxConfig) -> Result<Sandbox> {
-        let spec = SandboxSpec {
-            id: SandboxId::new(),
-            config,
-        };
-        let handle = self.backend.spawn(&spec).await?;
-        Ok(Sandbox { handle })
+    pub async fn create(&self, mut config: SandboxConfig) -> Result<Sandbox> {
+        config.require_hardware_isolation |= self.require_hardware_isolation;
+        let inner = self.manager.spawn(config).await?;
+        Ok(Sandbox { inner })
     }
 }
 
 /// Live handle to a single ephemeral sandbox.
 pub struct Sandbox {
-    handle: Box<dyn SandboxHandle>,
+    inner: sandcrab_core::Sandbox,
 }
 
 impl Sandbox {
     #[must_use]
     pub fn id(&self) -> SandboxId {
-        self.handle.id()
+        self.inner.id()
     }
 
     /// Export JSON Schemas for all built-in tools (for LLM tool-calling / MCP).
@@ -122,7 +150,7 @@ impl Sandbox {
     }
 
     pub async fn call_tool(&self, call: ToolCall) -> Result<ToolResult> {
-        self.handle.call_tool(call).await
+        self.inner.call_tool(call).await
     }
 
     /// Call a tool and extract its typed result.
@@ -202,6 +230,6 @@ impl Sandbox {
     }
 
     pub async fn destroy(self) -> Result<()> {
-        self.handle.destroy().await
+        self.inner.destroy().await.map(|_| ())
     }
 }
