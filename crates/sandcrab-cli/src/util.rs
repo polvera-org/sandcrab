@@ -81,10 +81,10 @@ pub fn sandcrab(g: &Global) -> anyhow::Result<Sandcrab> {
                      pass --allow-insecure or set {INSECURE_ENV}=1 to use it"
                 );
             }
-            builder = builder.docker(sandcrab_sdk::DockerDevConfig {
+            builder = builder.docker(sandcrab_sdk::DockerConfig {
                 crabd_path: crabd_path(g),
                 allow_unpinned_images: g.allow_unpinned,
-                ..sandcrab_sdk::DockerDevConfig::allow_insecure()
+                ..sandcrab_sdk::DockerConfig::allow_insecure()
             });
         }
         #[cfg(all(feature = "firecracker", target_os = "linux"))]

@@ -690,12 +690,12 @@ pub fn build_sandcrab(cli: &Cli) -> anyhow::Result<Sandcrab> {
                      pass --allow-insecure or set {INSECURE_ENV}=1"
                 );
             }
-            builder = builder.docker(sandcrab_sdk::DockerDevConfig {
+            builder = builder.docker(sandcrab_sdk::DockerConfig {
                 crabd_path: cli
                     .crabd
                     .clone()
                     .unwrap_or_else(sandcrab_sdk::docker::default_crabd_path),
-                ..sandcrab_sdk::DockerDevConfig::allow_insecure()
+                ..sandcrab_sdk::DockerConfig::allow_insecure()
             });
         }
     }

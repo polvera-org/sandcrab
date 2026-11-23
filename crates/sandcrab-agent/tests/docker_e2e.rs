@@ -1,4 +1,4 @@
-//! Scripted fake LLM driving a real DockerDev sandbox (real crabd). Needs Docker, the
+//! Scripted fake LLM driving a real Docker sandbox (real crabd). Needs Docker, the
 //! template image and a musl crabd:
 //!
 //! ```sh
@@ -16,7 +16,7 @@ use std::sync::Arc;
 use sandcrab_agent::agent::{Interrupt, TurnOutcome};
 use sandcrab_agent::llm::fake::{ScriptedLlm, reply, text, tool_use};
 use sandcrab_agent::session::{SessionOptions, run_session};
-use sandcrab_sdk::{DockerDevConfig, Sandcrab};
+use sandcrab_sdk::{DockerConfig, Sandcrab};
 use serde_json::{Value, json};
 
 fn repo_root() -> PathBuf {
@@ -44,9 +44,9 @@ fn sandcrab(state: &std::path::Path) -> Sandcrab {
     Sandcrab::builder()
         .state_dir(state)
         .templates_dir(repo_root().join("templates"))
-        .docker(DockerDevConfig {
+        .docker(DockerConfig {
             crabd_path: crabd,
-            ..DockerDevConfig::allow_insecure()
+            ..DockerConfig::allow_insecure()
         })
         .build()
         .unwrap()

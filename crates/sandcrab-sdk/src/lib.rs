@@ -4,13 +4,13 @@
 //! # Quickstart
 //!
 //! ```no_run
-//! use sandcrab_sdk::{DockerDevConfig, MountMode, NetworkPolicy, SandboxConfig, Sandcrab};
+//! use sandcrab_sdk::{DockerConfig, MountMode, NetworkPolicy, SandboxConfig, Sandcrab};
 //!
 //! # async fn demo() -> sandcrab_sdk::Result<()> {
-//! // An explicit backend is required. DockerDev shares the host kernel, so it needs the
+//! // An explicit backend is required. Docker shares the host kernel, so it needs the
 //! // explicit insecure opt-in (local dev / CI only).
 //! let sandcrab = Sandcrab::builder()
-//!     .docker(DockerDevConfig::allow_insecure())
+//!     .docker(DockerConfig::allow_insecure())
 //!     .templates_dir("templates")
 //!     .build()?;
 //!
@@ -55,7 +55,7 @@
 //! for any [`RuntimeBackend`]. A backend that cannot start (e.g. no `/dev/kvm`) is an error,
 //! never a reason to pick another one.
 //! A backend that is not hardware isolated is refused unless explicitly allowed
-//! ([`DockerDevConfig::allow_insecure_dev_backend`] / [`SandcrabBuilder::allow_insecure_backend`]),
+//! ([`DockerConfig::allow_insecure_dev_backend`] / [`SandcrabBuilder::allow_insecure_backend`]),
 //! and [`SandcrabBuilder::require_hardware_isolation`] refuses it outright.
 //!
 //! # Sandbox lifetime
@@ -103,8 +103,11 @@ pub use sandcrab_protocol as protocol;
 
 #[cfg(feature = "docker")]
 pub use sandcrab_backend_docker::{
-    self as docker, DockerDevBackend, DockerDevConfig, ReapReport, ReapScope,
+    self as docker, DockerBackend, DockerConfig, ReapReport, ReapScope,
 };
+#[cfg(feature = "docker")]
+#[allow(deprecated)]
+pub use sandcrab_backend_docker::{DockerDevBackend, DockerDevConfig};
 
 /// The Firecracker backend crate (config types, artifacts, rootfs pipeline, orphan reaping).
 #[cfg(all(feature = "firecracker", target_os = "linux"))]
@@ -120,10 +123,10 @@ use sandcrab_core::{SandboxManager, TemplateRegistry, WorkspaceRegistry};
 /// (e.g. `Firecracker(FirecrackerConfig)` / `.firecracker(..)`).
 #[non_exhaustive]
 pub enum BackendConfig {
-    /// DockerDev (`docker-dev`): shared kernel, local dev / CI only. Construction fails
+    /// Docker (`docker`): shared kernel, local dev / CI only. Construction fails
     /// unless `allow_insecure_dev_backend` is set.
     #[cfg(feature = "docker")]
-    Docker(DockerDevConfig),
+    Docker(DockerConfig),
     /// Firecracker microVMs: hardware isolated (KVM). Construction fails without a usable
     /// `/dev/kvm` or the pinned kernel / `firecracker` binary; there is no fallback.
     #[cfg(all(feature = "firecracker", target_os = "linux"))]
@@ -169,10 +172,10 @@ pub struct SandcrabBuilder {
 }
 
 impl SandcrabBuilder {
-    /// Use the DockerDev backend. `config.allow_insecure_dev_backend` must be `true`
-    /// (e.g. [`DockerDevConfig::allow_insecure`]); it is the explicit insecure opt-in.
+    /// Use the Docker backend. `config.allow_insecure_dev_backend` must be `true`
+    /// (e.g. [`DockerConfig::allow_insecure`]); it is the explicit insecure opt-in.
     #[cfg(feature = "docker")]
-    pub fn docker(mut self, config: DockerDevConfig) -> Self {
+    pub fn docker(mut self, config: DockerConfig) -> Self {
         self.backend = Some(BackendConfig::Docker(config));
         self
     }
@@ -204,14 +207,14 @@ impl SandcrabBuilder {
     }
 
     /// Explicitly allow a custom backend that is not hardware isolated (local dev / CI).
-    /// For DockerDev the opt-in is [`DockerDevConfig::allow_insecure_dev_backend`].
+    /// For Docker the opt-in is [`DockerConfig::allow_insecure_dev_backend`].
     pub fn allow_insecure_backend(mut self, allow: bool) -> Self {
         self.allow_insecure_custom = allow;
         self
     }
 
-    /// Sandcrab state root (workspace registry and, for DockerDev, the per-sandbox socket
-    /// dirs under `<state_dir>/run` unless `DockerDevConfig::state_dir` was changed).
+    /// Sandcrab state root (workspace registry and, for Docker, the per-sandbox socket
+    /// dirs under `<state_dir>/run` unless `DockerConfig::state_dir` was changed).
     /// Default: `$SANDCRAB_HOME`, else `~/.sandcrab`.
     pub fn state_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.state_dir = Some(dir.into());
@@ -263,7 +266,7 @@ impl SandcrabBuilder {
         #[cfg(feature = "docker")]
         if self.require_hardware_isolation && matches!(backend_config, BackendConfig::Docker(_)) {
             return Err(SandboxError::InsecureBackendRejected(
-                "hardware isolation required but the docker backend (docker-dev) shares the \
+                "hardware isolation required but the docker backend (docker) shares the \
                  host kernel"
                     .into(),
             ));
@@ -280,7 +283,7 @@ impl SandcrabBuilder {
                     config.state_dir = state_dir.join("run");
                 }
                 let allow = config.allow_insecure_dev_backend;
-                let b = DockerDevBackend::new(config)?;
+                let b = DockerBackend::new(config)?;
                 docker = Some(b.clone());
                 (Arc::new(b), allow)
             }
@@ -335,7 +338,7 @@ pub struct Sandcrab {
     manager: SandboxManager,
     require_hardware_isolation: bool,
     #[cfg(feature = "docker")]
-    docker: Option<DockerDevBackend>,
+    docker: Option<DockerBackend>,
     #[cfg(all(feature = "firecracker", target_os = "linux"))]
     firecracker: Option<FirecrackerBackend>,
 }
@@ -405,10 +408,10 @@ impl Sandcrab {
         self.manager.shutdown().await
     }
 
-    /// The DockerDev backend, when that is the selected backend.
+    /// The Docker backend, when that is the selected backend.
     #[cfg(feature = "docker")]
     #[must_use]
-    pub fn docker_backend(&self) -> Option<&DockerDevBackend> {
+    pub fn docker_backend(&self) -> Option<&DockerBackend> {
         self.docker.as_ref()
     }
 
@@ -421,7 +424,7 @@ impl Sandcrab {
     }
 
     /// Check the template's pinned image digest against the image present on the backend
-    /// (DockerDev only for now).
+    /// (Docker only for now).
     #[cfg(feature = "docker")]
     pub async fn verify_template(&self, name: &str) -> Result<PinStatus> {
         let template = self.manager.templates().get(name)?;
@@ -432,7 +435,7 @@ impl Sandcrab {
             .await
     }
 
-    /// Remove Sandcrab-managed DockerDev containers that this instance does not track
+    /// Remove Sandcrab-managed Docker containers that this instance does not track
     /// (crash / cancelled-spawn leftovers). [`ReapScope::Owned`] only removes containers of
     /// this uid and state dir whose spawning process is gone; [`ReapScope::All`] is
     /// **host-wide** and also removes live sandboxes of other processes and users.
@@ -524,7 +527,7 @@ mod tests {
             .allow_insecure_backend(true)
             .build()
             .unwrap();
-        assert_eq!(sc.backend_kind(), BackendKind::DockerDev);
+        assert_eq!(sc.backend_kind(), BackendKind::Docker);
 
         let err = env
             .builder()
@@ -545,7 +548,7 @@ mod tests {
         let env = Env::new();
         let err = env
             .builder()
-            .docker(DockerDevConfig::default())
+            .docker(DockerConfig::default())
             .build()
             .unwrap_err();
         assert!(
@@ -607,7 +610,7 @@ mod tests {
         let env = Env::new();
         let err = env
             .builder()
-            .docker(DockerDevConfig::allow_insecure())
+            .docker(DockerConfig::allow_insecure())
             .require_hardware_isolation(true)
             .build()
             .unwrap_err();

@@ -8,7 +8,7 @@ use sandcrab_sdk::{NetworkPolicy, SandboxConfig, WorkspaceMount};
 /// Runtime backends this CLI knows about. Only compiled ones parse successfully.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendArg {
-    /// DockerDev: shared kernel, local dev / CI only.
+    /// Docker: shared kernel, local dev / CI only.
     #[cfg(feature = "docker")]
     Docker,
     /// Firecracker microVMs: hardware isolated, needs /dev/kvm.

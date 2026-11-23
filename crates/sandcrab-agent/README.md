@@ -117,7 +117,7 @@ error or lost sandbox) and `130` on Ctrl-C.
 
 ```sh
 cargo test -p sandcrab-agent                     # unit tests + fake LLM against core's fake backend
-cargo test -p sandcrab-agent --test docker_e2e -- --ignored   # fake LLM against a real DockerDev sandbox
+cargo test -p sandcrab-agent --test docker_e2e -- --ignored   # fake LLM against a real Docker sandbox
 ```
 
 Full guide (mounts, ports, caches, images, live-check findings): [docs/crabagent.md](../../docs/crabagent.md).

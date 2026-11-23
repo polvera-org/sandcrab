@@ -56,7 +56,7 @@ tempfile = "3"
 # Encoding (SDK upload/download helpers)
 base64 = "0.22"
 
-# Docker (DockerDev backend)
+# Docker backend
 bollard = "0.21"
 rustix = { version = "1", features = ["process"] }
 

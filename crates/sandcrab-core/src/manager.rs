@@ -24,7 +24,7 @@ use crate::{
 /// Manager-wide policy and timeouts.
 #[derive(Debug, Clone)]
 pub struct ManagerConfig {
-    /// Allow a backend without hardware isolation (DockerDev). Must be set explicitly;
+    /// Allow a backend without hardware isolation (Docker). Must be set explicitly;
     /// there is never a silent fallback to an insecure backend.
     pub allow_insecure_backend: bool,
     /// Deadline for connect + `hello` after `RuntimeBackend::spawn` returns.

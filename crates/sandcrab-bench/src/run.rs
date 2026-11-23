@@ -1560,12 +1560,12 @@ pub async fn run(plan: &Plan) -> anyhow::Result<(RunResult, PathBuf)> {
             .into(),
     );
     notes.push(
-        "docker-dev: bind-mount cost is inside spawn_ready (compare W1/W2 vs W0); ws_attach \
+        "docker: bind-mount cost is inside spawn_ready (compare W1/W2 vs W0); ws_attach \
          is the post-ready list_dir verification"
             .into(),
     );
     notes.push(
-        "docker-dev: mem.guest_available reads the host /proc/meminfo (no lxcfs), so it is \
+        "docker: mem.guest_available reads the host /proc/meminfo (no lxcfs), so it is \
          not a per-sandbox number"
             .into(),
     );
@@ -1656,7 +1656,7 @@ mod tests {
     fn plan() -> Plan {
         Plan {
             argv: vec![],
-            backends: vec![BackendId::DockerDev],
+            backends: vec![BackendId::Docker],
             templates: vec!["base".into(), "ts-dev".into()],
             scenarios: Scenario::ALL.into_iter().collect(),
             workspaces: vec![Ws::W0, Ws::W1, Ws::W2],

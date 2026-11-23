@@ -25,7 +25,7 @@ use crate::args::{BackendArg, SpawnArgs, parse_backend};
     name = "sandcrab",
     version,
     about = "Ephemeral sandboxes with persistent workspaces for AI agents",
-    after_help = "DockerDev (`--backend docker`) shares the host kernel: it is for local dev / CI \
+    after_help = "Docker (`--backend docker`) shares the host kernel: it is for local dev / CI \
                   only and requires --allow-insecure or SANDCRAB_ALLOW_INSECURE=1.\n\
                   Firecracker (`--backend firecracker`, Linux) is hardware isolated and needs a \
                   read-writable /dev/kvm; `sandcrab doctor` checks its prerequisites. A backend \

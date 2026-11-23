@@ -1,4 +1,4 @@
-//! [`DockerDevConfig`] and host-side checks on the injected `crabd` binary.
+//! [`DockerConfig`] and host-side checks on the injected `crabd` binary.
 
 use std::fs;
 use std::io::Read;
@@ -32,11 +32,11 @@ impl Default for DockerLimits {
     }
 }
 
-/// Configuration for [`crate::DockerDevBackend`].
+/// Configuration for [`crate::DockerBackend`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DockerDevConfig {
+pub struct DockerConfig {
     /// Explicit acknowledgement that this backend shares the host kernel and is for local
-    /// dev / CI only. **Defaults to `false`**: [`crate::DockerDevBackend::new`] refuses to
+    /// dev / CI only. **Defaults to `false`**: [`crate::DockerBackend::new`] refuses to
     /// construct the backend unless this is set.
     pub allow_insecure_dev_backend: bool,
     /// Docker daemon address (`unix:///…`, `tcp://…`). `None` = `$DOCKER_HOST`, else the
@@ -57,7 +57,7 @@ pub struct DockerDevConfig {
     pub allow_unpinned_images: bool,
 }
 
-impl Default for DockerDevConfig {
+impl Default for DockerConfig {
     fn default() -> Self {
         Self {
             allow_insecure_dev_backend: false,
@@ -70,7 +70,7 @@ impl Default for DockerDevConfig {
     }
 }
 
-impl DockerDevConfig {
+impl DockerConfig {
     /// Default config with the explicit insecure-backend opt-in set.
     #[must_use]
     pub fn allow_insecure() -> Self {
@@ -109,7 +109,7 @@ pub fn check_static_crabd(path: &Path) -> Result<PathBuf> {
     let fail = |why: String| {
         SandboxError::InvalidConfig(format!(
             "crabd binary `{}` {why}; build it with `scripts/build-crabd.sh` \
-             (or point ${CRABD_ENV} / DockerDevConfig::crabd_path at a static musl crabd)",
+             (or point ${CRABD_ENV} / DockerConfig::crabd_path at a static musl crabd)",
             path.display()
         ))
     };
@@ -217,14 +217,14 @@ mod tests {
 
     #[test]
     fn config_defaults_are_safe() {
-        let c = DockerDevConfig::default();
+        let c = DockerConfig::default();
         assert!(!c.allow_insecure_dev_backend);
         assert!(!c.allow_unpinned_images);
         assert!(c.docker_host.is_none());
         assert!(c.crabd_path.ends_with("crabd"));
         assert!(c.state_dir.ends_with("run"));
         assert_eq!(c.limits.stop_grace, Duration::from_secs(2));
-        assert!(DockerDevConfig::allow_insecure().allow_insecure_dev_backend);
+        assert!(DockerConfig::allow_insecure().allow_insecure_dev_backend);
     }
 
     #[test]

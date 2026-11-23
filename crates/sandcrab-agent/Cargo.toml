@@ -17,7 +17,7 @@ path = "src/main.rs"
 
 [features]
 default = ["docker"]
-# DockerDev backend (`--backend docker --allow-insecure`).
+# Docker backend (`--backend docker --allow-insecure`).
 docker = ["sandcrab-sdk/docker"]
 
 [dependencies]

@@ -12,7 +12,7 @@
 //! ```
 //!
 //! Lease lock files live in `locks/`, not in the workspace dir, so leasing a registered
-//! host directory (DockerDev bind-mounts it in place) creates no `workspaces/<id>/` dir.
+//! host directory (Docker bind-mounts it in place) creates no `workspaces/<id>/` dir.
 //! [`WorkspaceRegistry::remove`] deletes them.
 //!
 //! # Host-side file operations

@@ -10,7 +10,7 @@ use crate::llm::anthropic::{DEFAULT_MAX_TOKENS, DEFAULT_MODEL};
 /// Runtime backends compiled into this binary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendArg {
-    /// DockerDev: shared kernel, local dev / CI only.
+    /// Docker: shared kernel, local dev / CI only.
     #[cfg(feature = "docker")]
     Docker,
 }

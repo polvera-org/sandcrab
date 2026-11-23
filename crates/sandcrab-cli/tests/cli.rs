@@ -206,7 +206,7 @@ fn kvm_usable() -> bool {
         .is_ok()
 }
 
-/// Sandcrab-managed DockerDev containers on this host (`None` without a Docker daemon).
+/// Sandcrab-managed Docker containers on this host (`None` without a Docker daemon).
 fn docker_sandboxes() -> Option<usize> {
     let out = Command::new("docker")
         .args(["ps", "-aq", "--filter", "label=sandcrab.managed=true"])
@@ -512,7 +512,7 @@ fn spawn_sleeper(cli: &Cli) -> (std::process::Child, String) {
     std::thread::spawn(move || {
         for line in BufReader::new(stderr).lines().map_while(Result::ok) {
             eprintln!("  stderr: {line}");
-            // "sandcrab: sandbox <id> (docker-dev, base) ready in N ms"
+            // "sandcrab: sandbox <id> (docker, base) ready in N ms"
             if let Some(rest) = line.strip_prefix("sandcrab: sandbox ")
                 && line.contains("ready in")
             {

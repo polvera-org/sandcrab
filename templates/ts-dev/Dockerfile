@@ -24,7 +24,7 @@
 # Playwright and pip/uv follow XDG_CACHE_HOME). SDK/CLI users can pass the same env.
 # (sandcrab.toml has no [env] table, so the manifest cannot set this conditionally.)
 #
-# /tmp is a noexec tmpfs under DockerDev: installers that unpack and run binaries from
+# /tmp is a noexec tmpfs under Docker: installers that unpack and run binaries from
 # a temp dir need TMPDIR elsewhere, e.g. `mkdir -p ~/.tmp && export TMPDIR=~/.tmp`.
 FROM node:26.13.1-trixie-slim@sha256:e6bedef217677b276c591795e169840edd9096dbf13f29df8ef8d1856b8820bc AS node-runtime
 FROM oven/bun:1.4.5-slim@sha256:b780593f3e10918cbdaec3d5a08d52224b9198069a65eb47812085c2ec007643 AS bun-bin

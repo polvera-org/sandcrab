@@ -1,4 +1,4 @@
-//! [`DockerDevBackend`]: spawn / destroy hardened containers through `bollard`, talking to
+//! [`DockerBackend`]: spawn / destroy hardened containers through `bollard`, talking to
 //! the real `crabd` over a host-side Unix socket. Never `docker exec`.
 
 use std::fs;
@@ -24,9 +24,9 @@ use sandcrab_core::{
 use crate::spec::{
     SOCKET_NAME, SpecContext, build_container_spec, container_name, effective_user, network_mode,
 };
-use crate::{DockerDevConfig, check_static_crabd};
+use crate::{DockerConfig, check_static_crabd};
 
-const BACKEND: &str = "docker-dev";
+const BACKEND: &str = "docker";
 /// Conservative `sun_path` limit (108 on Linux, 104 on macOS, minus the NUL).
 const MAX_SOCKET_PATH: usize = 100;
 /// How long `destroy` waits for Docker to report the container gone.
@@ -63,26 +63,26 @@ pub(crate) fn connect_docker(host: Option<&str>) -> Result<Docker> {
 ///
 /// **Shares the host kernel** — it reports `hardware_isolated = false` and
 /// `multi_tenant_safe = false`, and can only be constructed with
-/// [`DockerDevConfig::allow_insecure_dev_backend`] set.
+/// [`DockerConfig::allow_insecure_dev_backend`] set.
 #[derive(Debug, Clone)]
-pub struct DockerDevBackend {
-    pub(crate) config: DockerDevConfig,
+pub struct DockerBackend {
+    pub(crate) config: DockerConfig,
     pub(crate) docker: Docker,
     /// Canonical, verified static `crabd`.
     crabd: PathBuf,
     host_user: UserSpec,
 }
 
-impl DockerDevBackend {
+impl DockerBackend {
     /// Fails with [`SandboxError::InsecureBackendRejected`] unless the insecure dev backend
     /// was explicitly allowed, and with [`SandboxError::InvalidConfig`] if `crabd_path` is
     /// not a static ELF for the host architecture. Does not contact the daemon (see
     /// [`Self::ping`]).
-    pub fn new(config: DockerDevConfig) -> Result<Self> {
+    pub fn new(config: DockerConfig) -> Result<Self> {
         if !config.allow_insecure_dev_backend {
             return Err(SandboxError::InsecureBackendRejected(
-                "the docker-dev backend shares the host kernel and is for local dev/CI only; \
-                 set DockerDevConfig::allow_insecure_dev_backend = true to use it explicitly"
+                "the docker backend shares the host kernel and is for local dev/CI only; \
+                 set DockerConfig::allow_insecure_dev_backend = true to use it explicitly"
                     .into(),
             ));
         }
@@ -101,7 +101,7 @@ impl DockerDevBackend {
     }
 
     #[must_use]
-    pub fn config(&self) -> &DockerDevConfig {
+    pub fn config(&self) -> &DockerConfig {
         &self.config
     }
 
@@ -170,7 +170,7 @@ impl DockerDevBackend {
                     template = %manifest.template.name,
                     %digest,
                     "running an unpinned template image (no sha256 in sandcrab.toml); \
-                     allowed by DockerDevConfig::allow_unpinned_images"
+                     allowed by DockerConfig::allow_unpinned_images"
                 );
                 Ok(digest)
             }
@@ -191,7 +191,7 @@ impl DockerDevBackend {
         if len > MAX_SOCKET_PATH {
             return Err(SandboxError::InvalidConfig(format!(
                 "socket path `{}` is {len} bytes (max {MAX_SOCKET_PATH}); use a shorter \
-                 DockerDevConfig::state_dir",
+                 DockerConfig::state_dir",
                 socket.display()
             )));
         }
@@ -302,7 +302,7 @@ pub(crate) fn unpinned_image(template: &str, image: &str, digest: &str) -> Sandb
     SandboxError::Template(format!(
         "UnpinnedImage: template `{template}` image `{image}` (local {digest}) has no `sha256` \
          pin in sandcrab.toml; pin it with `templates/build.sh --pin {template}`, or opt out \
-         with `--allow-unpinned` (DockerDevConfig::allow_unpinned_images)"
+         with `--allow-unpinned` (DockerConfig::allow_unpinned_images)"
     ))
 }
 
@@ -314,9 +314,9 @@ fn io_at(path: &Path, err: io::Error) -> SandboxError {
 }
 
 #[async_trait]
-impl RuntimeBackend for DockerDevBackend {
+impl RuntimeBackend for DockerBackend {
     fn kind(&self) -> BackendKind {
-        BackendKind::DockerDev
+        BackendKind::Docker
     }
 
     fn capabilities(&self) -> BackendCapabilities {
@@ -346,7 +346,7 @@ impl RuntimeBackend for DockerDevBackend {
                 target: DISK_LIMIT_WARN_TARGET,
                 template = %spec.template.name(),
                 disk_mb = spec.resources.disk_mb,
-                "docker-dev does not enforce the template's disk_mb limit"
+                "docker does not enforce the template's disk_mb limit"
             );
         }
 
@@ -378,7 +378,7 @@ impl RuntimeBackend for DockerDevBackend {
     }
 }
 
-/// Live DockerDev sandbox.
+/// Live Docker sandbox.
 #[derive(Debug)]
 struct DockerSandbox {
     id: SandboxId,
@@ -548,7 +548,7 @@ mod tests {
 
     #[test]
     fn insecure_backend_rejected_by_default() {
-        let err = DockerDevBackend::new(DockerDevConfig::default()).unwrap_err();
+        let err = DockerBackend::new(DockerConfig::default()).unwrap_err();
         assert!(
             matches!(err, SandboxError::InsecureBackendRejected(_)),
             "{err}"
@@ -565,11 +565,11 @@ mod tests {
 
     #[test]
     fn missing_crabd_is_a_clear_error() {
-        let config = DockerDevConfig {
+        let config = DockerConfig {
             crabd_path: "/nonexistent/crabd".into(),
-            ..DockerDevConfig::allow_insecure()
+            ..DockerConfig::allow_insecure()
         };
-        let err = DockerDevBackend::new(config).unwrap_err().to_string();
+        let err = DockerBackend::new(config).unwrap_err().to_string();
         assert!(err.contains("scripts/build-crabd.sh"), "{err}");
     }
 }

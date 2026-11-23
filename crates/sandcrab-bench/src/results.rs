@@ -375,7 +375,7 @@ mod tests {
                 capabilities: None,
             }],
             cells: vec![Cell {
-                backend: "docker-dev".into(),
+                backend: "docker".into(),
                 capabilities: Some(Capabilities::default()),
                 template: "base".into(),
                 cache: "warm".into(),
@@ -396,7 +396,7 @@ mod tests {
                 phases: BTreeMap::new(),
             }],
             density: vec![DensityRun {
-                backend: "docker-dev".into(),
+                backend: "docker".into(),
                 template: "base".into(),
                 variant: "idle".into(),
                 rep: 0,

@@ -156,7 +156,7 @@ fn state_dir(g: &Global, r: &mut Report, fix: bool) {
 #[cfg(feature = "docker")]
 async fn docker(g: &Global, r: &mut Report, reap: Reap) {
     use sandcrab_sdk::docker::{
-        DockerDevBackend, DockerDevConfig, DockerImageVerifier, check_static_crabd,
+        DockerBackend, DockerConfig, DockerImageVerifier, check_static_crabd,
     };
     use sandcrab_sdk::{PinStatus, ReapScope, SandboxError};
 
@@ -180,14 +180,14 @@ async fn docker(g: &Global, r: &mut Report, reap: Reap) {
     // opt-in here only acknowledges what we inspect).
     let backend = if crabd_ok {
         let state = util::state_root(g).map(|s| s.join("run")).ok();
-        let mut config = DockerDevConfig {
+        let mut config = DockerConfig {
             crabd_path: crabd,
-            ..DockerDevConfig::allow_insecure()
+            ..DockerConfig::allow_insecure()
         };
         if let Some(s) = state {
             config.state_dir = s;
         }
-        match DockerDevBackend::new(config) {
+        match DockerBackend::new(config) {
             Ok(b) => match b.ping().await {
                 Ok(v) => {
                     r.add(

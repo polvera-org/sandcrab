@@ -167,7 +167,7 @@ pub fn disable_cad() -> io::Result<()> {
 
 /// Set `RLIMIT_CORE` to 0 (soft and hard) for PID 1 and everything it spawns, so a
 /// crashing process never writes `core.*` files into a (persistent) workspace cwd.
-/// Matches the DockerDev backend's `core=0` ulimit.
+/// Matches the Docker backend's `core=0` ulimit.
 pub fn disable_core_dumps() -> io::Result<()> {
     let zero = rustix::process::Rlimit {
         current: Some(0),
