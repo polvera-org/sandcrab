@@ -44,6 +44,12 @@ tempfile = "3"
 # Safe killpg for process-group teardown; PTY allocation (+ setsid/controlling tty) for process_start.
 rustix = { version = "1", features = ["process"] }
 pty-process = { version = "0.5", features = ["async"] }
+# guest-search deps
+ignore = "0.4"
+globset = "0.4"
+grep-searcher = "0.1"
+grep-regex = "0.1"
+grep-matcher = "0.1"
 
 [dev-dependencies]
 tempfile = "3"
