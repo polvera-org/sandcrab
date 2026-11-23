@@ -53,9 +53,6 @@ tempfile = "3"
 # CLI
 clap = { version = "4", features = ["derive"] }
 
-# Testing
-tempfile = "3"
-
 [workspace.lints.rust]
 unsafe_code = "forbid"
 
