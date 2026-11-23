@@ -9,6 +9,10 @@ repository.workspace = true
 authors.workspace = true
 
 
+[[bin]]
+name = "sandcrab-rootfs"
+path = "src/bin/sandcrab-rootfs.rs"
+
 [dependencies]
 chrono.workspace = true
 clap.workspace = true
