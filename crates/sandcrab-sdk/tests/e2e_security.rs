@@ -28,25 +28,15 @@ async fn backend_selection_is_explicit_and_never_downgraded() {
                 !caps.hardware_isolated && !caps.multi_tenant_safe,
                 "{caps:?}"
             );
-            // Docker without the explicit insecure opt-in → error.
+            // Hardware isolation required → Docker refused (never a silent downgrade).
             let err = h
                 .builder()
-                .docker(docker_config(false))
-                .build()
-                .unwrap_err();
-            assert!(
-                matches!(err, SandboxError::InsecureBackendRejected(_)),
-                "{err}"
-            );
-            // Hardware isolation required → Docker refused, even with the opt-in.
-            let err = h
-                .builder()
-                .docker(docker_config(true))
+                .docker(docker_config())
                 .require_hardware_isolation(true)
                 .build()
                 .unwrap_err();
             assert!(
-                matches!(err, SandboxError::InsecureBackendRejected(_)),
+                matches!(err, SandboxError::HardwareIsolationRequired(_)),
                 "{err}"
             );
         }
@@ -60,7 +50,7 @@ async fn backend_selection_is_explicit_and_never_downgraded() {
         } else {
             let err = res.unwrap_err();
             assert!(
-                matches!(err, SandboxError::InsecureBackendRejected(_)),
+                matches!(err, SandboxError::HardwareIsolationRequired(_)),
                 "{err}"
             );
         }

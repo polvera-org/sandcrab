@@ -176,13 +176,12 @@ async fn docker(g: &Global, r: &mut Report, reap: Reap) {
         }
     };
 
-    // Daemon: full backend when crabd is usable (doctor never spawns, so the insecure
-    // opt-in here only acknowledges what we inspect).
+    // Daemon: full backend when crabd is usable (doctor never spawns).
     let backend = if crabd_ok {
         let state = util::state_root(g).map(|s| s.join("run")).ok();
         let mut config = DockerConfig {
             crabd_path: crabd,
-            ..DockerConfig::allow_insecure()
+            ..DockerConfig::default()
         };
         if let Some(s) = state {
             config.state_dir = s;

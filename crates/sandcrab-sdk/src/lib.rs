@@ -7,10 +7,10 @@
 //! use sandcrab_sdk::{DockerConfig, MountMode, NetworkPolicy, SandboxConfig, Sandcrab};
 //!
 //! # async fn demo() -> sandcrab_sdk::Result<()> {
-//! // An explicit backend is required. Docker shares the host kernel, so it needs the
-//! // explicit insecure opt-in (local dev / CI only).
+//! // An explicit backend is required (no default, no fallback). Docker: hardened
+//! // containers on the shared host kernel, for single-tenant / trusted-host workloads.
 //! let sandcrab = Sandcrab::builder()
-//!     .docker(DockerConfig::allow_insecure())
+//!     .docker(DockerConfig::default())
 //!     .templates_dir("templates")
 //!     .build()?;
 //!
@@ -54,9 +54,12 @@
 //! default, Linux only; hardware isolated, needs `/dev/kvm`) or [`SandcrabBuilder::backend`]
 //! for any [`RuntimeBackend`]. A backend that cannot start (e.g. no `/dev/kvm`) is an error,
 //! never a reason to pick another one.
-//! A backend that is not hardware isolated is refused unless explicitly allowed
-//! ([`DockerConfig::allow_insecure_dev_backend`] / [`SandcrabBuilder::allow_insecure_backend`]),
-//! and [`SandcrabBuilder::require_hardware_isolation`] refuses it outright.
+//! Docker is an officially supported backend: fast, hardened containers on the shared host
+//! kernel. It honestly reports `hardware_isolated = false` and `multi_tenant_safe = false`;
+//! for mutually hostile multi-tenant code use a microVM backend and set
+//! [`SandcrabBuilder::require_hardware_isolation`] (or
+//! [`SandboxConfig::require_hardware_isolation`]), which refuses any backend without
+//! hardware isolation instead of downgrading.
 //!
 //! # Sandbox lifetime
 //!
@@ -123,20 +126,16 @@ use sandcrab_core::{SandboxManager, TemplateRegistry, WorkspaceRegistry};
 /// (e.g. `Firecracker(FirecrackerConfig)` / `.firecracker(..)`).
 #[non_exhaustive]
 pub enum BackendConfig {
-    /// Docker (`docker`): shared kernel, local dev / CI only. Construction fails
-    /// unless `allow_insecure_dev_backend` is set.
+    /// Docker (`docker`): hardened containers on the shared host kernel; supported for
+    /// single-tenant or trusted-host workloads (`hardware_isolated = false`).
     #[cfg(feature = "docker")]
     Docker(DockerConfig),
     /// Firecracker microVMs: hardware isolated (KVM). Construction fails without a usable
     /// `/dev/kvm` or the pinned kernel / `firecracker` binary; there is no fallback.
     #[cfg(all(feature = "firecracker", target_os = "linux"))]
     Firecracker(Box<FirecrackerConfig>),
-    /// Any [`RuntimeBackend`]. `allow_insecure` must be true for a backend that is not
-    /// hardware isolated.
-    Custom {
-        backend: Arc<dyn RuntimeBackend>,
-        allow_insecure: bool,
-    },
+    /// Any [`RuntimeBackend`], used exactly as given.
+    Custom { backend: Arc<dyn RuntimeBackend> },
 }
 
 impl std::fmt::Debug for BackendConfig {
@@ -146,13 +145,9 @@ impl std::fmt::Debug for BackendConfig {
             Self::Docker(c) => f.debug_tuple("Docker").field(c).finish(),
             #[cfg(all(feature = "firecracker", target_os = "linux"))]
             Self::Firecracker(c) => f.debug_tuple("Firecracker").field(c).finish(),
-            Self::Custom {
-                backend,
-                allow_insecure,
-            } => f
+            Self::Custom { backend } => f
                 .debug_struct("Custom")
                 .field("kind", &backend.kind())
-                .field("allow_insecure", allow_insecure)
                 .finish(),
         }
     }
@@ -163,7 +158,6 @@ impl std::fmt::Debug for BackendConfig {
 #[must_use]
 pub struct SandcrabBuilder {
     backend: Option<BackendConfig>,
-    allow_insecure_custom: bool,
     state_dir: Option<PathBuf>,
     templates_dirs: Vec<PathBuf>,
     require_hardware_isolation: bool,
@@ -172,15 +166,15 @@ pub struct SandcrabBuilder {
 }
 
 impl SandcrabBuilder {
-    /// Use the Docker backend. `config.allow_insecure_dev_backend` must be `true`
-    /// (e.g. [`DockerConfig::allow_insecure`]); it is the explicit insecure opt-in.
+    /// Use the Docker backend (shared kernel, hardened containers; see
+    /// [`DockerBackend`]). Combine with [`Self::require_hardware_isolation`] to refuse it.
     #[cfg(feature = "docker")]
     pub fn docker(mut self, config: DockerConfig) -> Self {
         self.backend = Some(BackendConfig::Docker(config));
         self
     }
 
-    /// Use the Firecracker microVM backend (hardware isolated, no insecure opt-in needed).
+    /// Use the Firecracker microVM backend (hardware isolated).
     /// [`Self::build`] fails if `/dev/kvm` is not usable read-write or the pinned artifacts
     /// are missing / do not match their SHA-256 pins
     /// ([`FirecrackerConfig::fetch_pinned_artifacts`] downloads them).
@@ -190,12 +184,10 @@ impl SandcrabBuilder {
         self
     }
 
-    /// Use any [`RuntimeBackend`]. Non-hardware-isolated backends additionally need
-    /// [`Self::allow_insecure_backend`].
+    /// Use any [`RuntimeBackend`]; its declared capabilities are reported as-is.
     pub fn backend(mut self, backend: impl RuntimeBackend + 'static) -> Self {
         self.backend = Some(BackendConfig::Custom {
             backend: Arc::new(backend),
-            allow_insecure: false,
         });
         self
     }
@@ -206,10 +198,11 @@ impl SandcrabBuilder {
         self
     }
 
-    /// Explicitly allow a custom backend that is not hardware isolated (local dev / CI).
-    /// For Docker the opt-in is [`DockerConfig::allow_insecure_dev_backend`].
-    pub fn allow_insecure_backend(mut self, allow: bool) -> Self {
-        self.allow_insecure_custom = allow;
+    /// Former opt-in for backends without hardware isolation. No longer needed: this is a
+    /// no-op kept for one release. Use [`Self::require_hardware_isolation`] to refuse such
+    /// backends.
+    #[deprecated(note = "no opt-in is needed any more; this is a no-op")]
+    pub fn allow_insecure_backend(self, _allow: bool) -> Self {
         self
     }
 
@@ -265,10 +258,8 @@ impl SandcrabBuilder {
         // Statically known not to be hardware isolated: refuse before touching the daemon.
         #[cfg(feature = "docker")]
         if self.require_hardware_isolation && matches!(backend_config, BackendConfig::Docker(_)) {
-            return Err(SandboxError::InsecureBackendRejected(
-                "hardware isolation required but the docker backend (docker) shares the \
-                 host kernel"
-                    .into(),
+            return Err(SandboxError::HardwareIsolationRequired(
+                "the docker backend shares the host kernel".into(),
             ));
         }
 
@@ -276,32 +267,28 @@ impl SandcrabBuilder {
         let mut docker = None;
         #[cfg(all(feature = "firecracker", target_os = "linux"))]
         let mut firecracker = None;
-        let (backend, allow_insecure): (Arc<dyn RuntimeBackend>, bool) = match backend_config {
+        let backend: Arc<dyn RuntimeBackend> = match backend_config {
             #[cfg(feature = "docker")]
             BackendConfig::Docker(mut config) => {
                 if config.state_dir == sandcrab_backend_docker::default_state_dir() {
                     config.state_dir = state_dir.join("run");
                 }
-                let allow = config.allow_insecure_dev_backend;
                 let b = DockerBackend::new(config)?;
                 docker = Some(b.clone());
-                (Arc::new(b), allow)
+                Arc::new(b)
             }
             #[cfg(all(feature = "firecracker", target_os = "linux"))]
             BackendConfig::Firecracker(config) => {
                 let b = FirecrackerBackend::new(*config)?;
                 firecracker = Some(b.clone());
-                (Arc::new(b), false)
+                Arc::new(b)
             }
-            BackendConfig::Custom {
-                backend,
-                allow_insecure,
-            } => (backend, allow_insecure || self.allow_insecure_custom),
+            BackendConfig::Custom { backend } => backend,
         };
 
         if self.require_hardware_isolation && !backend.capabilities().hardware_isolated {
-            return Err(SandboxError::InsecureBackendRejected(format!(
-                "hardware isolation required but backend `{}` does not provide it",
+            return Err(SandboxError::HardwareIsolationRequired(format!(
+                "backend `{}` does not provide it",
                 backend.kind()
             )));
         }
@@ -314,7 +301,6 @@ impl SandcrabBuilder {
             workspaces,
             templates,
             ManagerConfig {
-                allow_insecure_backend: allow_insecure,
                 ready_timeout: self.ready_timeout.unwrap_or(defaults.ready_timeout),
                 call_timeout: self.call_timeout.unwrap_or(defaults.call_timeout),
                 ..defaults
@@ -509,52 +495,68 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn insecure_backend_needs_explicit_opt_in() {
+    async fn shared_kernel_backend_needs_no_opt_in_but_never_passes_hw_gate() {
         let env = Env::new();
-        let err = env
-            .builder()
-            .backend(FakeBackend::insecure())
-            .build()
-            .unwrap_err();
-        assert!(
-            matches!(err, SandboxError::InsecureBackendRejected(_)),
-            "{err}"
-        );
-
         let sc = env
             .builder()
-            .backend(FakeBackend::insecure())
-            .allow_insecure_backend(true)
+            .backend(FakeBackend::shared_kernel())
             .build()
             .unwrap();
         assert_eq!(sc.backend_kind(), BackendKind::Docker);
+        let caps = sc.backend_capabilities();
+        assert!(
+            !caps.hardware_isolated && !caps.multi_tenant_safe,
+            "{caps:?}"
+        );
 
         let err = env
             .builder()
-            .backend(FakeBackend::insecure())
-            .allow_insecure_backend(true)
+            .backend(FakeBackend::shared_kernel())
             .require_hardware_isolation(true)
             .build()
             .unwrap_err();
         assert!(
-            matches!(err, SandboxError::InsecureBackendRejected(_)),
+            matches!(err, SandboxError::HardwareIsolationRequired(_)),
             "{err}"
         );
     }
 
+    /// The old opt-in is a deprecated no-op: it neither enables nor bypasses anything.
+    #[tokio::test]
+    #[allow(deprecated)]
+    async fn deprecated_allow_insecure_backend_is_a_no_op() {
+        let env = Env::new();
+        for allow in [true, false] {
+            let err = env
+                .builder()
+                .backend(FakeBackend::shared_kernel())
+                .allow_insecure_backend(allow)
+                .require_hardware_isolation(true)
+                .build()
+                .unwrap_err();
+            assert!(
+                matches!(err, SandboxError::HardwareIsolationRequired(_)),
+                "{err}"
+            );
+            env.builder()
+                .backend(FakeBackend::shared_kernel())
+                .allow_insecure_backend(allow)
+                .build()
+                .unwrap();
+        }
+    }
+
+    /// No backend → error; a shared-kernel backend is never picked for you.
     #[cfg(feature = "docker")]
     #[tokio::test]
-    async fn docker_without_opt_in_is_rejected() {
+    async fn docker_is_never_an_implicit_default() {
         let env = Env::new();
         let err = env
             .builder()
-            .docker(DockerConfig::default())
+            .require_hardware_isolation(true)
             .build()
             .unwrap_err();
-        assert!(
-            matches!(err, SandboxError::InsecureBackendRejected(_)),
-            "{err}"
-        );
+        assert!(matches!(err, SandboxError::InvalidConfig(_)), "{err}");
     }
 
     /// `require_hardware_isolation` passes with a real `FirecrackerBackend` (constructed
@@ -610,12 +612,12 @@ mod tests {
         let env = Env::new();
         let err = env
             .builder()
-            .docker(DockerConfig::allow_insecure())
+            .docker(DockerConfig::default())
             .require_hardware_isolation(true)
             .build()
             .unwrap_err();
         assert!(
-            matches!(err, SandboxError::InsecureBackendRejected(_)),
+            matches!(err, SandboxError::HardwareIsolationRequired(_)),
             "{err}"
         );
         assert!(err.to_string().contains("docker"), "{err}");

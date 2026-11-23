@@ -53,10 +53,10 @@ pub enum SandboxError {
     #[error("backend `{backend}` failed: {message}")]
     Backend { backend: String, message: String },
 
-    /// An insecure backend was used without explicit opt-in, or hardware isolation was
-    /// required but the backend does not provide it.
-    #[error("insecure backend rejected: {0}")]
-    InsecureBackendRejected(String),
+    /// Hardware isolation was required (`require_hardware_isolation`) but the selected
+    /// backend does not provide it. Never answered by switching backends.
+    #[error("hardware isolation required: {0}")]
+    HardwareIsolationRequired(String),
 
     /// The backend cannot enforce a requested security policy (network, secrets, ...).
     /// Sandcrab never ignores such a request silently.
@@ -114,7 +114,7 @@ impl Clone for SandboxError {
                 backend: backend.clone(),
                 message: message.clone(),
             },
-            Self::InsecureBackendRejected(s) => Self::InsecureBackendRejected(s.clone()),
+            Self::HardwareIsolationRequired(s) => Self::HardwareIsolationRequired(s.clone()),
             Self::PolicyUnenforceable(s) => Self::PolicyUnenforceable(s.clone()),
             Self::DigestMismatch {
                 image,

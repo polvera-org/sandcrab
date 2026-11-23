@@ -29,7 +29,7 @@ echo 'CRABAGENT_SSH_HOST=user@your-dev-host' >> .env
 ```sh
 crabagent --workspace landing --template ts-dev \
   --mount-host docs/site:/kit:ro --network unrestricted --port 5173 \
-  --backend docker --allow-insecure
+  --backend docker
 ```
 
 What this command sets up:
@@ -50,8 +50,8 @@ previous session's files.
 ### One-shot
 
 ```sh
-crabagent -w landing --backend docker --allow-insecure -p "add a footer with a GitHub link"
-echo "run the tests and fix failures" | crabagent -w proj --backend docker --allow-insecure -p -
+crabagent -w landing --backend docker -p "add a footer with a GitHub link"
+echo "run the tests and fix failures" | crabagent -w proj --backend docker -p -
 ```
 
 The exit code is `0` when the model finished, `1` when it did not (turn limit, refusal, API
@@ -79,7 +79,7 @@ error or lost sandbox) and `130` on Ctrl-C.
 | `--network disabled\|unrestricted` | template's | Network policy. |
 | `--port <n>` | none | Publish a guest port on host loopback. Repeatable. |
 | `-e KEY=VALUE` | none | Sandbox environment variable. |
-| `--backend docker --allow-insecure` | none | Backend; always explicit. Also `SANDCRAB_BACKEND` and `SANDCRAB_ALLOW_INSECURE=1`. |
+| `--backend docker` | none | Backend; always explicit (no default, no fallback). Also `SANDCRAB_BACKEND`. The old `--allow-insecure` / `SANDCRAB_ALLOW_INSECURE` opt-in is a deprecated no-op. |
 | `--model` | `claude-sonnet-5-5` | Also `CRABAGENT_MODEL`. |
 | `--effort low\|medium\|high\|xhigh\|max` | model's | `output_config.effort`. Also `CRABAGENT_EFFORT`. |
 | `--max-turns <n>` | `100` | Model calls per user turn. |

@@ -122,11 +122,11 @@ async fn open_docker(
             opts.crabd.display()
         ));
     }
-    // Shared kernel: the bench opts in explicitly; the result records the capabilities.
+    // Shared kernel: the result records the (honest) capabilities.
     let sc = builder
         .docker(sandcrab_sdk::DockerConfig {
             crabd_path: opts.crabd.clone(),
-            ..sandcrab_sdk::DockerConfig::allow_insecure()
+            ..sandcrab_sdk::DockerConfig::default()
         })
         .build()
         .map_err(|e| format!("cannot initialise docker: {e}"))?;

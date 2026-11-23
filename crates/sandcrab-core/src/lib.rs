@@ -2,7 +2,7 @@
 //! the multiplexed `crabd` client, and the sandbox lifecycle manager.
 //!
 //! Flow: [`SandboxManager::spawn`] validates a [`SandboxConfig`], applies the capability and
-//! policy gates (no silent fallback to an insecure backend, no ignored network policy),
+//! policy gates (no silent fallback between backends, no ignored network policy),
 //! resolves the [`Template`] and workspace mounts ([`resolve_mounts`]), leases workspaces
 //! from the [`WorkspaceRegistry`], calls [`RuntimeBackend::spawn`] with a [`ResolvedSpec`],
 //! waits for `crabd` ([`wait_ready`]) and returns a [`Sandbox`] tool-call proxy.

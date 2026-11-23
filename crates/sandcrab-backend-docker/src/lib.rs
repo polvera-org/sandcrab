@@ -1,10 +1,10 @@
-//! Docker/OCI local development and CI backend for Sandcrab (`docker`).
+//! Docker/OCI backend for Sandcrab (`docker`): an officially supported backend with fast
+//! spawn / teardown, for single-tenant or trusted-host workloads.
 //!
-//! **Security note**: containers share the host kernel. This backend reports
-//! `hardware_isolated = false` and `multi_tenant_safe = false`, and
-//! [`DockerBackend::new`] refuses to construct it unless
-//! [`DockerConfig::allow_insecure_dev_backend`] is explicitly set (default `false`).
-//! It is never a fallback for a microVM backend.
+//! **Security note**: containers are hardened but share the host kernel. This backend
+//! reports `hardware_isolated = false` and `multi_tenant_safe = false`; mutually hostile
+//! multi-tenant code needs a microVM backend. It must be selected explicitly and is never
+//! a fallback for a microVM backend.
 //!
 //! Each sandbox is one hardened container (see [`spec`] for the exact hardening) running
 //! the template image with the host's **static** `crabd` bind-mounted read-only at

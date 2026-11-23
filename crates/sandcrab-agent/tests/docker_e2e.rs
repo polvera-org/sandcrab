@@ -46,7 +46,7 @@ fn sandcrab(state: &std::path::Path) -> Sandcrab {
         .templates_dir(repo_root().join("templates"))
         .docker(DockerConfig {
             crabd_path: crabd,
-            ..DockerConfig::allow_insecure()
+            ..DockerConfig::default()
         })
         .build()
         .unwrap()

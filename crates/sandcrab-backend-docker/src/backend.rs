@@ -58,12 +58,15 @@ pub(crate) fn connect_docker(host: Option<&str>) -> Result<Docker> {
     .map_err(|e| backend_err("cannot connect to the Docker daemon", e))
 }
 
-/// Explicit dev/CI backend: one hardened container per sandbox with the static `crabd`
+/// Docker backend: one hardened container per sandbox with the static `crabd`
 /// bind-mounted in, reached over a Unix socket in a per-sandbox host directory.
 ///
-/// **Shares the host kernel** — it reports `hardware_isolated = false` and
-/// `multi_tenant_safe = false`, and can only be constructed with
-/// [`DockerConfig::allow_insecure_dev_backend`] set.
+/// An officially supported production backend for **single-tenant or trusted-host**
+/// workloads. It **shares the host kernel**, so it honestly reports
+/// `hardware_isolated = false` and `multi_tenant_safe = false`: running mutually hostile
+/// tenants' code needs a microVM backend (e.g. Firecracker), which callers can enforce with
+/// `require_hardware_isolation`. It must be selected explicitly and is never a fallback
+/// for a microVM backend.
 #[derive(Debug, Clone)]
 pub struct DockerBackend {
     pub(crate) config: DockerConfig,
@@ -74,18 +77,9 @@ pub struct DockerBackend {
 }
 
 impl DockerBackend {
-    /// Fails with [`SandboxError::InsecureBackendRejected`] unless the insecure dev backend
-    /// was explicitly allowed, and with [`SandboxError::InvalidConfig`] if `crabd_path` is
-    /// not a static ELF for the host architecture. Does not contact the daemon (see
-    /// [`Self::ping`]).
+    /// Fails with [`SandboxError::InvalidConfig`] if `crabd_path` is not a static ELF for the
+    /// host architecture. Does not contact the daemon (see [`Self::ping`]).
     pub fn new(config: DockerConfig) -> Result<Self> {
-        if !config.allow_insecure_dev_backend {
-            return Err(SandboxError::InsecureBackendRejected(
-                "the docker backend shares the host kernel and is for local dev/CI only; \
-                 set DockerConfig::allow_insecure_dev_backend = true to use it explicitly"
-                    .into(),
-            ));
-        }
         let crabd = check_static_crabd(&config.crabd_path)?;
         let docker = connect_docker(config.docker_host.as_deref())?;
         let host_user = UserSpec::new(
@@ -319,6 +313,8 @@ impl RuntimeBackend for DockerBackend {
         BackendKind::Docker
     }
 
+    /// Shared kernel: hardened, but not a hardware boundary and not safe for mutually
+    /// untrusted tenants on one host. Never report more isolation than this.
     fn capabilities(&self) -> BackendCapabilities {
         BackendCapabilities {
             hardware_isolated: false,
@@ -546,12 +542,24 @@ fn verify_mount_roots(spec: &ResolvedSpec) -> Result<()> {
 mod tests {
     use super::*;
 
+    /// The opt-in is gone, but the isolation claims must stay honest.
     #[test]
-    fn insecure_backend_rejected_by_default() {
-        let err = DockerBackend::new(DockerConfig::default()).unwrap_err();
-        assert!(
-            matches!(err, SandboxError::InsecureBackendRejected(_)),
-            "{err}"
+    fn capabilities_report_shared_kernel() {
+        let backend = DockerBackend {
+            config: DockerConfig::default(),
+            docker: connect_docker(None).unwrap(),
+            crabd: PathBuf::from("/opt/sandcrab/crabd"),
+            host_user: UserSpec::new(1000, 1000),
+        };
+        assert_eq!(backend.kind(), BackendKind::Docker);
+        assert_eq!(
+            backend.capabilities(),
+            BackendCapabilities {
+                hardware_isolated: false,
+                multi_tenant_safe: false,
+                supports_snapshots: false,
+                supports_host_dir_mounts: true,
+            }
         );
     }
 
@@ -567,7 +575,7 @@ mod tests {
     fn missing_crabd_is_a_clear_error() {
         let config = DockerConfig {
             crabd_path: "/nonexistent/crabd".into(),
-            ..DockerConfig::allow_insecure()
+            ..DockerConfig::default()
         };
         let err = DockerBackend::new(config).unwrap_err().to_string();
         assert!(err.contains("scripts/build-crabd.sh"), "{err}");

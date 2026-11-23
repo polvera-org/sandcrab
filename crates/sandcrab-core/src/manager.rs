@@ -24,9 +24,6 @@ use crate::{
 /// Manager-wide policy and timeouts.
 #[derive(Debug, Clone)]
 pub struct ManagerConfig {
-    /// Allow a backend without hardware isolation (Docker). Must be set explicitly;
-    /// there is never a silent fallback to an insecure backend.
-    pub allow_insecure_backend: bool,
     /// Deadline for connect + `hello` after `RuntimeBackend::spawn` returns.
     pub ready_timeout: Duration,
     /// How often the TTL reaper scans for expired sandboxes.
@@ -41,7 +38,6 @@ pub struct ManagerConfig {
 impl Default for ManagerConfig {
     fn default() -> Self {
         Self {
-            allow_insecure_backend: false,
             ready_timeout: Duration::from_secs(30),
             reaper_interval: Duration::from_secs(1),
             call_timeout: DEFAULT_CALL_TIMEOUT,
@@ -93,22 +89,14 @@ impl fmt::Debug for SandboxManager {
 }
 
 impl SandboxManager {
-    /// Fails with [`SandboxError::InsecureBackendRejected`] if the backend is not hardware
-    /// isolated and `config.allow_insecure_backend` is false.
+    /// The manager runs on exactly the backend it is given (never another one); spawns
+    /// that require hardware isolation are refused on a backend without it.
     pub fn new(
         backend: Arc<dyn RuntimeBackend>,
         workspaces: WorkspaceRegistry,
         templates: TemplateRegistry,
         config: ManagerConfig,
     ) -> Result<Self> {
-        let caps = backend.capabilities();
-        if !caps.hardware_isolated && !config.allow_insecure_backend {
-            return Err(SandboxError::InsecureBackendRejected(format!(
-                "backend `{}` is not hardware isolated; set allow_insecure_backend to use it \
-                 (local dev/CI only)",
-                backend.kind()
-            )));
-        }
         Ok(Self {
             inner: Arc::new(ManagerInner {
                 backend,
@@ -151,8 +139,8 @@ impl SandboxManager {
 
         let caps = backend.capabilities();
         if config.require_hardware_isolation && !caps.hardware_isolated {
-            return Err(SandboxError::InsecureBackendRejected(format!(
-                "hardware isolation required but backend `{}` does not provide it",
+            return Err(SandboxError::HardwareIsolationRequired(format!(
+                "backend `{}` does not provide it",
                 backend.kind()
             )));
         }
@@ -847,26 +835,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn insecure_backend_needs_explicit_opt_in() {
+    async fn shared_kernel_backend_runs_but_fails_hardware_requirement() {
         let env = env();
-        let backend = FakeBackend::insecure();
-        assert!(matches!(
-            SandboxManager::new(
-                Arc::new(backend.clone()),
-                env.workspaces.clone(),
-                env.templates.clone(),
-                ManagerConfig::default()
-            ),
-            Err(SandboxError::InsecureBackendRejected(_))
-        ));
-        let mgr = manager(
-            &env,
-            &backend,
-            ManagerConfig {
-                allow_insecure_backend: true,
-                ..quick()
-            },
-        );
+        let backend = FakeBackend::shared_kernel();
+        // No opt-in needed for a shared-kernel backend ...
+        let mgr = manager(&env, &backend, quick());
+        assert_eq!(mgr.backend_kind(), BackendKind::Docker);
+        assert!(!mgr.backend_capabilities().hardware_isolated);
         mgr.spawn(SandboxConfig::from_template("base"))
             .await
             .unwrap();
@@ -874,8 +849,9 @@ mod tests {
             .spawn(SandboxConfig::from_template("base").require_hardware_isolation(true))
             .await
             .unwrap_err();
+        // ... but an explicit hardware requirement is an error, not a downgrade.
         assert!(
-            matches!(err, SandboxError::InsecureBackendRejected(_)),
+            matches!(err, SandboxError::HardwareIsolationRequired(_)),
             "{err:?}"
         );
         assert_eq!(backend.events().len(), 1, "rejected before backend.spawn");

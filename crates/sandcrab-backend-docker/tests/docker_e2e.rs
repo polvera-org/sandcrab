@@ -90,7 +90,7 @@ fn env() -> Env {
         DockerBackend::new(DockerConfig {
             crabd_path: crabd().to_path_buf(),
             state_dir: tmp.path().join("run"),
-            ..DockerConfig::allow_insecure()
+            ..DockerConfig::default()
         })
         .unwrap(),
     );
@@ -108,10 +108,7 @@ fn env() -> Env {
         backend.clone(),
         workspaces,
         templates,
-        ManagerConfig {
-            allow_insecure_backend: true,
-            ..ManagerConfig::default()
-        },
+        ManagerConfig::default(),
     )
     .unwrap();
     Env {
@@ -341,14 +338,14 @@ async fn policy_rejections_leave_nothing_behind() {
     let _serial = SERIAL.lock().await;
     let env = env();
 
-    let err = DockerBackend::new(DockerConfig {
-        crabd_path: crabd().to_path_buf(),
-        allow_insecure_dev_backend: false,
-        ..DockerConfig::default()
-    })
-    .unwrap_err();
+    // Hardware isolation required -> refused before anything is created.
+    let err = env
+        .manager
+        .spawn(SandboxConfig::from_template("base").require_hardware_isolation(true))
+        .await
+        .unwrap_err();
     assert!(
-        matches!(err, SandboxError::InsecureBackendRejected(_)),
+        matches!(err, SandboxError::HardwareIsolationRequired(_)),
         "{err}"
     );
 

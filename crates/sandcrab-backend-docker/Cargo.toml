@@ -1,6 +1,6 @@
 [package]
 name = "sandcrab-backend-docker"
-description = "Explicit local dev/CI RuntimeBackend using Docker containers with crabd (NOT for multi-tenant prod)"
+description = "Docker RuntimeBackend for Sandcrab: hardened containers running crabd (shared kernel; not for hostile multi-tenant code)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

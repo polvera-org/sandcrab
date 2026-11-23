@@ -35,10 +35,6 @@ impl Default for DockerLimits {
 /// Configuration for [`crate::DockerBackend`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DockerConfig {
-    /// Explicit acknowledgement that this backend shares the host kernel and is for local
-    /// dev / CI only. **Defaults to `false`**: [`crate::DockerBackend::new`] refuses to
-    /// construct the backend unless this is set.
-    pub allow_insecure_dev_backend: bool,
     /// Docker daemon address (`unix:///…`, `tcp://…`). `None` = `$DOCKER_HOST`, else the
     /// local default socket. The daemon must run on this host: workspaces, `crabd` and the
     /// socket directory are bind-mounted from host paths.
@@ -60,7 +56,6 @@ pub struct DockerConfig {
 impl Default for DockerConfig {
     fn default() -> Self {
         Self {
-            allow_insecure_dev_backend: false,
             docker_host: None,
             crabd_path: default_crabd_path(),
             state_dir: default_state_dir(),
@@ -71,13 +66,12 @@ impl Default for DockerConfig {
 }
 
 impl DockerConfig {
-    /// Default config with the explicit insecure-backend opt-in set.
+    /// Former explicit opt-in constructor. The Docker backend no longer needs an opt-in, so
+    /// this is [`Self::default`]; kept for one release.
+    #[deprecated(note = "the Docker backend needs no opt-in; use `DockerConfig::default()`")]
     #[must_use]
     pub fn allow_insecure() -> Self {
-        Self {
-            allow_insecure_dev_backend: true,
-            ..Self::default()
-        }
+        Self::default()
     }
 }
 
@@ -218,13 +212,17 @@ mod tests {
     #[test]
     fn config_defaults_are_safe() {
         let c = DockerConfig::default();
-        assert!(!c.allow_insecure_dev_backend);
         assert!(!c.allow_unpinned_images);
         assert!(c.docker_host.is_none());
         assert!(c.crabd_path.ends_with("crabd"));
         assert!(c.state_dir.ends_with("run"));
         assert_eq!(c.limits.stop_grace, Duration::from_secs(2));
-        assert!(DockerConfig::allow_insecure().allow_insecure_dev_backend);
+        #[allow(deprecated)]
+        let legacy = DockerConfig::allow_insecure();
+        assert_eq!(
+            legacy, c,
+            "deprecated constructor is a no-op alias of default()"
+        );
     }
 
     #[test]

@@ -25,8 +25,9 @@ use crate::args::{BackendArg, SpawnArgs, parse_backend};
     name = "sandcrab",
     version,
     about = "Ephemeral sandboxes with persistent workspaces for AI agents",
-    after_help = "Docker (`--backend docker`) shares the host kernel: it is for local dev / CI \
-                  only and requires --allow-insecure or SANDCRAB_ALLOW_INSECURE=1.\n\
+    after_help = "Docker (`--backend docker`) runs hardened containers on the shared host \
+                  kernel: fast, officially supported for single-tenant or trusted-host \
+                  workloads (not hardware isolated).\n\
                   Firecracker (`--backend firecracker`, Linux) is hardware isolated and needs a \
                   read-writable /dev/kvm; `sandcrab doctor` checks its prerequisites. A backend \
                   that cannot start is an error: sandcrab never falls back to another one."
@@ -55,9 +56,9 @@ pub struct Global {
     #[arg(long, global = true, env = "SANDCRAB_BACKEND", value_parser = parse_backend)]
     pub backend: Option<BackendArg>,
 
-    /// Acknowledge that the docker backend shares the host kernel (dev / CI only). Also
-    /// enabled by SANDCRAB_ALLOW_INSECURE=1.
-    #[arg(long, global = true)]
+    /// Deprecated no-op (the docker backend needs no opt-in any more); prints a warning.
+    /// Also SANDCRAB_ALLOW_INSECURE. Kept hidden for one release.
+    #[arg(long, global = true, hide = true)]
     pub allow_insecure: bool,
 
     /// docker backend: run template images that have no `sha256` pin in sandcrab.toml
@@ -165,7 +166,7 @@ pub enum ToolsCmd {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    // The per-spawn "disk_mb not enforced" warning is part of our own insecure-backend line.
+    // The per-spawn "disk_mb not enforced" warning is printed by our own one-liner.
     let filter = match cli.global.verbose {
         0 | 1 => "warn,sandcrab_backend_docker::disk_limit=off",
         2 => "info,sandcrab=debug",
@@ -200,6 +201,7 @@ fn main() -> ExitCode {
 
 async fn dispatch(cli: Cli) -> anyhow::Result<u8> {
     let g = &cli.global;
+    util::warn_deprecated_opt_in(g);
     match cli.command {
         Commands::Doctor { fix, all, yes } => {
             let reap = match (fix, all) {

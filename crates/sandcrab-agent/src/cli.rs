@@ -10,7 +10,7 @@ use crate::llm::anthropic::{DEFAULT_MAX_TOKENS, DEFAULT_MODEL};
 /// Runtime backends compiled into this binary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendArg {
-    /// Docker: shared kernel, local dev / CI only.
+    /// Docker: hardened containers on the shared host kernel (not hardware isolated).
     #[cfg(feature = "docker")]
     Docker,
 }
@@ -114,7 +114,7 @@ pub fn host_workspace_name(dir: &Path) -> String {
         With -p: run one task to completion (exit 0 = done, 1 = not done, 130 = Ctrl-C).",
     after_help = "Example (landing page):\n  crabagent --workspace landing --template ts-dev \
         --mount-host docs/site:/kit:ro --network unrestricted --port 5173 \
-        --backend docker --allow-insecure\n\n\
+        --backend docker\n\n\
         ANTHROPIC_API_KEY is read from the environment or a .env file (cwd up to the repo root)."
 )]
 pub struct Cli {
@@ -157,9 +157,9 @@ pub struct Cli {
     #[arg(long, env = "SANDCRAB_BACKEND", value_parser = parse_backend)]
     pub backend: Option<BackendArg>,
 
-    /// Acknowledge that the docker backend shares the host kernel (dev / CI only). Also
-    /// SANDCRAB_ALLOW_INSECURE=1.
-    #[arg(long)]
+    /// Deprecated no-op (the docker backend needs no opt-in any more); prints a warning.
+    /// Also SANDCRAB_ALLOW_INSECURE. Kept hidden for one release.
+    #[arg(long, hide = true)]
     pub allow_insecure: bool,
 
     /// Sandcrab state root. Default: $SANDCRAB_HOME, else ~/.sandcrab.
@@ -290,6 +290,7 @@ mod tests {
         assert_eq!(cli.mount_hosts.len(), 1);
         assert_eq!(cli.network, Some(NetworkPolicy::Unrestricted));
         assert_eq!(cli.ports, [5173]);
+        // Deprecated no-op flag: still parses so existing scripts keep working.
         assert!(cli.allow_insecure);
         #[cfg(feature = "docker")]
         assert_eq!(cli.backend, Some(BackendArg::Docker));
