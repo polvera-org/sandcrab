@@ -1,6 +1,6 @@
 //! `SandboxManager`: policy gate, resolution, readiness, live-sandbox tracking, TTL reaper.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 use sandcrab_protocol::{HelloResult, ProtocolError, ToolCall, ToolResult};
 use serde::Serialize;
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use crate::client::DEFAULT_CALL_TIMEOUT;
@@ -32,6 +33,9 @@ pub struct ManagerConfig {
     pub reaper_interval: Duration,
     /// Default per-call timeout for tool calls.
     pub call_timeout: Duration,
+    /// How long [`SandboxManager::shutdown`] waits for all teardowns (including ones
+    /// already in flight) before reporting the stragglers as failed.
+    pub shutdown_timeout: Duration,
 }
 
 impl Default for ManagerConfig {
@@ -41,6 +45,7 @@ impl Default for ManagerConfig {
             ready_timeout: Duration::from_secs(30),
             reaper_interval: Duration::from_secs(1),
             call_timeout: DEFAULT_CALL_TIMEOUT,
+            shutdown_timeout: Duration::from_secs(60),
         }
     }
 }
@@ -65,8 +70,9 @@ impl Drop for ManagerInner {
         }
         // Best-effort teardown of everything still running, even if callers still hold
         // `Sandbox` clones: the manager owns sandbox lifetimes.
-        for (_, sandbox) in lock(&self.active).drain() {
-            sandbox.shared.destroy_detached();
+        let all: Vec<Sandbox> = lock(&self.active).drain().map(|(_, s)| s).collect();
+        for sandbox in all {
+            sandbox.shared.start_teardown();
         }
     }
 }
@@ -251,7 +257,8 @@ impl SandboxManager {
                 created_at: Utc::now(),
                 expires_at: config.ttl_duration().map(|ttl| now + ttl),
                 destroyed: AtomicBool::new(false),
-                live: tokio::sync::Mutex::new(Some(Live { handle, leases })),
+                live: Mutex::new(Some(Live { handle, leases })),
+                teardown: watch::Sender::new(None),
                 manager: Arc::downgrade(&self.inner),
             }),
         };
@@ -283,17 +290,52 @@ impl SandboxManager {
         self.get(id)?.destroy().await
     }
 
-    /// Destroy every live sandbox. Attempts all; returns the first error.
+    /// Destroy every tracked sandbox and wait for all teardowns — including ones already in
+    /// flight (e.g. started by a dropped SDK handle) — up to
+    /// [`ManagerConfig::shutdown_timeout`]. Returns an error naming every sandbox whose
+    /// teardown failed or did not finish in time; never `Ok` while one is still running.
     pub async fn shutdown(&self) -> Result<()> {
         let all: Vec<Sandbox> = lock(&self.inner.active).values().cloned().collect();
-        let mut first_err = None;
+        let timeout = self.inner.config.shutdown_timeout;
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut pending: HashSet<SandboxId> = all.iter().map(Sandbox::id).collect();
+        let mut tasks = tokio::task::JoinSet::new();
         for s in all {
-            if let Err(e) = s.destroy().await {
-                tracing::warn!(id = %s.id(), error = %e, "destroy during shutdown failed");
-                first_err.get_or_insert(e);
+            tasks.spawn(async move { (s.id(), s.destroy().await) });
+        }
+        let mut failures = Vec::new();
+        loop {
+            match tokio::time::timeout_at(deadline, tasks.join_next()).await {
+                Ok(None) => break,
+                Ok(Some(Ok((id, result)))) => {
+                    pending.remove(&id);
+                    if let Err(e) = result {
+                        tracing::warn!(%id, error = %e, "destroy during shutdown failed");
+                        failures.push(format!("{id}: {e}"));
+                    }
+                }
+                Ok(Some(Err(join))) => failures.push(format!("teardown waiter failed: {join}")),
+                Err(_) => {
+                    for id in &pending {
+                        tracing::warn!(%id, ?timeout, "teardown still running at shutdown deadline");
+                        failures.push(format!("{id}: teardown not finished after {timeout:?}"));
+                    }
+                    break;
+                }
             }
         }
-        first_err.map_or(Ok(()), Err)
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(SandboxError::Backend {
+                backend: self.inner.backend.kind().to_string(),
+                message: format!(
+                    "shutdown failed to tear down {} sandbox(es): {}",
+                    failures.len(),
+                    failures.join("; ")
+                ),
+            })
+        }
     }
 
     /// Destroy sandboxes whose TTL has passed; returns how many were reaped.
@@ -397,6 +439,9 @@ struct Live {
     leases: Vec<WorkspaceLease>,
 }
 
+/// Result of a sandbox teardown, shared by every caller awaiting it.
+type TeardownOutcome = Result<TimingMarks>;
+
 struct SandboxShared {
     id: SandboxId,
     template: String,
@@ -409,47 +454,117 @@ struct SandboxShared {
     created_at: DateTime<Utc>,
     expires_at: Option<Instant>,
     destroyed: AtomicBool,
-    live: tokio::sync::Mutex<Option<Live>>,
+    /// Backend handle + leases until the (single) teardown claims them.
+    live: Mutex<Option<Live>>,
+    /// `Some` once the teardown has finished, successfully or not.
+    teardown: watch::Sender<Option<TeardownOutcome>>,
     manager: Weak<ManagerInner>,
 }
 
 impl SandboxShared {
-    async fn destroy(&self) -> Result<TimingMarks> {
-        let Some(live) = self.live.lock().await.take() else {
-            return Ok(self.timings.snapshot());
-        };
-        self.destroyed.store(true, Ordering::SeqCst);
-        if let Some(manager) = self.manager.upgrade() {
-            lock(&manager.active).remove(&self.id);
+    /// Single-flight teardown: the first caller starts it, every caller (explicit destroy,
+    /// SDK drop guard, TTL reaper, `shutdown`) awaits the same outcome. The sandbox stays
+    /// in the manager's active list until the backend teardown has finished.
+    async fn destroy(self: &Arc<Self>) -> Result<TimingMarks> {
+        self.start_teardown();
+        let mut rx = self.teardown.subscribe();
+        match rx.wait_for(Option::is_some).await {
+            Ok(outcome) => outcome.clone().expect("checked by wait_for"),
+            // Unreachable: the sender lives in `self`.
+            Err(_) => Err(self.teardown_error("teardown outcome channel closed")),
         }
-        self.timings.mark(LifecyclePhase::TeardownStarted);
-        self.client.close().await;
-        let Live { handle, leases } = live;
-        let result = handle.destroy().await;
-        match &result {
-            Ok(()) => drop(leases),
-            Err(_) => leases.into_iter().for_each(release_after_failure),
-        }
-        self.timings.mark(LifecyclePhase::TeardownFinished);
-        result.map(|()| self.timings.snapshot())
     }
 
-    /// Synchronous context (Drop): hand the teardown to the runtime.
-    fn destroy_detached(&self) {
-        let Ok(mut live) = self.live.try_lock() else {
-            return; // a destroy is already in progress
+    /// Claim the live handle and run its teardown on a runtime task (so a cancelled caller
+    /// cannot abort it). No-op if a teardown was already started.
+    fn start_teardown(self: &Arc<Self>) {
+        let Some(Live { handle, leases }) = lock(&self.live).take() else {
+            return;
         };
-        if let Some(Live { handle, leases }) = live.take() {
-            self.destroyed.store(true, Ordering::SeqCst);
-            self.timings.mark(LifecyclePhase::TeardownStarted);
-            spawn_destroy(handle, leases);
+        self.destroyed.store(true, Ordering::SeqCst);
+        self.timings.mark(LifecyclePhase::TeardownStarted);
+        let mut guard = TeardownGuard {
+            shared: Arc::clone(self),
+            leases: Some(leases),
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(rt) => {
+                rt.spawn(async move {
+                    guard.shared.client.close().await;
+                    let result = handle.destroy().await;
+                    guard.complete(result);
+                });
+            }
+            Err(_) => {
+                tracing::warn!(
+                    id = %self.id,
+                    "no tokio runtime; cannot destroy sandbox, dropping handle"
+                );
+                drop(handle);
+                guard.complete(Err(self.teardown_error("no tokio runtime to run teardown")));
+            }
+        }
+    }
+
+    fn teardown_error(&self, message: &str) -> SandboxError {
+        SandboxError::Backend {
+            backend: self.backend.to_string(),
+            message: format!("sandbox {}: {message}", self.id),
+        }
+    }
+}
+
+/// Owns a running teardown's leases and guarantees an outcome is published even if the
+/// task is cancelled (runtime shutdown) or panics, so waiters never hang.
+struct TeardownGuard {
+    shared: Arc<SandboxShared>,
+    leases: Option<Vec<WorkspaceLease>>,
+}
+
+impl TeardownGuard {
+    fn complete(&mut self, result: Result<()>) {
+        let Some(leases) = self.leases.take() else {
+            return;
+        };
+        match &result {
+            Ok(()) => drop(leases),
+            Err(e) => {
+                tracing::warn!(id = %self.shared.id, error = %e, "sandbox teardown failed");
+                leases.into_iter().for_each(release_after_failure);
+            }
+        }
+        let shared = &self.shared;
+        shared.timings.mark(LifecyclePhase::TeardownFinished);
+        let outcome = result.map(|()| shared.timings.snapshot());
+        // Leave the active list before waking waiters, so a returned destroy/shutdown
+        // never observes the sandbox still listed.
+        if let Some(manager) = shared.manager.upgrade() {
+            let removed = lock(&manager.active).remove(&shared.id);
+            drop(removed);
+        }
+        shared.teardown.send_replace(Some(outcome));
+    }
+}
+
+impl Drop for TeardownGuard {
+    fn drop(&mut self) {
+        if self.leases.is_some() {
+            let err = self
+                .shared
+                .teardown_error("teardown aborted before completion");
+            self.complete(Err(err));
         }
     }
 }
 
 impl Drop for SandboxShared {
     fn drop(&mut self) {
-        if let Some(Live { handle, leases }) = self.live.get_mut().take() {
+        let live = self
+            .live
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(Live { handle, leases }) = live {
             spawn_destroy(handle, leases);
         }
     }
@@ -976,6 +1091,113 @@ mod tests {
                 .count(),
             3
         );
+    }
+
+    fn destroyed_count(backend: &FakeBackend) -> usize {
+        backend
+            .events()
+            .iter()
+            .filter(|e| matches!(e, FakeEvent::Destroyed(_)))
+            .count()
+    }
+
+    #[tokio::test]
+    async fn concurrent_destroys_are_single_flight() {
+        let env = env();
+        let backend = FakeBackend::new();
+        backend.destroy_delay_ms.store(300, Ordering::SeqCst);
+        let mgr = manager(&env, &backend, quick());
+        let sb = mgr
+            .spawn(SandboxConfig::from_template("base"))
+            .await
+            .unwrap();
+        let id = sb.id();
+
+        let first = tokio::spawn({
+            let sb = sb.clone();
+            async move { sb.destroy().await }
+        });
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(sb.is_destroyed(), "calls are rejected once teardown starts");
+        assert_eq!(mgr.list_active().len(), 1, "listed until teardown finishes");
+
+        // Second caller joins the in-flight teardown instead of returning early.
+        let started = Instant::now();
+        mgr.destroy(id).await.unwrap();
+        assert!(started.elapsed() >= Duration::from_millis(200));
+        assert_eq!(backend.events().last(), Some(&FakeEvent::Destroyed(id)));
+        assert!(mgr.list_active().is_empty());
+        first.await.unwrap().unwrap();
+        sb.destroy().await.unwrap();
+        assert_eq!(destroyed_count(&backend), 1, "backend destroy ran once");
+    }
+
+    #[tokio::test]
+    async fn concurrent_destroys_share_failure() {
+        let env = env();
+        let backend = FakeBackend::new();
+        backend.destroy_delay_ms.store(100, Ordering::SeqCst);
+        backend.fail_destroy.store(true, Ordering::SeqCst);
+        let mgr = manager(&env, &backend, quick());
+        let sb = mgr
+            .spawn(SandboxConfig::from_template("base"))
+            .await
+            .unwrap();
+        let (a, b) = tokio::join!(sb.destroy(), sb.destroy());
+        for r in [a, b] {
+            let err = r.unwrap_err();
+            assert!(
+                err.to_string().contains("injected destroy failure"),
+                "{err}"
+            );
+        }
+        assert!(mgr.list_active().is_empty(), "failed teardown is recorded");
+    }
+
+    #[tokio::test]
+    async fn shutdown_awaits_in_flight_detached_destroy() {
+        let env = env();
+        let backend = FakeBackend::new();
+        backend.destroy_delay_ms.store(300, Ordering::SeqCst);
+        let mgr = manager(&env, &backend, quick());
+        let sb = mgr
+            .spawn(SandboxConfig::from_template("base"))
+            .await
+            .unwrap();
+        let id = sb.id();
+        // What the SDK drop guard does: fire-and-forget destroy on the runtime.
+        drop(tokio::spawn(async move { sb.destroy().await }));
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert_eq!(mgr.list_active().len(), 1);
+
+        mgr.shutdown().await.unwrap();
+        assert!(backend.events().contains(&FakeEvent::Destroyed(id)));
+        assert!(mgr.list_active().is_empty());
+        assert_eq!(destroyed_count(&backend), 1);
+    }
+
+    #[tokio::test]
+    async fn shutdown_reports_teardowns_past_deadline() {
+        let env = env();
+        let backend = FakeBackend::new();
+        backend.destroy_delay_ms.store(1_000, Ordering::SeqCst);
+        let mgr = manager(
+            &env,
+            &backend,
+            ManagerConfig {
+                shutdown_timeout: Duration::from_millis(100),
+                ..quick()
+            },
+        );
+        let sb = mgr
+            .spawn(SandboxConfig::from_template("base"))
+            .await
+            .unwrap();
+        let err = mgr.shutdown().await.unwrap_err();
+        assert!(err.to_string().contains(&sb.id().to_string()), "{err}");
+        // The teardown itself keeps running and completes.
+        sb.destroy().await.unwrap();
+        assert!(mgr.list_active().is_empty());
     }
 
     #[tokio::test]

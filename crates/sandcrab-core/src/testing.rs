@@ -5,7 +5,7 @@
 
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -239,6 +239,8 @@ pub struct FakeBackend {
     pub connect_failures: Arc<AtomicU32>,
     /// Make `destroy` fail.
     pub fail_destroy: Arc<AtomicBool>,
+    /// Milliseconds each `destroy` sleeps before completing (slow teardown).
+    pub destroy_delay_ms: Arc<AtomicU64>,
     events: Arc<Mutex<Vec<FakeEvent>>>,
     last_spec: Arc<Mutex<Option<ResolvedSpec>>>,
 }
@@ -259,6 +261,7 @@ impl FakeBackend {
             mock: MockCrabd::default(),
             connect_failures: Arc::new(AtomicU32::new(0)),
             fail_destroy: Arc::new(AtomicBool::new(false)),
+            destroy_delay_ms: Arc::new(AtomicU64::new(0)),
             events: Arc::default(),
             last_spec: Arc::default(),
         }
@@ -385,6 +388,10 @@ impl SandboxHandle for FakeHandle {
     }
 
     async fn destroy(self: Box<Self>) -> Result<()> {
+        let delay = self.backend.destroy_delay_ms.load(Ordering::SeqCst);
+        if delay > 0 {
+            tokio::time::sleep(Duration::from_millis(delay)).await;
+        }
         if self.backend.fail_destroy.load(Ordering::SeqCst) {
             return Err(SandboxError::Backend {
                 backend: self.backend.kind.to_string(),
