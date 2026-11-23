@@ -1,0 +1,18 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+
+# Local Sandcrab state (workspaces, rootfs caches, sockets, snapshots)
+/.sandcrab/
+*.sock
+*.ext4
+*.snap
+
+# OS & editor files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+.env
+.env.*

@@ -1,0 +1,56 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/sandcrab-protocol",
+    "crates/sandcrab-core",
+    "crates/sandcrab-guest",
+    "crates/sandcrab-backend-docker",
+    "crates/sandcrab-sdk",
+    "crates/sandcrab-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+repository = "https://github.com/polvera-org/sandcrab"
+authors = ["Polvera Org"]
+
+[workspace.dependencies]
+# Internal workspace crates
+sandcrab-protocol = { path = "crates/sandcrab-protocol" }
+sandcrab-core = { path = "crates/sandcrab-core" }
+sandcrab-backend-docker = { path = "crates/sandcrab-backend-docker" }
+sandcrab-sdk = { path = "crates/sandcrab-sdk" }
+
+# Async & networking
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+
+# Serialization & schemas
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "0.8"
+toml = "0.8"
+
+# Errors, logging & primitives
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
