@@ -222,6 +222,30 @@ pub fn docker_ps(label: &str) -> Vec<String> {
         .collect()
 }
 
+/// Managed containers (any state) with a bind mount under `dir`.
+pub fn docker_owned_by(dir: &Path) -> Vec<String> {
+    let ids = docker_ps("sandcrab.managed=true");
+    if ids.is_empty() {
+        return ids;
+    }
+    let out = Command::new("docker")
+        .args([
+            "inspect",
+            "--format",
+            "{{.Id}} {{range .Mounts}}{{.Source}} {{end}}",
+        ])
+        .args(&ids)
+        .output()
+        .expect("run docker inspect");
+    // A container may vanish between `ps` and `inspect`; parse whatever was printed.
+    let needle = dir.to_string_lossy().into_owned();
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| l.contains(needle.as_str()))
+        .filter_map(|l| l.split_whitespace().next().map(|id| id[..12].to_owned()))
+        .collect()
+}
+
 /// Host uid (owner of a fresh temp dir).
 pub fn host_uid() -> u32 {
     let d = tempfile::tempdir().unwrap();
@@ -262,6 +286,24 @@ where
     let outcome = tokio::spawn(body(h.clone())).await;
     if let Err(e) = h.sc.shutdown().await {
         eprintln!("{test}: cleanup error: {e}");
+    }
+    if h.is_docker() {
+        // Backstop: `shutdown()` can return while a drop-triggered background destroy is
+        // still tearing a container down (see e2e_lifecycle.rs). Wait for those, then
+        // force-remove anything still mounting this test's temp dir.
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut left = docker_owned_by(h.tmp());
+        while !left.is_empty() && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            left = docker_owned_by(h.tmp());
+        }
+        if !left.is_empty() {
+            eprintln!("{test}: WARNING force-removing leaked containers {left:?}");
+            let _ = Command::new("docker")
+                .args(["rm", "-f"])
+                .args(&left)
+                .output();
+        }
     }
     eprintln!("{test}: {:.1?}", started.elapsed());
     if let Err(e) = outcome {
