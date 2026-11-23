@@ -1,8 +1,11 @@
 [template]
 name = "base"
 version = "0.1.0"
-description = "Minimal Debian 13 (trixie-slim) base image with core CLI utilities and crabd guest daemon"
+description = "Minimal Debian 13 (trixie-slim) base image with core CLI utilities; crabd is injected at runtime"
 image = "sandcrab/base:0.1.0"
+# Pins the locally built image ID (docker image inspect --format {{.Id}}); not
+# reproducible across rebuilds yet. Refresh with: templates/build.sh --pin
+sha256 = "sha256:41e693df2350e9f6f698a8800daa49a381e246992c630c94515b65a5b7048804"
 
 [resources]
 vcpu = 1
