@@ -264,9 +264,20 @@ pub async fn run_session(
             .unwrap_or_else(|_| "template default".into()),
     };
     if !sc.backend_capabilities().hardware_isolated {
+        #[cfg(feature = "docker")]
+        let disk = sc
+            .docker_backend()
+            .is_some_and(|d| !d.enforces_disk_limit());
+        #[cfg(not(feature = "docker"))]
+        let disk = false;
         ui.info(&format!(
-            "warning: backend `{}` shares the host kernel — not a security boundary; local dev / CI only",
-            sc.backend_kind()
+            "warning: backend `{}` shares the host kernel — not a security boundary; local dev / CI only{}",
+            sc.backend_kind(),
+            if disk {
+                "; template disk_mb is not enforced"
+            } else {
+                ""
+            }
         ));
     }
     ui.info(&format!("spawning `{}` sandbox…", opts.template));

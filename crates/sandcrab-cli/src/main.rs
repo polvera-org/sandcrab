@@ -160,8 +160,9 @@ pub enum ToolsCmd {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    // The per-spawn "disk_mb not enforced" warning is part of our own insecure-backend line.
     let filter = match cli.global.verbose {
-        0 | 1 => "warn",
+        0 | 1 => "warn,sandcrab_backend_docker::disk_limit=off",
         2 => "info,sandcrab=debug",
         _ => "debug",
     };

@@ -344,6 +344,8 @@ fn docker_smoke_run_and_tool() {
     );
     let err = stderr(&out);
     assert!(err.contains("shares the host kernel"), "{err}");
+    assert!(err.contains("disk_mb is not enforced"), "{err}");
+    assert_eq!(err.matches("disk_mb").count(), 1, "warned twice: {err}");
     assert!(
         err.contains("ready in") && err.contains("teardown"),
         "{err}"

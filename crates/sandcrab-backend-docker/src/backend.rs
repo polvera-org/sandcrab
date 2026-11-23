@@ -39,6 +39,10 @@ pub(crate) fn backend_err(context: &str, err: impl std::fmt::Display) -> Sandbox
     }
 }
 
+/// `tracing` target of the per-spawn "disk_mb is not enforced" warning, so front ends that
+/// already print it can filter it out.
+pub const DISK_LIMIT_WARN_TARGET: &str = "sandcrab_backend_docker::disk_limit";
+
 pub(crate) fn status_code(err: &DockerError) -> Option<u16> {
     match err {
         DockerError::DockerResponseServerError { status_code, .. } => Some(*status_code),
@@ -105,6 +109,15 @@ impl DockerDevBackend {
     #[must_use]
     pub fn crabd_path(&self) -> &Path {
         &self.crabd
+    }
+
+    /// Template `disk_mb` is never enforced by this backend (overlay2 size limits need an
+    /// xfs + pquota backing filesystem): the container root filesystem is unbounded. Callers
+    /// should surface this; [`RuntimeBackend::spawn`] also logs it (target
+    /// [`DISK_LIMIT_WARN_TARGET`]).
+    #[must_use]
+    pub fn enforces_disk_limit(&self) -> bool {
+        false
     }
 
     /// Check the daemon is reachable; returns its version string.
@@ -310,6 +323,14 @@ impl RuntimeBackend for DockerDevBackend {
         network_mode(&spec.network)?;
         let image_id = self.verify_image(spec).await?;
         spec.timings.mark_custom("image_verified");
+        if !self.enforces_disk_limit() {
+            tracing::warn!(
+                target: DISK_LIMIT_WARN_TARGET,
+                template = %spec.template.name(),
+                disk_mb = spec.resources.disk_mb,
+                "docker-dev does not enforce the template's disk_mb limit"
+            );
+        }
 
         let socket_dir = self.prepare_socket_dir(spec)?;
         let name = container_name(spec.id);

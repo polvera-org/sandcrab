@@ -8,7 +8,8 @@ use sandcrab_agent::cli::Cli;
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let filter = match cli.verbose {
-        0 => "warn",
+        // The "disk_mb not enforced" warning is part of the session's backend warning line.
+        0 => "warn,sandcrab_backend_docker::disk_limit=off",
         1 => "info,sandcrab=debug,sandcrab_agent=debug",
         _ => "debug",
     };

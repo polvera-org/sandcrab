@@ -98,14 +98,29 @@ pub fn sandcrab(g: &Global) -> anyhow::Result<Sandcrab> {
     builder.build().context("cannot initialise the backend")
 }
 
-/// The one-line warning printed on every insecure (shared-kernel) spawn.
+/// The one-line warning printed on every insecure (shared-kernel) spawn; it also says when
+/// the backend does not enforce the template's `disk_mb`.
 pub fn warn_if_insecure(sc: &Sandcrab) {
     if !sc.backend_capabilities().hardware_isolated {
         eprintln!(
-            "warning: backend `{}` shares the host kernel — not a security boundary; local dev / CI only",
-            sc.backend_kind()
+            "warning: backend `{}` shares the host kernel — not a security boundary; local dev / CI only{}",
+            sc.backend_kind(),
+            if enforces_disk_limit(sc) {
+                ""
+            } else {
+                "; template disk_mb is not enforced"
+            }
         );
     }
+}
+
+fn enforces_disk_limit(sc: &Sandcrab) -> bool {
+    #[cfg(feature = "docker")]
+    if let Some(d) = sc.docker_backend() {
+        return d.enforces_disk_limit();
+    }
+    let _ = sc;
+    true
 }
 
 pub fn print_json<T: Serialize + ?Sized>(v: &T) -> anyhow::Result<()> {
