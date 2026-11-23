@@ -34,6 +34,13 @@
 //! println!("exit={:?}\n{}", out.exit_code, out.stdout);
 //! sandbox.file_edit("index.html", "hi", "hello").await?;
 //!
+//! // LLM tool-use: name + JSON input straight from the model, JSON back.
+//! let reply = sandbox
+//!     .tool_dispatch("grep", serde_json::json!({ "pattern": "hello" }))
+//!     .await
+//!     .expect("sandbox is alive");
+//! println!("{reply}");
+//!
 //! let timings = sandbox.destroy().await?;
 //! println!("spawn→ready: {:?}", timings.spawn_ready());
 //! # Ok(())
@@ -57,6 +64,7 @@
 //! leaked by a crashed process are removed by `sandcrab doctor --fix`
 //! ([`Sandcrab::reap_orphans`]).
 
+mod dispatch;
 mod sandbox;
 mod workspace;
 
@@ -64,6 +72,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+pub use dispatch::{ToolError, is_tool_error};
 pub use sandbox::Sandbox;
 pub use workspace::{TemplateClient, WorkspaceClient};
 
