@@ -18,7 +18,7 @@
 //!
 //! Behaviour switches come from `<run_dir>/fake-mode`: `bad_drive`, `hang` (ignores
 //! shutdown and Ctrl-Alt-Del), `no_guest` (vsock never answers), `crash_export`
-//! (truncated archive).
+//! (truncated archive), `slow_export` (one archive byte every 20 ms).
 //!
 //! The real-KVM equivalents live in `tests/firecracker_kvm.rs` (`#[ignore]`, PENDING).
 
@@ -296,6 +296,14 @@ mod fake {
                         ),
                     )
                     .await;
+                    if fake.mode == "slow_export" {
+                        for b in &tar {
+                            if s.write_all(std::slice::from_ref(b)).await.is_err() {
+                                return;
+                            }
+                            tokio::time::sleep(Duration::from_millis(20)).await;
+                        }
+                    }
                     let n = if fake.mode == "crash_export" {
                         tar.len() / 2
                     } else {
@@ -370,6 +378,9 @@ fn harness() -> ExitCode {
         ("hung_vmm_is_killed", || Box::pin(hung_vmm_is_killed())),
         ("failed_export_preserves_image", || {
             Box::pin(failed_export_preserves_image())
+        }),
+        ("slow_export_hits_deadline", || {
+            Box::pin(slow_export_hits_deadline())
         }),
     ];
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -953,4 +964,35 @@ async fn failed_export_preserves_image() {
         .filter(|d| d.file_name().to_string_lossy().contains("staging"))
         .collect();
     assert!(stray.is_empty(), "{stray:?}");
+}
+
+async fn slow_export_hits_deadline() {
+    let e = env_with(|cfg, _| {
+        cfg.export_timeout = Duration::from_millis(800);
+        cfg.export_min_bytes_per_sec = u64::MAX; // no size-proportional part
+    });
+    e.set_mode("slow_export");
+    let sb = e
+        .manager
+        .spawn(SandboxConfig::from_template("base").mount(
+            "project",
+            "/workspace",
+            MountMode::ReadWrite,
+        ))
+        .await
+        .unwrap();
+    let id = sb.id();
+    let t0 = Instant::now();
+    let err = sb.destroy().await.unwrap_err().to_string();
+    let took = t0.elapsed();
+    // Idle timeout is 30 s and the guest never goes idle; only the overall deadline ends it.
+    assert!(took < Duration::from_secs(10), "destroy took {took:?}");
+    assert!(
+        err.contains("sync-back failed") && err.contains("overall deadline"),
+        "{err}"
+    );
+    assert!(!e.project.join("guest-wrote.txt").exists());
+    let rec = e.tmp.path().join("recovery").join(id.to_string());
+    assert!(rec.join("ws-0.ext4").is_file(), "image preserved");
+    assert!(e.leftover_run_dirs().is_empty());
 }

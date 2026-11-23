@@ -68,6 +68,12 @@ pub struct FirecrackerConfig {
     pub kill_after: Duration,
     /// Idle timeout while reading a workspace export stream.
     pub export_idle_timeout: Duration,
+    /// Overall export deadline per drive: `export_timeout + drive size /
+    /// export_min_bytes_per_sec`. When it passes the stream is aborted, the guest image is
+    /// preserved under [`Self::recovery_dir`], and teardown proceeds (the VM is killed).
+    pub export_timeout: Duration,
+    /// See [`Self::export_timeout`].
+    pub export_min_bytes_per_sec: u64,
     /// Upper caps for the (hostile) export archive. Each sync-back further bounds them by the
     /// workspace drive's size ([`UnpackLimits::bounded_by`]) and [`Self::sync_back_quota`].
     pub unpack_limits: UnpackLimits,
@@ -120,6 +126,8 @@ impl FirecrackerConfig {
             ctrl_alt_del_after: Duration::from_millis(1500),
             kill_after: Duration::from_secs(3),
             export_idle_timeout: crate::workspace::EXPORT_IDLE_TIMEOUT,
+            export_timeout: crate::workspace::EXPORT_TIMEOUT,
+            export_min_bytes_per_sec: crate::workspace::EXPORT_MIN_BYTES_PER_SEC,
             unpack_limits: UnpackLimits::default(),
             sync_back_quota: None,
             debug_console: false,
@@ -159,6 +167,11 @@ impl FirecrackerConfig {
         if self.boot_timeout.is_zero() || self.api_timeout.is_zero() {
             return Err(SandboxError::InvalidConfig(
                 "boot_timeout and api_timeout must be positive".into(),
+            ));
+        }
+        if self.export_idle_timeout.is_zero() || self.export_timeout.is_zero() {
+            return Err(SandboxError::InvalidConfig(
+                "export_idle_timeout and export_timeout must be positive".into(),
             ));
         }
         // <run_dir>/<36-char uuid>/api.sock must fit sun_path (108 incl. NUL).
