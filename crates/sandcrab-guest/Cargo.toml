@@ -8,6 +8,10 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[lib]
+name = "sandcrab_guest"
+path = "src/lib.rs"
+
 [[bin]]
 name = "crabd"
 path = "src/main.rs"
@@ -15,9 +19,26 @@ path = "src/main.rs"
 [dependencies]
 sandcrab-protocol.workspace = true
 clap.workspace = true
-tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+# Not `tokio.workspace` (which enables "full"): crabd ships as a small static binary, so it
+# opts into exactly the runtime pieces it uses. `process` and `fs` are for the tool modules.
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "net",
+    "io-util",
+    "sync",
+    "time",
+    "signal",
+    "process",
+    "fs",
+] }
+
+[dev-dependencies]
+tempfile = "3"
 
 [lints]
 workspace = true
