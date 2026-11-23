@@ -5,6 +5,7 @@
 mod common;
 
 use std::collections::BTreeSet;
+use std::path::Path;
 
 use common::{run, sh};
 use sandcrab_sdk::{MountMode, ProtocolError, SandboxConfig, SandboxError};
@@ -152,6 +153,163 @@ async fn multi_turn_workspace_mutation_cross_template() {
         );
         // Mutable again once no sandbox holds it.
         ws.put_file(name.as_str(), "done.txt", "ok").unwrap();
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "e2e: needs a sandbox backend (SANDCRAB_E2E_BACKEND, default docker)"]
+async fn multi_mount_rw_ro_and_default_cwd() {
+    run("multi-mount", |h| async move {
+        let ws = h.ws();
+        let a = h.name("a");
+        let b = h.name("b");
+        ws.create(&a).unwrap();
+        ws.create(&b).unwrap();
+        ws.put_file(b.as_str(), "readme.txt", "read only\n")
+            .unwrap();
+
+        let sb =
+            h.sc.spawn(
+                SandboxConfig::from_template("base")
+                    .mount(a.as_str(), "/workspace", MountMode::ReadWrite)
+                    .mount(b.as_str(), "/data", MountMode::ReadOnly)
+                    .default_cwd("/workspace"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(sb.default_cwd(), Path::new("/workspace"));
+        assert_eq!(sb.hello().default_cwd, "/workspace");
+        assert_eq!(sh(&sb, "pwd").await, "/workspace\n");
+
+        // Relative paths resolve against default_cwd → workspace A.
+        sb.file_write("rel.txt", "relative\n").await.unwrap();
+        sb.file_write("sub/dir/nested.txt", "nested\n")
+            .await
+            .unwrap();
+        assert_eq!(sh(&sb, "cat /data/readme.txt").await, "read only\n");
+
+        // Read-only mount: refused by the tool and by the kernel.
+        let err = sb.file_write("/data/x", "nope").await.unwrap_err();
+        assert!(matches!(err, SandboxError::Protocol(_)), "{err}");
+        let touch = sb.bash("touch /data/x").await.unwrap();
+        assert_ne!(touch.exit_code, Some(0), "{touch:?}");
+        assert!(
+            touch.stderr.contains("Read-only file system"),
+            "expected EROFS: {touch:?}"
+        );
+        let rm = sb.bash("rm -f /data/readme.txt").await.unwrap();
+        assert_ne!(rm.exit_code, Some(0), "{rm:?}");
+        let err = sb.file_delete("/data/readme.txt", false).await.unwrap_err();
+        assert!(matches!(err, SandboxError::Protocol(_)), "{err}");
+
+        // A read-only lease does not block host-side mutation of B, a rw lease blocks A.
+        assert!(matches!(
+            ws.put_file(a.as_str(), "host.txt", "x").unwrap_err(),
+            SandboxError::WorkspaceBusy(_)
+        ));
+        sb.destroy().await.unwrap();
+
+        assert_eq!(ws.read_file(a.as_str(), "rel.txt").unwrap(), b"relative\n");
+        assert_eq!(
+            ws.read_file(a.as_str(), "sub/dir/nested.txt").unwrap(),
+            b"nested\n"
+        );
+        assert_eq!(
+            names(&ws.list_files(b.as_str(), "").unwrap()),
+            set(&["readme.txt"])
+        );
+        assert_eq!(
+            ws.read_file(b.as_str(), "readme.txt").unwrap(),
+            b"read only\n"
+        );
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "e2e: needs a sandbox backend (SANDCRAB_E2E_BACKEND, default docker)"]
+async fn host_side_path_safety() {
+    run("path-safety", |h| async move {
+        let ws = h.ws();
+        let name = h.name("ws");
+        let created = ws.create(&name).unwrap();
+        let root = created.backing.path().to_path_buf();
+        let is_escape = |e: &SandboxError| {
+            matches!(
+                e,
+                SandboxError::PathEscape(_) | SandboxError::InvalidConfig(_)
+            )
+        };
+
+        // Lexical escapes.
+        for bad in ["../escape", "a/../../escape", "/etc/sandcrab-e2e-abs"] {
+            let err = ws.put_file(name.as_str(), bad, "x").unwrap_err();
+            assert!(is_escape(&err), "put_file({bad}): {err}");
+            let err = ws.read_file(name.as_str(), bad).unwrap_err();
+            assert!(is_escape(&err), "read_file({bad}): {err}");
+        }
+        assert!(!root.parent().unwrap().join("escape").exists());
+        assert!(!Path::new("/etc/sandcrab-e2e-abs").exists());
+
+        // Symlink escapes planted by the sandbox.
+        let canary = h.tmp().join("canary");
+        std::fs::create_dir_all(&canary).unwrap();
+        std::fs::write(canary.join("secret.txt"), "host secret\n").unwrap();
+        let sb =
+            h.sc.spawn(
+                SandboxConfig::from_template("base")
+                    .mount(name.as_str(), "/workspace", MountMode::ReadWrite)
+                    .default_cwd("/workspace"),
+            )
+            .await
+            .unwrap();
+        sh(
+            &sb,
+            &format!(
+                "ln -s / evil && ln -s /etc/passwd pw && ln -s {} canary && \
+                 mkdir -p ok && echo fine > ok/real.txt && ln -s ok/real.txt inside && \
+                 ln -s /nonexistent dangling",
+                canary.display()
+            ),
+        )
+        .await;
+        sb.destroy().await.unwrap();
+
+        for bad in ["evil/etc/passwd", "pw", "canary/secret.txt", "dangling"] {
+            let err = ws.read_file(name.as_str(), bad).unwrap_err();
+            assert!(
+                matches!(err, SandboxError::PathEscape(_)),
+                "read_file({bad}) must be refused: {err}"
+            );
+        }
+        for bad in [
+            "evil/tmp/sandcrab-e2e-pwned",
+            "canary/pwned.txt",
+            "dangling",
+        ] {
+            let err = ws.put_file(name.as_str(), bad, "pwned").unwrap_err();
+            assert!(
+                matches!(err, SandboxError::PathEscape(_)),
+                "put_file({bad}) must be refused: {err}"
+            );
+        }
+        assert!(!Path::new("/tmp/sandcrab-e2e-pwned").exists());
+        assert!(!canary.join("pwned.txt").exists());
+        let err = ws.list_files(name.as_str(), "evil").unwrap_err();
+        assert!(matches!(err, SandboxError::PathEscape(_)), "{err}");
+
+        // A symlink that stays inside the workspace is fine.
+        assert_eq!(ws.read_file(name.as_str(), "inside").unwrap(), b"fine\n");
+
+        // delete_file removes the link itself, never its target.
+        ws.delete_file(name.as_str(), "canary").unwrap();
+        ws.delete_file(name.as_str(), "evil").unwrap();
+        assert_eq!(
+            std::fs::read(canary.join("secret.txt")).unwrap(),
+            b"host secret\n"
+        );
+        assert!(Path::new("/etc/passwd").exists());
     })
     .await;
 }
