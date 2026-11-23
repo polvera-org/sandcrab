@@ -77,6 +77,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "anyhow"
+version = "1.0.105"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2cb931c189b85683d69a5cfad41d4d418671e1ac413dd209f3f2fc31e3cfd902"
+
+[[package]]
 name = "async-trait"
 version = "0.1.92"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1227,10 +1233,12 @@ dependencies = [
 name = "sandcrab-cli"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "clap",
- "sandcrab-core",
- "sandcrab-protocol",
  "sandcrab-sdk",
+ "serde",
+ "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -1295,9 +1303,16 @@ dependencies = [
 name = "sandcrab-sdk"
 version = "0.1.0"
 dependencies = [
+ "base64",
+ "sandcrab-backend-docker",
  "sandcrab-core",
  "sandcrab-protocol",
+ "serde",
  "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

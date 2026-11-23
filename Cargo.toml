@@ -50,12 +50,16 @@ chrono = { version = "0.4", features = ["serde"] }
 # Testing
 tempfile = "3"
 
+# Encoding (SDK upload/download helpers)
+base64 = "0.22"
+
 # Docker (DockerDev backend)
 bollard = "0.21"
 rustix = { version = "1", features = ["process"] }
 
 # CLI
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
+anyhow = "1"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
