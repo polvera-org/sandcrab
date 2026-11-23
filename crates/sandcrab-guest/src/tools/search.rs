@@ -39,6 +39,7 @@
 //!   is repeated, never shared). Unreadable files are skipped silently.
 
 mod glob_impl;
+mod grep_impl;
 mod list_impl;
 
 use std::fs;
@@ -87,8 +88,9 @@ pub async fn glob(ctx: &ToolContext, p: GlobParams) -> Result<GlobResult, Protoc
 
 /// Search file contents.
 pub async fn grep(ctx: &ToolContext, p: GrepParams) -> Result<GrepResult, ProtocolError> {
-    let _ = (ctx, p);
-    Err(super::unimplemented("grep"))
+    let root = ctx.resolve_path_or_default(p.root.as_deref());
+    let opts = grep_impl::Options::new(&p, ctx.limits.grep_max_matches)?;
+    blocking(move || grep_impl::run(&root, &opts)).await
 }
 
 /// Run blocking filesystem work off the async runtime.
