@@ -459,6 +459,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pty-process"
+version = "0.5.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5f0cff49b5194f464ce14bfaef7d6dba180889934e9bfa37ca5f2528ea515c0b"
+dependencies = [
+ "rustix",
+ "tokio",
+]
+
+[[package]]
 name = "quote"
 version = "1.0.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -563,6 +573,8 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "clap",
+ "pty-process",
+ "rustix",
  "sandcrab-protocol",
  "serde",
  "serde_json",
