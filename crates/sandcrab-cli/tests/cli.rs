@@ -312,6 +312,56 @@ fn rootfs_commands_parse() {
     assert_eq!(v, Value::Array(vec![]));
 }
 
+/// A template without a `sha256` pin is refused by default; `--allow-unpinned` opts out.
+#[test]
+#[ignore = "needs Docker, sandcrab/base:0.1.0 and a static crabd"]
+fn docker_unpinned_template_is_refused_by_default() {
+    let cli = Cli::new(true);
+    let dir = cli.state.path().join("tpl/unpinned");
+    std::fs::create_dir_all(&dir).unwrap();
+    let base = std::fs::read_to_string(root().join("templates/base/sandcrab.toml")).unwrap();
+    let manifest: String = base
+        .lines()
+        .filter(|l| !l.starts_with("sha256"))
+        .map(|l| {
+            if l.starts_with("name = ") {
+                "name = \"unpinned\"\n".to_owned()
+            } else {
+                format!("{l}\n")
+            }
+        })
+        .collect();
+    std::fs::write(dir.join("sandcrab.toml"), manifest).unwrap();
+    let tpl = cli.state.path().join("tpl");
+    let tpl = tpl.to_str().unwrap();
+
+    let out = cli.run(&[
+        "--templates-dir",
+        tpl,
+        "run",
+        "-t",
+        "unpinned",
+        "--",
+        "true",
+    ]);
+    assert_eq!(out.status.code(), Some(1));
+    let err = stderr(&out);
+    assert!(err.contains("UnpinnedImage"), "{err}");
+    assert!(err.contains("templates/build.sh --pin unpinned"), "{err}");
+
+    let out = cli.run(&[
+        "--templates-dir",
+        tpl,
+        "--allow-unpinned",
+        "run",
+        "-t",
+        "unpinned",
+        "--",
+        "true",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+}
+
 #[test]
 #[ignore = "needs Docker, sandcrab/base:0.1.0 and a static crabd"]
 fn docker_smoke_run_and_tool() {

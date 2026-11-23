@@ -51,6 +51,10 @@ pub struct DockerDevConfig {
     /// `<state root>/run` (`$SANDCRAB_HOME/run`, else `~/.sandcrab/run`).
     pub state_dir: PathBuf,
     pub limits: DockerLimits,
+    /// Run template images that have no `sha256` pin in `sandcrab.toml`. **Defaults to
+    /// `false`**: spawning an unpinned template fails with an `UnpinnedImage` error
+    /// (pin with `templates/build.sh --pin <name>`).
+    pub allow_unpinned_images: bool,
 }
 
 impl Default for DockerDevConfig {
@@ -61,6 +65,7 @@ impl Default for DockerDevConfig {
             crabd_path: default_crabd_path(),
             state_dir: default_state_dir(),
             limits: DockerLimits::default(),
+            allow_unpinned_images: false,
         }
     }
 }
@@ -214,6 +219,7 @@ mod tests {
     fn config_defaults_are_safe() {
         let c = DockerDevConfig::default();
         assert!(!c.allow_insecure_dev_backend);
+        assert!(!c.allow_unpinned_images);
         assert!(c.docker_host.is_none());
         assert!(c.crabd_path.ends_with("crabd"));
         assert!(c.state_dir.ends_with("run"));

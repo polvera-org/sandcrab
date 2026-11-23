@@ -251,7 +251,8 @@ async fn docker(g: &Global, r: &mut Report, reap: Reap) {
                 name,
                 Status::Warn,
                 format!(
-                    "{} present ({digest}) but unpinned; `sandcrab template build {}` pins it",
+                    "{} present ({digest}) but unpinned: spawns are refused without \
+                     --allow-unpinned; `sandcrab template build {}` pins it",
                     t.image(),
                     t.name()
                 ),

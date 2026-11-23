@@ -163,17 +163,23 @@ impl DockerDevBackend {
                 },
                 other => other,
             })?;
-        Ok(match status {
-            PinStatus::Verified { digest } => digest,
-            PinStatus::Unpinned { digest } => {
+        match status {
+            PinStatus::Verified { digest } => Ok(digest),
+            PinStatus::Unpinned { digest } if self.config.allow_unpinned_images => {
                 tracing::warn!(
                     template = %manifest.template.name,
                     %digest,
-                    "template image is not pinned (no sha256 in sandcrab.toml)"
+                    "running an unpinned template image (no sha256 in sandcrab.toml); \
+                     allowed by DockerDevConfig::allow_unpinned_images"
                 );
-                digest
+                Ok(digest)
             }
-        })
+            PinStatus::Unpinned { digest } => Err(unpinned_image(
+                &manifest.template.name,
+                manifest.image(),
+                &digest,
+            )),
+        }
     }
 
     /// Create `<state_dir>/<id>/` (0700; 0777 when the container runs as another uid so
@@ -286,6 +292,15 @@ impl DockerDevBackend {
             })
             .collect()
     }
+}
+
+/// Spawn refusal for a template without a `sha256` pin (`UnpinnedImage`).
+pub(crate) fn unpinned_image(template: &str, image: &str, digest: &str) -> SandboxError {
+    SandboxError::Template(format!(
+        "UnpinnedImage: template `{template}` image `{image}` (local {digest}) has no `sha256` \
+         pin in sandcrab.toml; pin it with `templates/build.sh --pin {template}`, or opt out \
+         with `--allow-unpinned` (DockerDevConfig::allow_unpinned_images)"
+    ))
 }
 
 fn io_at(path: &Path, err: io::Error) -> SandboxError {
@@ -526,6 +541,14 @@ mod tests {
             matches!(err, SandboxError::InsecureBackendRejected(_)),
             "{err}"
         );
+    }
+
+    #[test]
+    fn unpinned_image_error_names_the_fix() {
+        let e = unpinned_image("base", "sandcrab/base:0.1.0", "sha256:abc").to_string();
+        assert!(e.contains("UnpinnedImage"), "{e}");
+        assert!(e.contains("templates/build.sh --pin base"), "{e}");
+        assert!(e.contains("--allow-unpinned"), "{e}");
     }
 
     #[test]

@@ -83,6 +83,7 @@ pub fn sandcrab(g: &Global) -> anyhow::Result<Sandcrab> {
             }
             builder = builder.docker(sandcrab_sdk::DockerDevConfig {
                 crabd_path: crabd_path(g),
+                allow_unpinned_images: g.allow_unpinned,
                 ..sandcrab_sdk::DockerDevConfig::allow_insecure()
             });
         }

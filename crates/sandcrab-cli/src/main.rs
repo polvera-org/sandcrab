@@ -60,6 +60,11 @@ pub struct Global {
     #[arg(long, global = true)]
     pub allow_insecure: bool,
 
+    /// docker backend: run template images that have no `sha256` pin in sandcrab.toml
+    /// (refused by default; pin with `templates/build.sh --pin <name>`).
+    #[arg(long, global = true)]
+    pub allow_unpinned: bool,
+
     /// Host path of the static musl `crabd` (default: $SANDCRAB_CRABD, else
     /// target/<arch>-unknown-linux-musl/release/crabd).
     #[arg(long, global = true)]
