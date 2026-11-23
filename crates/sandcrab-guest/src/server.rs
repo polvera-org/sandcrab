@@ -33,7 +33,8 @@
 //!   Docker backend runs `crabd` as the host user's uid and the host connects as that same
 //!   uid through a bind-mounted directory, so owner (+ group) access is all that is needed.
 //! - TCP: unauthenticated; only bind to loopback or a private container network.
-//! - vsock (Firecracker): not yet supported; lands with `crabd init` in `guest-vsock-init`.
+//! - vsock (Firecracker, Linux only): `VMADDR_CID_ANY:<port>` via [`crate::vsock`]. The
+//!   only peer is the VMM's host-side socket, so there is no extra authentication.
 
 use std::{
     future::Future,
@@ -67,7 +68,7 @@ pub enum ListenAddr {
     Unix(PathBuf),
     /// TCP `host:port` (port `0` picks a free port; see [`Server::tcp_addr`]).
     Tcp(String),
-    /// virtio-vsock port. Not yet supported (`guest-vsock-init` step).
+    /// virtio-vsock port (Linux only).
     Vsock(u32),
 }
 
@@ -168,11 +169,15 @@ enum Listener {
         path: PathBuf,
     },
     Tcp(TcpListener),
+    #[cfg(target_os = "linux")]
+    Vsock(crate::vsock::VsockListener, u32),
 }
 
 enum Conn {
     Unix(UnixStream),
     Tcp(TcpStream, SocketAddr),
+    #[cfg(target_os = "linux")]
+    Vsock(crate::vsock::VsockStream, String),
 }
 
 impl Listener {
@@ -183,6 +188,14 @@ impl Listener {
                 let (s, peer) = listener.accept().await?;
                 s.set_nodelay(true)?;
                 Ok(Conn::Tcp(s, peer))
+            }
+            #[cfg(target_os = "linux")]
+            Self::Vsock(listener, _) => {
+                let (s, peer) = listener.accept().await?;
+                Ok(Conn::Vsock(
+                    s,
+                    format!("vsock:{}:{}", peer.cid(), peer.port()),
+                ))
             }
         }
     }
@@ -217,14 +230,10 @@ impl Server {
                 );
                 Listener::Tcp(l)
             }
-            ListenAddr::Vsock(port) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    format!(
-                        "vsock transport (port {port}) is not yet supported by this crabd build; use --unix or --tcp"
-                    ),
-                ));
-            }
+            #[cfg(target_os = "linux")]
+            ListenAddr::Vsock(port) => Listener::Vsock(crate::vsock::bind(*port)?, *port),
+            #[cfg(not(target_os = "linux"))]
+            ListenAddr::Vsock(port) => return Err(crate::vsock::unsupported(*port)),
         };
         Ok(Self {
             listener,
@@ -238,7 +247,7 @@ impl Server {
     pub fn tcp_addr(&self) -> Option<SocketAddr> {
         match &self.listener {
             Listener::Tcp(l) => l.local_addr().ok(),
-            Listener::Unix { .. } => None,
+            _ => None,
         }
     }
 
@@ -250,6 +259,8 @@ impl Server {
             Listener::Tcp(l) => l
                 .local_addr()
                 .map_or_else(|_| "tcp:?".to_owned(), |a| format!("tcp:{a}")),
+            #[cfg(target_os = "linux")]
+            Listener::Vsock(_, port) => format!("vsock:{port}"),
         }
     }
 
@@ -300,6 +311,11 @@ impl Server {
                 }),
                 Conn::Tcp(s, peer) => conns.spawn(async move {
                     serve_connection(s, handler, inflight, stop, peer.to_string()).await;
+                    drop(permit);
+                }),
+                #[cfg(target_os = "linux")]
+                Conn::Vsock(s, peer) => conns.spawn(async move {
+                    serve_connection(s, handler, inflight, stop, peer).await;
                     drop(permit);
                 }),
             };

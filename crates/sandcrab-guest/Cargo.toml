@@ -42,7 +42,7 @@ base64 = "0.22"
 tempfile = "3"
 # guest-exec deps
 # Safe killpg for process-group teardown; PTY allocation (+ setsid/controlling tty) for process_start.
-rustix = { version = "1", features = ["process"] }
+rustix = { version = "1", features = ["process", "fs"] }
 pty-process = { version = "0.5", features = ["async"] }
 # guest-search deps
 ignore = "0.4"
@@ -50,6 +50,13 @@ globset = "0.4"
 grep-searcher = "0.1"
 grep-regex = "0.1"
 grep-matcher = "0.1"
+# guest-vsock-init deps (rustix "fs" above is also used by init::export)
+tar = { version = "0.4", default-features = false }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# guest-vsock-init deps
+tokio-vsock = "0.7"
+rustix = { version = "1", features = ["fs", "process", "mount", "system", "net", "time"] }
 
 [dev-dependencies]
 tempfile = "3"
