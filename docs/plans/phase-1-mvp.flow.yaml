@@ -316,4 +316,4 @@ steps:
     title: README quickstart, protocol + tool reference, VPS/KVM host setup, crabagent usage, docs/site index
     depends_on: [review, live-check, bench-report, walkthrough, presentation-3d]
     artifacts: [README.md, docs/]
-    status: todo
+    status: done

@@ -81,12 +81,9 @@ Note on macOS local dev:
 
 ## 5. Picking Up From Here (Agent Handoff)
 
-The repository is intentionally left at a clean, scaffolded starting point so the next agent can:
-1. Confirm the 5 open decisions in `BRIEF.md` §4 / `docs/ROADMAP.md` with the user (or use the documented recommendations if approved).
-2. Plan and execute **Phase 1** incrementally:
-   - Step 1A: Finalize `sandcrab-protocol` wire framing & full `ToolCall`/`ToolResult` + `schemars` tests.
-   - Step 1B: Implement `sandcrab-guest` (`crabd`) Tier 1 & Tier 2 tools + native unit tests.
-   - Step 1C: Implement `sandcrab-core` (`WorkspaceRegistry` host-dir ops + `TemplateManifest` loader + `SandboxManager`).
-   - Step 1D: Implement `sandcrab-backend-docker` (spawning template images with injected `crabd`, workspace bind mounts, `default_cwd`, and UDS/TCP transport).
-   - Step 1E: Wire `sandcrab-sdk`, `sandcrab-cli`, and end-to-end tests against `templates/base` and `templates/python-dev`.
-3. Move to **Phase 2** (hardware microVMs: Firecracker / Cloud Hypervisor + `libkrun`).
+Phase 1 (V1) is complete on DockerDev; see [`docs/ROADMAP.md`](docs/ROADMAP.md) (V1 status) and the flow
+[`docs/plans/phase-1-mvp.flow.yaml`](docs/plans/phase-1-mvp.flow.yaml). Next agent:
+1. Bring up a KVM host (bare metal, or a VM with nested virtualization and `cpu=host`) per [`docs/hosting.md`](docs/hosting.md).
+2. Run the pending Firecracker e2e suite (`cargo test -p sandcrab-backend-firecracker -- --ignored`) and the benchmark with `--backends docker,firecracker`, then regenerate `docs/site/bench-report.html` (`scripts/bench-report-data.py`).
+3. Close the deferred review item: pack/commit workspaces through the verified root fd and have `crabd` re-check root dev/ino after start (cross-registry nesting race).
+4. Phase 2: Cloud Hypervisor + `libkrun` backends, then the egress proxy (Phase 3).
