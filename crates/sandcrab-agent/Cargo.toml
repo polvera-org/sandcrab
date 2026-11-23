@@ -1,0 +1,42 @@
+[package]
+name = "sandcrab-agent"
+description = "crabagent: a minimal coding-agent CLI that drives Claude over Sandcrab sandbox tools"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+
+[features]
+default = ["docker"]
+# DockerDev backend (`--backend docker --allow-insecure`).
+docker = ["sandcrab-sdk/docker"]
+
+[dependencies]
+sandcrab-sdk = { workspace = true, default-features = false }
+anyhow.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+clap.workspace = true
+dotenvy.workspace = true
+reqwest.workspace = true
+rustyline.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+sandcrab-core = { workspace = true, features = ["test-util"] }
+tempfile.workspace = true
+
+[lints]
+workspace = true
