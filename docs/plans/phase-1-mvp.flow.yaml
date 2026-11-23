@@ -317,3 +317,36 @@ steps:
     depends_on: [review, live-check, bench-report, walkthrough, presentation-3d]
     artifacts: [README.md, docs/]
     status: done
+
+  # --- Follow-up (human decision 2026-11-23): Docker is an officially supported backend, not dev-only ---
+  - id: docker-official
+    phase: implement
+    agent: ada
+    title: "Promote Docker to an official backend: DockerDev → Docker rename, drop the insecure opt-in, keep explicit selection + honest capabilities"
+    depends_on: [docs]
+    artifacts: [crates/, AGENTS.md]
+    status: doing
+
+  - id: docker-official-review
+    phase: verify
+    agent: nebula
+    title: Review the Docker promotion (no silent fallback, capability honesty, hardening unchanged, gates)
+    depends_on: [docker-official]
+    artifacts: []
+    status: todo
+
+  - id: site-feedback
+    phase: implement
+    agent: ada
+    title: Apply human feedback to the landing page + 3D presentation (incl. Docker positioning)
+    depends_on: [docker-official]
+    artifacts: [docs/site/landing/, docs/site/presentation.html, docs/site/presentation/]
+    status: todo
+
+  - id: docker-official-docs
+    phase: document
+    agent: rosetta
+    title: Reposition Docker as officially supported across README, docs/, walkthrough, bench report
+    depends_on: [docker-official-review]
+    artifacts: [README.md, docs/]
+    status: todo
