@@ -8,6 +8,10 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[features]
+# Expose the mock crabd test doubles (sandcrab_core::testing) to downstream tests.
+test-util = []
+
 [dependencies]
 sandcrab-protocol.workspace = true
 async-trait.workspace = true
@@ -15,8 +19,13 @@ chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 toml.workspace = true
+tracing.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true
