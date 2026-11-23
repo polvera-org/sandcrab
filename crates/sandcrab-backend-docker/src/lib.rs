@@ -4,29 +4,18 @@
 //! `hardware_isolated = false` and `multi_tenant_safe = false` so callers can never
 //! accidentally treat it as a multi-tenant production isolation boundary.
 
+mod config;
+
 use async_trait::async_trait;
 use sandcrab_core::{
     BackendCapabilities, BackendKind, NetworkConfig, NetworkPolicy, ResolvedSpec, Result,
     RuntimeBackend, SandboxError, SandboxHandle,
 };
 
-/// Configuration for [`DockerDevBackend`].
-#[derive(Debug, Clone)]
-pub struct DockerDevConfig {
-    /// Explicit acknowledgement required before spawning shared-kernel dev containers.
-    pub allow_insecure_dev_backend: bool,
-    /// Optional Docker socket URI override (defaults to local platform socket).
-    pub docker_host: Option<String>,
-}
-
-impl Default for DockerDevConfig {
-    fn default() -> Self {
-        Self {
-            allow_insecure_dev_backend: true,
-            docker_host: None,
-        }
-    }
-}
+pub use config::{
+    CRABD_ENV, DockerDevConfig, DockerLimits, check_static_crabd, default_crabd_path,
+    default_state_dir,
+};
 
 /// Phase 1 local development backend powered by Docker + `crabd`.
 #[derive(Debug, Clone)]
