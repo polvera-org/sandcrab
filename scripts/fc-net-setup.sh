@@ -8,6 +8,8 @@
 # and a dedicated nftables table `inet sandcrab` (never touches other tables, e.g. Proxmox's
 # pve-firewall or Docker's):
 #   - masquerade 172.30.0.0/16 out of the uplink;
+#   - anti-spoofing: tap <prefix>N only accepts IPv4 from its guest address 172.30.N.2
+#     (anything else, incl. all non-IPv4, from a tap is dropped before input/forward rules);
 #   - no guest -> host (input from taps: only established/related);
 #   - no guest -> guest, no guest -> private/link-local/CGNAT ranges (LAN, cloud metadata,
 #     tailnets) unless --allow-private;
@@ -188,10 +190,24 @@ private_rule=""
 if [[ $ALLOW_PRIVATE == 0 ]]; then
   private_rule="iifname \"${PREFIX}*\" ip daddr { $PRIVATE_V4 } drop"
 fi
+# Anti-spoofing: (tap, guest source) pairs; tap n's guest is 172.30.n.2 (crate: net::TapPlan).
+guest_srcs=""
+for ((n = 0; n < COUNT; n++)); do
+  guest_srcs+="${guest_srcs:+, }\"$PREFIX$n\" . 172.30.$n.2"
+done
 ruleset="$(cat <<EOF
 add table inet $TABLE
 delete table inet $TABLE
 table inet $TABLE {
+  set guest_src {
+    type ifname . ipv4_addr
+    elements = { $guest_srcs }
+  }
+  chain prerouting {
+    type filter hook prerouting priority raw; policy accept;
+    iifname "${PREFIX}*" meta nfproto != ipv4 drop
+    iifname "${PREFIX}*" iifname . ip saddr != @guest_src drop
+  }
   chain input {
     type filter hook input priority filter - 1; policy accept;
     iifname "${PREFIX}*" ct state established,related accept
