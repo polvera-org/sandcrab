@@ -3,7 +3,7 @@ window.SANDCRAB_DATA = {
  "generator": "docs/site/presentation/extract-data.py",
  "bench": {
   "file": "docs/bench/results/20261123T091401Z-dev-vps.json",
-  "sha256": "48520eafcb7101406e8bb949f37698f3dfde0b27310a16facaf473cc3bc5bdf3",
+  "sha256": "183423c224065aaa477a03fc87ef30a93bf09d72bed40132c92fb145acc27771",
   "commit": "0d85b83",
   "host": "AMD EPYC 9354P 32-Core Processor, 2 vCPU, vm",
   "kvm_available": false,
