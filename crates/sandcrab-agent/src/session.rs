@@ -27,10 +27,28 @@ pub const SSH_HOST_ENV: &str = "CRABAGENT_SSH_HOST";
 pub const DEFAULT_GUEST_WORKSPACE: &str = "/workspace";
 
 /// Values from a `.env` file (never exported into the process environment).
-#[derive(Debug, Default, Clone)]
+///
+/// `Debug` prints the keys only: values hold secrets such as `ANTHROPIC_API_KEY`.
+#[derive(Default, Clone)]
 pub struct DotEnv {
     pub path: Option<PathBuf>,
     vars: Vec<(String, String)>,
+}
+
+impl std::fmt::Debug for DotEnv {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DotEnv")
+            .field("path", &self.path)
+            .field(
+                "keys",
+                &self
+                    .vars
+                    .iter()
+                    .map(|(k, _)| k.as_str())
+                    .collect::<Vec<_>>(),
+            )
+            .finish_non_exhaustive()
+    }
 }
 
 impl DotEnv {
@@ -675,5 +693,26 @@ mod tests {
         let inner = tempfile::tempdir().unwrap();
         std::fs::create_dir(inner.path().join(".git")).unwrap();
         assert!(find_dotenv(inner.path()).is_none());
+    }
+
+    #[test]
+    fn dotenv_debug_redacts_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".env");
+        std::fs::write(
+            &path,
+            "ANTHROPIC_API_KEY=sk-ant-very-secret-value\nOTHER=hunter2\n",
+        )
+        .unwrap();
+        let d = DotEnv::load(Some(&path), dir.path()).unwrap();
+        let dbg = format!("{d:?}");
+        assert!(
+            dbg.contains("ANTHROPIC_API_KEY") && dbg.contains("OTHER"),
+            "{dbg}"
+        );
+        assert!(!dbg.contains("sk-ant-very-secret-value"), "{dbg}");
+        assert!(!dbg.contains("hunter2"), "{dbg}");
+        let alt = format!("{d:#?}");
+        assert!(!alt.contains("sk-ant") && !alt.contains("hunter2"), "{alt}");
     }
 }
