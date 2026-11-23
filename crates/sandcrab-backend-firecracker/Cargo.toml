@@ -35,5 +35,11 @@ uuid = { workspace = true, features = ["v5"] }
 sandcrab-core = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true
 
+# Spawn → API → vsock → destroy against a fake `firecracker` (this test binary re-executes
+# itself as the fake VMM, so it needs its own `main`).
+[[test]]
+name = "fake_vmm"
+harness = false
+
 [lints]
 workspace = true
