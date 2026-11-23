@@ -26,7 +26,8 @@ pub struct PromptContext {
     pub one_shot: bool,
     /// `--keep-alive` seconds the sandbox is held after a one-shot task (0 = none).
     pub keep_alive_secs: u64,
-    /// Package/browser cache dir inside a persistent workspace, if one was set up.
+    /// Package/browser cache dir inside a Sandcrab-managed workspace, if one was set up
+    /// (never inside a host directory).
     pub cache_dir: Option<String>,
 }
 

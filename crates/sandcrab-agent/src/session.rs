@@ -300,9 +300,10 @@ pub async fn run_session(
     let mut config = SandboxConfig::from_template(&opts.template);
     config.mounts.clone_from(&mounts);
     config.default_cwd = cwd.as_ref().map(PathBuf::from);
-    // Caches go into the persistent workspace at the cwd, so `npm i`, `uv sync` or a
-    // Playwright browser download survive across sessions ($HOME does not). --env wins.
-    let cache_dir = workspace_cache_dir(&mounts, cwd.as_deref());
+    // Caches go into the managed workspace at the cwd, so `npm i`, `uv sync` or a
+    // Playwright browser download survive across sessions ($HOME does not). Not into a
+    // host directory: that is the user's repo. --env wins.
+    let cache_dir = workspace_cache_dir(&ws, &mounts, cwd.as_deref());
     if let Some(dir) = &cache_dir {
         for (k, v) in cache_env(dir) {
             config.env.insert(k, v);
@@ -535,14 +536,23 @@ async fn drive(
     })
 }
 
-/// The workspace cache dir (`<cwd>/.cache`) when the cwd is a read-write mount.
+/// The workspace cache dir (`<cwd>/.cache`) when the cwd is a read-write mount of a
+/// Sandcrab-managed workspace (`ManagedDir`). A `HostDir` workspace is the user's own
+/// directory (often a git repo): caches are not redirected there.
 #[must_use]
-pub fn workspace_cache_dir(mounts: &[WorkspaceMount], cwd: Option<&str>) -> Option<String> {
+pub fn workspace_cache_dir(
+    ws: &WorkspaceClient,
+    mounts: &[WorkspaceMount],
+    cwd: Option<&str>,
+) -> Option<String> {
     let cwd = cwd?;
-    mounts
+    let m = mounts
         .iter()
-        .any(|m| m.mode == MountMode::ReadWrite && m.guest_path == Path::new(cwd))
-        .then(|| format!("{}/.cache", cwd.trim_end_matches('/')))
+        .find(|m| m.mode == MountMode::ReadWrite && m.guest_path == Path::new(cwd))?;
+    let managed = ws
+        .get(m.workspace.clone())
+        .is_ok_and(|w| matches!(w.backing, WorkspaceBacking::ManagedDir(_)));
+    managed.then(|| format!("{}/.cache", cwd.trim_end_matches('/')))
 }
 
 /// Env pointing package / browser caches at `dir`. Playwright (Linux) and pip / uv follow
@@ -767,6 +777,31 @@ pub async fn main(cli: Cli) -> anyhow::Result<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn caches_only_in_managed_workspaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = WorkspaceClient::open(dir.path().join("state")).unwrap();
+        ws.create("site").unwrap();
+        std::fs::create_dir_all(dir.path().join("repo")).unwrap();
+        let repo = ensure_host_workspace(&ws, &dir.path().join("repo")).unwrap();
+        let mount = |name: &str, guest: &str, mode| WorkspaceMount {
+            workspace: WorkspaceRef::parse(name),
+            guest_path: PathBuf::from(guest),
+            mode,
+        };
+        let managed = [mount("site", "/workspace", MountMode::ReadWrite)];
+        assert_eq!(
+            workspace_cache_dir(&ws, &managed, Some("/workspace/")).as_deref(),
+            Some("/workspace/.cache")
+        );
+        let host = [mount(&repo, "/workspace", MountMode::ReadWrite)];
+        assert_eq!(workspace_cache_dir(&ws, &host, Some("/workspace")), None);
+        let ro = [mount("site", "/workspace", MountMode::ReadOnly)];
+        assert_eq!(workspace_cache_dir(&ws, &ro, Some("/workspace")), None);
+        assert_eq!(workspace_cache_dir(&ws, &managed, Some("/elsewhere")), None);
+        assert_eq!(workspace_cache_dir(&ws, &managed, None), None);
+    }
 
     #[test]
     fn mount_host_reuses_and_refuses_overlap() {
