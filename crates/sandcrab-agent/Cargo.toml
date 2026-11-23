@@ -11,6 +11,9 @@ authors.workspace = true
 [lib]
 path = "src/lib.rs"
 
+[[bin]]
+name = "crabagent"
+path = "src/main.rs"
 
 [features]
 default = ["docker"]
