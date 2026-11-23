@@ -173,6 +173,63 @@ impl From<UserSpec> for String {
     }
 }
 
+/// A secret to inject into the sandbox. **Reserved for Phase 3**: the type is stable so
+/// configs can be written against it, but every V1 backend (and the manager) rejects a
+/// non-empty `secrets` list rather than ignoring it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecretSpec {
+    /// Environment variable name the secret is exposed as inside the guest.
+    pub name: String,
+    pub source: SecretSource,
+}
+
+/// Where a [`SecretSpec`] value comes from on the host. Never serialized with its value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SecretSource {
+    /// Read from a host environment variable at spawn.
+    HostEnv { var: String },
+    /// Read from a host file at spawn.
+    File { path: std::path::PathBuf },
+}
+
+/// A guest TCP port to publish on host loopback (dev-server previews).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PortSpec {
+    pub guest: u16,
+}
+
+/// A published port: guest port and the host loopback address it is reachable at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PublishedPort {
+    pub guest: u16,
+    pub host: std::net::SocketAddr,
+}
+
+/// Per-sandbox overrides of the template's [`crate::ResourceLimits`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ResourceOverrides {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vcpu: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_mb: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_mb: Option<u64>,
+}
+
+impl ResourceOverrides {
+    /// Apply onto the template limits and validate the result.
+    pub fn apply(&self, base: &crate::ResourceLimits) -> Result<crate::ResourceLimits> {
+        let merged = crate::ResourceLimits {
+            vcpu: self.vcpu.unwrap_or(base.vcpu),
+            memory_mb: self.memory_mb.unwrap_or(base.memory_mb),
+            disk_mb: self.disk_mb.unwrap_or(base.disk_mb),
+        };
+        merged.validate()?;
+        Ok(merged)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,6 +277,41 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    #[test]
+    fn resource_overrides() {
+        let base = crate::ResourceLimits::default();
+        let merged = ResourceOverrides {
+            vcpu: Some(4),
+            ..Default::default()
+        }
+        .apply(&base)
+        .unwrap();
+        assert_eq!(merged.vcpu, 4);
+        assert_eq!(merged.memory_mb, base.memory_mb);
+        assert!(
+            ResourceOverrides {
+                memory_mb: Some(1),
+                ..Default::default()
+            }
+            .apply(&base)
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn secret_spec_shape() {
+        let s = SecretSpec {
+            name: "API_KEY".into(),
+            source: SecretSource::HostEnv {
+                var: "MY_KEY".into(),
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(&s).unwrap(),
+            serde_json::json!({"name": "API_KEY", "source": {"kind": "host_env", "var": "MY_KEY"}})
+        );
     }
 
     #[test]
