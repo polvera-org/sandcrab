@@ -199,20 +199,58 @@ sudo scripts/fc-net-setup.sh --uninstall                     # remove taps, tabl
 | `--prefix P` | `sctap` | Tap name prefix |
 | `--uplink IF` | the default route's interface | Interface used for masquerading |
 | `--allow-private` | off | Allow guests to reach private, link-local and CGNAT ranges |
-| `--persist` | off | Install a root-owned copy at `/usr/local/sbin/sandcrab-fc-net-setup` plus a systemd oneshot that runs it at boot (taps vanish on reboot) |
+| `--allow-smtp` | off | Allow outbound SMTP (tcp 25, 465, 587). Only for hosts allowed to send mail, see below |
+| `--persist` | off | Install a root-owned copy at `/usr/local/sbin/sandcrab-fc-net-setup` plus a systemd oneshot that runs it at boot and again whenever Docker restarts (taps vanish on reboot) |
 | `--dry-run` | off | Print instead of executing |
 | `--uninstall` | | Remove everything it installed |
 
 What it sets up: tap `sctapN` gets host `172.30.N.1/30` and guest `172.30.N.2`; a dedicated
-nftables table `inet sandcrab` (no other tables are touched) masquerades
-`172.30.0.0/16`, drops spoofed source addresses, blocks guest → host, guest → guest, and
-guest → private / link-local / CGNAT ranges (LAN, cloud metadata, tailnets) unless
-`--allow-private`; `net.ipv4.ip_forward=1`; and, if Docker's `DOCKER-USER` chain exists,
-ACCEPT rules for tap traffic there. Verify:
+nftables table `inet sandcrab` (no other tables are touched) that masquerades
+`172.30.0.0/16` and enforces the egress policy below; `net.ipv4.ip_forward=1`; and, if
+Docker's `DOCKER-USER` chain exists, ACCEPT rules for tap traffic there.
+
+#### Egress policy
+
+Guests with `unrestricted` networking get IPv4 internet access and nothing else:
+
+| Blocked | Why | Override |
+| --- | --- | --- |
+| Spoofed source addresses (tap N only accepts `172.30.N.2`), all non-IPv4 traffic (so no IPv6) | A guest must not impersonate another guest or the host | none |
+| Guest → host (every host address, incl. the tap gateway, the public IP and `docker0`); only replies to host-initiated traffic | Host services are not part of the sandbox | none |
+| Guest → guest | Sandboxes are isolated from each other | none |
+| `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `169.254.0.0/16`, `100.64.0.0/10` | LAN, Docker networks, cloud metadata (`169.254.169.254`), CGNAT and tailnets | `--allow-private` |
+| The uplink's own network: its on-link subnet(s) and default gateway, read from the routing table at each run | On a dedicated server these are public addresses (the provider's subnet and router), so the ranges above miss them. They are still the host's LAN: neighbouring servers and the provider's router | `--allow-private` |
+| `0.0.0.0/8`, `192.0.0.0/24`, `192.0.2.0/24`, `198.18.0.0/15`, `198.51.100.0/24`, `203.0.113.0/24`, `224.0.0.0/4` (multicast), `240.0.0.0/4` (class E, incl. `255.255.255.255`) | Reserved / special-purpose ranges (RFC 6890): nothing legitimate lives there, and they can reach odd places on some networks | none |
+| Outbound SMTP, tcp `25`, `465`, `587` (rejected with a TCP reset, so mailers fail fast) | Spam from a sandbox goes out from the host's IP. That gets the IP blocklisted and dedicated servers suspended by their provider | `--allow-smtp` |
+
+Use `--allow-smtp` only when the host is allowed to send mail and you trust the workloads.
+The drop / reject rules have counters: `sudo nft list chain inet sandcrab forward` shows
+how often each one hit.
+
+#### Docker coexistence
+
+All the blocks live in Sandcrab's own nftables table at priority `filter - 1`, so they run
+before Docker's (iptables-nft) filter chains, and an nftables drop is final. Docker cannot
+re-open anything, even when it rebuilds its rules on restart. The only part that depends on
+Docker is connectivity: Docker sets the `FORWARD` policy to DROP, so guests need the two
+`DOCKER-USER` ACCEPT rules. If they were lost, guests would lose internet access (fail
+closed), not gain access.
+
+To keep those rules in place, the `--persist` unit is tied to `docker.service`:
+`After=docker.service`, `PartOf=docker.service` (a `systemctl restart` or `stop` of Docker
+is propagated to the unit) and `WantedBy=docker.service` (every start of Docker, including
+an automatic restart after a crash, starts the unit again). Each start re-runs the setup,
+which is idempotent and safe with running guests: taps are kept, the table is swapped
+atomically and conntrack state survives the swap. On hosts without Docker the unit has no
+Docker coupling.
+
+Verify:
 
 ```sh
 ip -br link show type tun | grep sctap ; cat /sys/class/net/sctap0/owner
 sudo nft list table inet sandcrab
+sudo iptables -S DOCKER-USER                      # only on Docker hosts
+systemctl show sandcrab-fc-net -p PartOf -p WantedBy
 ```
 
 `--persist` installs a root-owned copy on purpose: a root unit that executes a file the
