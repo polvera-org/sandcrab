@@ -69,6 +69,24 @@ cargo clippy --workspace --all-targets -- -D warnings
 Note on macOS local dev:
 - `crabd` runs inside Linux containers/microVMs; cross-compile via `x86_64-unknown-linux-musl` / `aarch64-unknown-linux-musl` (or build inside a multi-stage Docker template stage) while unit-testing `sandcrab-guest` tool modules natively on macOS.
 
+### Disk hygiene (clean up after yourself)
+
+This repo is heavy on disk: Rust `target/` dirs (several GB each), template images, rootfs images, and Docker
+build cache. Dev machines can run out of space mid-task, which breaks Docker and every tool at once. So:
+
+- **Check free space** (`df -h .`) before large builds, image builds or benchmarks, and again every so often in long
+  tasks. If it drops below ~15 GB, clean up before you continue.
+- **Share one build dir.** Parallel worktrees should not each build a full `target/`. Point them at a shared
+  `CARGO_TARGET_DIR`, or delete a worktree's `target/` once its step is merged.
+- **Remove what you created when you're done:** merged worktrees (`git worktree remove`), scratch rootfs/ext4 images,
+  stopped test containers, and dangling images.
+- **Prune Docker regularly:** `docker system df`, then `docker builder prune -f` and `docker image prune -f`. Only use
+  `docker system prune -a` when no pinned template images are needed. Never remove volumes or images you didn't create
+  without asking.
+- **Clear tool caches when space is tight:** `cargo clean -p <crate>` for stale crates, `brew cleanup -s`,
+  `npm cache clean --force`, `uv cache clean`.
+- Never delete anything outside build output, caches and your own scratch files without asking the human.
+
 ---
 
 ## 4. Git & Commit Conventions
