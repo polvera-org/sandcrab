@@ -10,6 +10,7 @@
 //!   `hello` / `ping`, graceful shutdown.
 //! - [`context`] — [`ToolContext`] shared by every tool call (default cwd, limits, processes).
 //! - [`tools`] — [`tools::dispatch`] plus one module per tool family.
+//! - [`tunnel`] — `tunnel.open`: raw relay to a guest loopback TCP port.
 //! - [`vsock`] — AF_VSOCK listener (Linux only).
 //! - [`init`] — `crabd init`, PID 1 of a microVM (control port, mounts, workspace export).
 
@@ -18,10 +19,12 @@ pub mod context;
 pub mod init;
 pub mod server;
 pub mod tools;
+pub mod tunnel;
 pub mod vsock;
 
 pub use context::{Limits, ToolContext};
 pub use server::{ListenAddr, Server, ServerConfig};
+pub use tunnel::TunnelConfig;
 
 /// `crabd` build version reported by `hello`.
 pub const CRABD_VERSION: &str = env!("CARGO_PKG_VERSION");
