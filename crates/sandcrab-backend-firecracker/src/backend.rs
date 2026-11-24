@@ -479,10 +479,17 @@ impl RuntimeBackend for FirecrackerBackend {
             let (api, sync) = self.spawn_vm(spec, &mut vm).await?;
             let connector = Arc::new(VsockConnector::new(vm.vsock(), DEFAULT_TOOLS_PORT));
             // Published ports: 127.0.0.1 listeners → `tunnel.open` over vsock (design §6).
+            // Firecracker's vsock bridge does not preserve half-close (measured on KVM): a
+            // host-side SHUT_WR becomes a full close (the guest's reply would be lost) and a
+            // guest-side SHUT_WR never reaches the host. So the client's half-close is not
+            // forwarded; request/response still works.
             let ports = PortForwards::bind(
                 Arc::clone(&connector) as Arc<dyn Connector>,
                 &spec.ports,
-                ForwarderConfig::default(),
+                ForwarderConfig {
+                    forward_half_close: false,
+                    ..ForwarderConfig::default()
+                },
                 vm.vmm.map(vmm_gone),
             )
             .await?;

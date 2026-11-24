@@ -859,21 +859,23 @@ async fn echo_server() -> u16 {
     port
 }
 
-/// Send `data`, half-close, read the echo to EOF.
+/// Send `data` and read exactly as many bytes back. No half-close: the Firecracker backend
+/// does not forward the client's `SHUT_WR` (its vsock bridge would make it a full close), so
+/// an echo-until-EOF exchange never ends there by design.
 async fn echo_round_trip(addr: std::net::SocketAddr, data: &[u8]) -> Vec<u8> {
     let s = tokio::net::TcpStream::connect(addr).await.unwrap();
     let (mut r, mut w) = s.into_split();
     let data = data.to_vec();
+    let mut back = vec![0u8; data.len()];
     let writer = tokio::spawn(async move {
         w.write_all(&data).await.unwrap();
-        w.shutdown().await.unwrap();
+        w
     });
-    let mut back = Vec::new();
-    tokio::time::timeout(Duration::from_secs(10), r.read_to_end(&mut back))
+    tokio::time::timeout(Duration::from_secs(10), r.read_exact(&mut back))
         .await
         .expect("echo within 10 s")
         .unwrap();
-    writer.await.unwrap();
+    drop(writer.await.unwrap());
     back
 }
 
@@ -889,7 +891,7 @@ async fn port_closed(addr: std::net::SocketAddr) -> bool {
 }
 
 /// Published ports over vsock `CONNECT 1024` + `tunnel.open`, with network `disabled`: data
-/// and half-close go through, a port nothing listens on refuses per connection, destroy and a
+/// goes through (1 MiB, length-framed), a port nothing listens on refuses per connection, destroy and a
 /// VMM crash close the listeners.
 async fn published_ports_forward_over_vsock() {
     let e = env();
