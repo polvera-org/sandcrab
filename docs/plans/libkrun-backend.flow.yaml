@@ -156,7 +156,7 @@ steps:
     agent: ada
     title: Same suite on kvm-dedicated (x86_64 KVM); verify virtio-fs ownership as unprivileged user, cgroup leaf; fix gaps
     depends_on: [lk-e2e-macos]
-    status: todo
+    status: doing
 
   # ---- benchmarks: microVMs vs Docker on bare metal (kvm-dedicated) + the Mac backends
   - id: kvm-net
@@ -190,7 +190,7 @@ steps:
     title: "Bench on the Mac (M2, macOS): --backends docker,libkrun (Docker Desktop vs libkrun microVMs)"
     depends_on: [lk-e2e-macos]
     artifacts: [docs/bench/results/]
-    status: todo
+    status: doing
 
   - id: lk-bench-kvm
     phase: implement
