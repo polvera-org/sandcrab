@@ -5,140 +5,115 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Sandcrab Repo Walkthrough</title>
 <meta name="description" content="A guided tour of the Sandcrab V1 codebase for new contributors: crates, the life of a tool call, the life of a sandbox, workspaces, security invariants, templates and where to start.">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<meta name="color-scheme" content="light">
+<meta name="theme-color" content="#FAFAF7">
+<link rel="icon" href="assets/brand/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="assets/brand/favicon-32.png" type="image/png" sizes="32x32">
+<link rel="apple-touch-icon" href="assets/brand/apple-touch-icon.png" sizes="180x180">
+<link rel="stylesheet" href="assets/brand/brand.css">
+<script src="assets/brand/theme.js"></script>
 <style>
+/* page tokens (brand.css provides the palette) */
 :root {
-  --sand-50:#F5ECD9; --sand-200:#E8D5B0; --teal-900:#0B2F38; --teal-700:#0F4C5C; --teal-500:#1F7A8C; --coral:#FF6B4A;
-  --bg:#F8F2E6; --surface:#FFFCF6; --surface-2:#F5ECD9; --ink:#0B2F38; --ink-2:#3C5A62; --line:#E2D3B4;
-  --accent:#D9472A; --accent-soft:#FFE3DA; --link:#0F4C5C; --teal:#1F7A8C; --teal-soft:#DCEDEF;
-  --glyph-ink:#0B2F38; --glyph-fill:#F5ECD9;
-  --code-bg:#0B2F38; --code-ink:#E9F1EF; --code-dim:#8FB0B5; --code-kw:#FFB59E; --code-str:#B8E3C9; --code-com:#7F9DA3; --code-ty:#9ED8E3;
-  --ok:#1E7A4C; --no:#B3361E; --warn:#9A6A00;
-  --shadow:0 1px 2px rgba(11,47,56,.06),0 8px 24px rgba(11,47,56,.07);
-  color-scheme: light;
+  --glyph-ink:var(--ink); --glyph-fill:var(--bg);
+  --code-ty:#8FD0DC; --code-dim2:#6F7C80;
+  --no:var(--rust-text);
 }
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    --bg:#0A1B20; --surface:#10262D; --surface-2:#163239; --ink:#E9F1EF; --ink-2:#A9BFC0; --line:#21414A;
-    --accent:#FF8466; --accent-soft:#3A2420; --link:#7CC6D4; --teal:#5FB3C3; --teal-soft:#14353D;
-    --glyph-ink:#E9F1EF; --glyph-fill:#10262D;
-    --code-bg:#061216; --code-ink:#E9F1EF; --code-dim:#8FB0B5; --code-kw:#FFB59E; --code-str:#B8E3C9; --code-com:#6E8C92; --code-ty:#9ED8E3;
-    --ok:#5FD39A; --no:#FF8466; --warn:#E8C15A;
-    --shadow:0 1px 2px rgba(0,0,0,.3),0 8px 24px rgba(0,0,0,.25);
-    color-scheme: dark;
-  }
-}
-:root[data-theme="dark"] {
-  --bg:#0A1B20; --surface:#10262D; --surface-2:#163239; --ink:#E9F1EF; --ink-2:#A9BFC0; --line:#21414A;
-  --accent:#FF8466; --accent-soft:#3A2420; --link:#7CC6D4; --teal:#5FB3C3; --teal-soft:#14353D;
-  --glyph-ink:#E9F1EF; --glyph-fill:#10262D;
-  --code-bg:#061216; --code-ink:#E9F1EF; --code-dim:#8FB0B5; --code-kw:#FFB59E; --code-str:#B8E3C9; --code-com:#6E8C92; --code-ty:#9ED8E3;
-  --ok:#5FD39A; --no:#FF8466; --warn:#E8C15A;
-  --shadow:0 1px 2px rgba(0,0,0,.3),0 8px 24px rgba(0,0,0,.25);
-  color-scheme: dark;
-}
-* { box-sizing:border-box; }
-html { scroll-behavior:smooth; scroll-padding-top:72px; }
+:root[data-theme="dark"] { --code-ty:#9ED6DF; }
+html { scroll-behavior:smooth; }
 @media (prefers-reduced-motion: reduce) { html { scroll-behavior:auto; } }
-body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.65 Inter, system-ui, -apple-system, "Segoe UI", sans-serif; -webkit-font-smoothing:antialiased; overflow-x:hidden; }
-h1,h2,h3,h4 { font-family:"Space Grotesk", Inter, system-ui, sans-serif; letter-spacing:-.01em; line-height:1.18; margin:0; }
-a { color:var(--link); text-underline-offset:2px; }
-p { margin:0 0 14px; }
-code { font:13px/1.4 "JetBrains Mono", ui-monospace, Menlo, monospace; background:var(--surface-2); border:1px solid var(--line); border-radius:6px; padding:1px 5px; overflow-wrap:anywhere; }
+body { overflow-x:clip; }
+h1,h2,h3,h4 { margin:0; }
+p { margin:0 0 16px; }
 strong { font-weight:600; }
-
-/* top bar */
-.top { position:sticky; top:0; z-index:20; background:color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px); border-bottom:1px solid var(--line); }
-.top-in { max-width:1240px; margin:0 auto; padding:10px 24px; display:flex; align-items:center; justify-content:space-between; gap:12px; }
-.brand { display:flex; gap:10px; align-items:center; font-family:"Space Grotesk",sans-serif; font-weight:700; font-size:18px; color:var(--ink); text-decoration:none; }
-.brand small { font:500 13px/1 Inter, sans-serif; color:var(--ink-2); }
-.btn { font:500 14px/1 Inter, system-ui, sans-serif; color:var(--ink); background:var(--surface); border:1px solid var(--line); border-radius:999px; padding:9px 14px; cursor:pointer; }
-.btn:hover { border-color:var(--teal); }
-.btn:focus-visible, a:focus-visible, summary:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
+:not(pre) > code { overflow-wrap:anywhere; }
 
 /* glyphs */
-.glyph { display:inline-grid; place-items:center; width:44px; height:44px; border-radius:12px; background:var(--surface-2); border:1px solid var(--line); flex:none; }
+.glyph { display:inline-grid; place-items:center; width:44px; height:44px; border-radius:12px; background:var(--bg-2); flex:none; }
 .glyph.sm { width:28px; height:28px; border-radius:8px; }
 .glyph.lg { width:64px; height:64px; border-radius:16px; }
 .glyph-svg { width:80%; height:80%; color:var(--glyph-ink); }
 .glyph-svg [fill="#F5ECD9"] { fill:var(--glyph-fill); }
+.glyph-svg [stroke="#F5ECD9"] { stroke:var(--glyph-fill); }
+.glyph-svg [fill="#FF6B4A"] { fill:var(--rust); }
+.glyph-svg [stroke="#FF6B4A"] { stroke:var(--rust); }
+.glyph-svg [fill="#1F7A8C"] { fill:var(--teal); }
 
 /* hero */
-.hero { max-width:1240px; margin:0 auto; padding:48px 24px 24px; display:grid; grid-template-columns:minmax(0,1.1fr) minmax(0,.9fr); gap:40px; align-items:center; }
-.eyebrow { margin:0 0 8px; font-size:12px; font-weight:600; text-transform:uppercase; letter-spacing:.09em; color:var(--accent); }
-.hero h1 { font-size:clamp(34px,5vw,56px); margin-bottom:16px; }
-.hero .lede { font-size:18px; color:var(--ink-2); max-width:60ch; }
-.facts { display:flex; flex-wrap:wrap; gap:8px; margin-top:20px; }
-.fact { font-size:13px; font-weight:500; background:var(--surface); border:1px solid var(--line); border-radius:999px; padding:5px 12px; color:var(--ink-2); }
-.fact b { color:var(--ink); font-weight:600; }
-.stage { position:relative; aspect-ratio:4/3; border-radius:20px; background:var(--surface); border:1px solid var(--line); box-shadow:var(--shadow); overflow:hidden; }
-.stage img { width:100%; height:100%; object-fit:cover; display:block; }
-.stage .cap { position:absolute; left:12px; bottom:12px; font-size:12.5px; background:color-mix(in srgb, var(--surface) 90%, transparent); border:1px solid var(--line); border-radius:999px; padding:4px 10px; color:var(--ink-2); }
+.hero { max-width:1280px; margin:0 auto; padding:clamp(40px,6vw,88px) var(--gutter) clamp(40px,5vw,72px); display:grid; grid-template-columns:minmax(0,1.15fr) minmax(0,.85fr); gap:clamp(32px,4vw,64px); align-items:end; }
+.eyebrow { margin:0 0 18px; }
+.eyebrow code { font-size:1em; letter-spacing:0; text-transform:none; }
+.hero h1 { font-size:clamp(40px,6vw,88px); font-stretch:78%; line-height:.9; letter-spacing:-.01em; text-transform:uppercase; margin-bottom:24px; }
+.hero .lede { font-size:clamp(17px,1.5vw,20px); line-height:1.55; color:var(--ink-2); max-width:36em; }
+.facts { display:flex; flex-wrap:wrap; gap:8px; margin-top:28px; }
+.fact { font:400 12px/1.3 var(--mono); text-transform:uppercase; letter-spacing:.08em; border:1.5px solid var(--line-2); border-radius:999px; padding:8px 14px; color:var(--ink-2); }
+.fact b { color:var(--ink); font-weight:500; }
+.fact code { background:none; padding:0; font-size:1em; text-transform:none; }
+.stage { position:relative; aspect-ratio:4/3; border-radius:14px; background:var(--bg-2); box-shadow:var(--shadow); overflow:hidden; }
+.stage img { width:100%; height:100%; object-fit:cover; display:block; filter:var(--img-filter); }
+.stage .cap { position:absolute; left:12px; bottom:12px; right:12px; width:max-content; max-width:calc(100% - 24px); font:400 11px/1.4 var(--mono); text-transform:uppercase; letter-spacing:.1em; background:color-mix(in srgb, var(--bg) 90%, transparent); border-radius:999px; padding:6px 12px; color:var(--ink-2); }
 .stage canvas { display:block; }
 
 /* layout */
-.layout { max-width:1240px; margin:0 auto; padding:8px 24px 64px; display:grid; grid-template-columns:240px minmax(0,1fr); gap:48px; }
-.toc { position:sticky; top:76px; align-self:start; max-height:calc(100vh - 96px); overflow:auto; padding:6px 4px 12px 0; scrollbar-width:thin; scrollbar-color:var(--line) transparent; }
-.toc::-webkit-scrollbar { width:6px; } .toc::-webkit-scrollbar-thumb { background:var(--line); border-radius:6px; }
-.toc h2 { font:600 12px/1 Inter, sans-serif; text-transform:uppercase; letter-spacing:.09em; color:var(--ink-2); margin:6px 0 12px; }
-.toc ol { list-style:none; margin:0; padding:0; counter-reset:t; }
-.toc li { margin:0; }
-.toc a { display:flex; gap:10px; align-items:center; padding:7px 10px; border-radius:10px; text-decoration:none; color:var(--ink-2); font-size:14px; line-height:1.3; border:1px solid transparent; }
-.toc a:hover { background:var(--surface); color:var(--ink); }
-.toc a.active { background:var(--surface); border-color:var(--line); color:var(--ink); font-weight:600; }
-.toc a.active:hover { background:var(--surface); }
-.toc .n { font:500 11.5px/1 "JetBrains Mono", monospace; color:var(--accent); min-width:18px; }
+.layout { max-width:1280px; margin:0 auto; padding:0 var(--gutter); display:grid; grid-template-columns:220px minmax(0,1fr); gap:clamp(40px,5vw,80px); }
+.toc { position:sticky; top:calc(var(--bar-h) + 16px); align-self:start; max-height:calc(100vh - var(--bar-h) - 32px); overflow:auto; padding:0 4px 12px 0; border-top:2px solid var(--ink); scrollbar-width:thin; scrollbar-color:var(--line-2) transparent; }
+.toc::-webkit-scrollbar { width:6px; } .toc::-webkit-scrollbar-thumb { background:var(--line-2); border-radius:6px; }
+.toc h2 { font:400 11.5px/1.4 var(--mono); text-transform:uppercase; letter-spacing:.16em; color:var(--ink-3); margin:14px 0 6px; }
+.toc ol { list-style:none; margin:0; padding:0; }
+.toc li { margin:0; border-bottom:1px solid var(--line); }
+.toc a { display:flex; gap:12px; align-items:baseline; padding:10px 0 10px 2px; text-decoration:none; color:var(--ink-2); font-size:14.5px; line-height:1.3; box-shadow:inset 0 0 0 transparent; transition:color .15s, box-shadow .15s, padding .15s; }
+.toc a:hover { color:var(--ink); }
+.toc a.active, .toc a.active:hover { color:var(--ink); font-weight:600; box-shadow:inset 3px 0 0 var(--rust); padding-left:12px; }
+.toc .n { font:400 11px/1 var(--mono); letter-spacing:.06em; color:var(--rust-text); min-width:18px; }
 .toc-mobile { display:none; }
 
-main { min-width:0; max-width:820px; }
-section.chap { padding:28px 0 20px; border-top:1px solid var(--line); }
-section.chap:first-child { border-top:0; padding-top:8px; }
-.chap-head { display:flex; gap:14px; align-items:center; margin-bottom:18px; }
-.chap-head h2 { font-size:clamp(24px,3.2vw,32px); }
-.chap-head .num { font:500 12px/1 "JetBrains Mono", monospace; color:var(--accent); display:block; margin-bottom:4px; }
-h3 { font-size:19px; margin:26px 0 10px; }
-h4 { font-size:16px; margin:18px 0 8px; }
+.content { min-width:0; max-width:820px; }
+section.chap { padding:28px 0 40px; border-top:2px solid var(--ink); }
+.chap-head { display:flex; gap:18px; align-items:center; margin-bottom:24px; }
+.chap-head h2 { font-size:clamp(30px,3.6vw,48px); font-weight:800; font-stretch:86%; letter-spacing:-.03em; line-height:.98; }
+.chap-head .num { font:400 11.5px/1 var(--mono); letter-spacing:.16em; color:var(--rust-text); display:block; margin-bottom:8px; }
+h3 { font-size:22px; margin:36px 0 12px; }
+h4 { font-size:17px; margin:20px 0 8px; }
 .muted { color:var(--ink-2); }
-ul.tight, ol.tight { padding-left:20px; margin:0 0 14px; } ul.tight li, ol.tight li { margin:4px 0; }
+ul.tight, ol.tight { padding-left:20px; margin:0 0 16px; } ul.tight li, ol.tight li { margin:5px 0; }
+.see-also { margin:0; padding:20px 0 0; border-top:1px solid var(--line); color:var(--ink-2); font-size:15px; }
 
 /* refs */
-a.ref { font:12.5px/1.4 "JetBrains Mono", ui-monospace, monospace; color:var(--link); background:var(--teal-soft); border-radius:6px; padding:1px 6px; text-decoration:none; overflow-wrap:anywhere; white-space:normal; }
+a.ref { font:12.5px/1.4 var(--mono); color:var(--teal-text); background:var(--teal-soft); border-radius:6px; padding:1px 6px; text-decoration:none; overflow-wrap:anywhere; white-space:normal; }
 a.ref:hover { text-decoration:underline; }
 
 /* code */
-figure.code { margin:14px 0 20px; border-radius:14px; overflow:hidden; background:var(--code-bg); border:1px solid color-mix(in srgb, var(--line) 50%, transparent); }
-figure.code figcaption { display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap; align-items:center; padding:8px 14px; font:500 12px/1.4 "JetBrains Mono", monospace; color:var(--code-dim); border-bottom:1px solid rgba(255,255,255,.08); }
-figure.code figcaption a { color:#9ED8E3; text-decoration:none; overflow-wrap:anywhere; }
+figure.code { margin:16px 0 24px; border-radius:14px; overflow:hidden; background:var(--code-bg); }
+figure.code figcaption { display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap; align-items:center; padding:10px 18px; font:400 11.5px/1.4 var(--mono); letter-spacing:.02em; color:var(--code-dim); border-bottom:1px solid var(--code-line); }
+figure.code figcaption span { text-transform:uppercase; letter-spacing:.14em; font-size:10.5px; }
+figure.code figcaption a { color:var(--c-str); text-decoration:none; overflow-wrap:anywhere; }
 figure.code figcaption a:hover { text-decoration:underline; }
-pre { margin:0; padding:14px 16px; overflow-x:auto; font:12.8px/1.55 "JetBrains Mono", ui-monospace, Menlo, monospace; color:var(--code-ink); tab-size:4; scrollbar-width:thin; scrollbar-color:#2c5560 transparent; }
-pre::-webkit-scrollbar { height:8px; } pre::-webkit-scrollbar-thumb { background:#2c5560; border-radius:8px; }
-pre .k { color:var(--code-kw); } pre .s { color:var(--code-str); } pre .c { color:var(--code-com); font-style:italic; } pre .t { color:var(--code-ty); } pre .e { color:var(--code-dim); }
+pre { margin:0; padding:16px 20px; overflow-x:auto; font:13px/1.65 var(--mono); color:var(--code-ink); tab-size:4; scrollbar-width:thin; scrollbar-color:var(--code-line) transparent; }
+pre::-webkit-scrollbar { height:8px; } pre::-webkit-scrollbar-thumb { background:var(--code-line); border-radius:8px; }
+pre .k { color:var(--c-key); } pre .s { color:var(--c-str); } pre .c { color:var(--c-com); font-style:italic; } pre .t { color:var(--code-ty); } pre .e { color:var(--code-dim); }
 
-/* cards, callouts */
-.callout { display:flex; gap:14px; align-items:flex-start; background:var(--surface); border:1px solid var(--line); border-left:4px solid var(--teal); border-radius:12px; padding:14px 16px; margin:16px 0; }
-.callout.warn { border-left-color:var(--accent); }
+/* callouts, cards: rules, not boxes */
+.callout { display:flex; gap:16px; align-items:flex-start; border-top:2px solid var(--teal); padding:16px 0 4px; margin:24px 0; }
+.callout.warn { border-top-color:var(--rust); }
 .callout p:last-child { margin-bottom:0; }
 .callout .glyph { width:40px; height:40px; }
-.symbol { display:flex; gap:12px; align-items:center; margin:4px 0 16px; padding:10px 12px; background:var(--surface); border:1px solid var(--line); border-radius:12px; font-size:14.5px; color:var(--ink-2); }
+.symbol { display:flex; gap:14px; align-items:center; margin:4px 0 20px; padding:12px 0; border-top:1px solid var(--line); border-bottom:1px solid var(--line); font-size:15px; color:var(--ink-2); }
 .symbol b { color:var(--ink); }
-.pair { display:grid; grid-template-columns:1fr 1fr; gap:16px; margin:16px 0; }
-.card { background:var(--surface); border:1px solid var(--line); border-radius:14px; padding:16px; box-shadow:var(--shadow); min-width:0; }
+.pair { display:grid; grid-template-columns:1fr 1fr; gap:24px; margin:20px 0; }
+.card { border-top:2px solid var(--ink); padding-top:16px; min-width:0; }
 .card h4 { margin-top:0; display:flex; gap:10px; align-items:center; }
 .card ul { margin:0; padding-left:18px; font-size:14.5px; color:var(--ink-2); }
-.card ul li { margin:3px 0; }
-.art { margin:16px 0; border-radius:16px; overflow:hidden; border:1px solid var(--line); background:var(--surface); }
-.art img { display:block; width:100%; height:auto; aspect-ratio:16/7; object-fit:cover; }
-.art figcaption { padding:8px 14px; font-size:13px; color:var(--ink-2); }
+.card ul li { margin:4px 0; }
+.art { margin:20px 0; }
+.art img { display:block; width:100%; height:auto; aspect-ratio:16/7; object-fit:cover; border-radius:14px; background:var(--bg-2); box-shadow:var(--shadow); filter:var(--img-filter); }
+.art figcaption { padding:12px 2px 0; font:400 11.5px/1.5 var(--mono); text-transform:uppercase; letter-spacing:.1em; color:var(--ink-3); }
 
 /* tables */
-.tbl { overflow-x:auto; margin:14px 0 20px; border:1px solid var(--line); border-radius:12px; background:var(--surface); scrollbar-width:thin; scrollbar-color:var(--line) transparent; }
-.tbl::-webkit-scrollbar { height:8px; } .tbl::-webkit-scrollbar-thumb { background:var(--line); border-radius:8px; }
-table { border-collapse:collapse; width:100%; font-size:14px; }
-th, td { text-align:left; vertical-align:top; padding:9px 12px; border-bottom:1px solid var(--line); }
-th { font:600 12px/1.3 Inter, sans-serif; text-transform:uppercase; letter-spacing:.06em; color:var(--ink-2); background:var(--surface-2); white-space:nowrap; }
-tr:last-child td { border-bottom:0; }
+.tbl { overflow-x:auto; margin:16px 0 24px; scrollbar-width:thin; scrollbar-color:var(--line-2) transparent; }
+.tbl::-webkit-scrollbar { height:8px; } .tbl::-webkit-scrollbar-thumb { background:var(--line-2); border-radius:8px; }
+table { border-collapse:collapse; width:100%; font-size:14.5px; }
+th, td { text-align:left; vertical-align:top; padding:11px 16px 11px 0; border-bottom:1px solid var(--line); }
+th { font:400 11px/1.4 var(--mono); text-transform:uppercase; letter-spacing:.14em; color:var(--ink-3); border-bottom:2px solid var(--ink); white-space:nowrap; }
 td code { font-size:12px; }
 .tbl table:not(.crate-table) td:first-child code { white-space:nowrap; overflow-wrap:normal; }
 .crate-table { min-width:760px; table-layout:fixed; }
@@ -147,87 +122,91 @@ td code { font-size:12px; }
 .yes { color:var(--ok); font-weight:600; } .no { color:var(--no); font-weight:600; }
 
 /* steps */
-ol.steps { list-style:none; margin:10px 0 0; padding:0; counter-reset:s; }
-ol.steps > li { position:relative; padding:0 0 4px 46px; margin:0 0 6px; counter-increment:s; }
-ol.steps > li::before { content:counter(s); position:absolute; left:0; top:2px; width:30px; height:30px; border-radius:50%; display:grid; place-items:center; background:var(--teal); color:#fff; font:600 13px/1 "Space Grotesk", sans-serif; }
-ol.steps > li::after { content:""; position:absolute; left:14px; top:36px; bottom:-4px; width:2px; background:var(--line); }
+ol.steps { list-style:none; margin:12px 0 0; padding:0; counter-reset:s; }
+ol.steps > li { position:relative; padding:0 0 8px 50px; margin:0 0 8px; counter-increment:s; }
+ol.steps > li::before { content:counter(s); position:absolute; left:0; top:0; width:32px; height:32px; border-radius:50%; display:grid; place-items:center; background:var(--ink); color:var(--bg); font:800 15px/1 var(--display); }
+ol.steps > li::after { content:""; position:absolute; left:15px; top:38px; bottom:-4px; width:2px; background:var(--line); }
 ol.steps > li:last-child::after { display:none; }
-ol.steps > li > h3 { margin:4px 0 8px; font-size:18px; }
+ol.steps > li > h3 { margin:4px 0 10px; font-size:20px; }
 
-/* timeline */
-.marks { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:1px; margin:14px 0 18px; border:1px solid var(--line); border-radius:12px; overflow:hidden; background:var(--line); }
-.mark { padding:10px 12px; min-width:0; background:var(--surface); }
+/* timeline marks */
+.marks { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:0 20px; margin:16px 0 22px; }
+.mark { padding:10px 0 12px; min-width:0; border-top:1px solid var(--line); }
 .mark code { font-size:11.5px; }
-.mark span { display:block; font-size:12.5px; color:var(--ink-2); margin-top:4px; }
+.mark span { display:block; font-size:13px; color:var(--ink-2); margin-top:4px; }
 
 /* diagram */
-.diagram { margin:18px 0 8px; background:var(--surface); border:1px solid var(--line); border-radius:16px; padding:14px; box-shadow:var(--shadow); }
+.diagram { margin:22px 0 10px; background:var(--surface); border:1px solid var(--line); border-radius:14px; padding:16px; }
 .diagram svg { display:block; width:100%; height:auto; }
 .d-box { fill:var(--surface); stroke:var(--ink); stroke-width:1.6; }
-.d-box.alt { fill:var(--surface-2); }
+.d-box.alt { fill:var(--bg-2); }
 .d-box.teal { fill:var(--teal-soft); stroke:var(--teal); }
-.d-box.crab { fill:var(--accent-soft); stroke:var(--accent); }
-.d-group { fill:none; stroke:var(--ink-2); stroke-width:1.2; stroke-dasharray:5 5; }
-.d-t { fill:var(--ink); font:600 14px "Space Grotesk", Inter, sans-serif; }
-.d-s { fill:var(--ink-2); font:12px "JetBrains Mono", monospace; }
-.d-l { fill:var(--ink-2); font:500 11.5px Inter, sans-serif; letter-spacing:.06em; text-transform:uppercase; }
+.d-box.crab { fill:var(--rust-soft); stroke:var(--rust); }
+.d-group { fill:none; stroke:var(--ink-3); stroke-width:1.2; stroke-dasharray:5 5; }
+.d-t { fill:var(--ink); font:700 14px var(--display); font-stretch:92%; }
+.d-s { fill:var(--ink-2); font:12px var(--mono); }
+.d-l { fill:var(--ink-3); font:400 11px var(--mono); letter-spacing:.14em; text-transform:uppercase; }
 .d-arrow { stroke:var(--ink); stroke-width:1.6; fill:none; }
-.d-wire { stroke:var(--accent); stroke-width:2.4; fill:none; }
+.d-wire { stroke:var(--rust); stroke-width:2.4; fill:none; }
 .d-dash { stroke:var(--teal); stroke-width:1.6; fill:none; stroke-dasharray:4 4; }
-.d-head { fill:var(--ink); } .d-head.c { fill:var(--accent); } .d-head.t { fill:var(--teal); }
-.d-legend { display:flex; flex-wrap:wrap; gap:16px; font-size:13px; color:var(--ink-2); margin-top:8px; padding:0 4px; }
+.d-head { fill:var(--ink); } .d-head.c { fill:var(--rust); } .d-head.t { fill:var(--teal); }
+.d-legend { display:flex; flex-wrap:wrap; gap:8px 18px; font:400 11px/1.5 var(--mono); text-transform:uppercase; letter-spacing:.1em; color:var(--ink-3); margin-top:12px; padding:0 4px; }
 .d-legend i { display:inline-block; width:22px; height:0; border-top:2px solid var(--ink); vertical-align:middle; margin-right:6px; }
-.d-legend i.c { border-top:3px solid var(--accent); } .d-legend i.t { border-top:2px dashed var(--teal); }
+.d-legend i.c { border-top:3px solid var(--rust); } .d-legend i.t { border-top:2px dashed var(--teal); }
 
 /* wire frame bytes */
-.bytes { display:flex; flex-wrap:wrap; gap:6px; margin:12px 0 18px; font:12.5px/1.3 "JetBrains Mono", monospace; }
-.byte { border:1px solid var(--line); background:var(--surface); border-radius:8px; padding:6px 8px; min-width:0; max-width:100%; overflow-wrap:anywhere; }
-.byte.h { background:var(--accent-soft); border-color:var(--accent); }
-.byte small { display:block; font:500 10.5px/1.2 Inter, sans-serif; color:var(--ink-2); text-transform:uppercase; letter-spacing:.05em; margin-top:3px; }
+.bytes { display:flex; flex-wrap:wrap; gap:6px; margin:14px 0 20px; font:12.5px/1.3 var(--mono); }
+.byte { border:1.5px solid var(--line-2); border-radius:8px; padding:7px 10px; min-width:0; max-width:100%; overflow-wrap:anywhere; }
+.byte.h { background:var(--rust-soft); border-color:var(--rust); }
+.byte small { display:block; font:400 10px/1.2 var(--mono); color:var(--ink-3); text-transform:uppercase; letter-spacing:.12em; margin-top:4px; }
 
-footer { border-top:1px solid var(--line); color:var(--ink-2); font-size:14px; }
-footer .in { max-width:1240px; margin:0 auto; padding:24px; display:flex; gap:14px; align-items:center; flex-wrap:wrap; justify-content:space-between; }
-
-@media (max-width:1000px) {
+@media (max-width:1080px) {
+  /* header wraps to two rows here */
+  .toc { top:calc(var(--bar-h) + 56px); max-height:calc(100vh - var(--bar-h) - 72px); }
+}
+@media (max-width:960px) {
   .layout { grid-template-columns:minmax(0,1fr); gap:0; }
   .toc { display:none; }
-  .toc-mobile { display:block; margin:0 0 8px; background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:10px 14px; }
-  .toc-mobile summary { cursor:pointer; font-weight:600; font-size:15px; }
-  .toc-mobile ol { margin:8px 0 2px; padding-left:22px; font-size:14.5px; }
-  .toc-mobile li { margin:5px 0; }
-  .hero { grid-template-columns:minmax(0,1fr); gap:24px; padding-top:32px; }
-  main { max-width:none; }
+  .toc-mobile { display:block; margin:0 0 28px; border-top:2px solid var(--ink); border-bottom:1px solid var(--line); padding:14px 0; }
+  .toc-mobile summary { cursor:pointer; font:400 11.5px/1.4 var(--mono); text-transform:uppercase; letter-spacing:.16em; color:var(--ink-2); }
+  .toc-mobile ol { margin:12px 0 2px; padding-left:24px; font-size:15px; }
+  .toc-mobile li { margin:6px 0; }
+  .toc-mobile li::marker { font-family:var(--mono); color:var(--rust-text); font-size:12px; }
+  .hero { grid-template-columns:minmax(0,1fr); gap:28px; align-items:start; }
+  .content { max-width:none; }
 }
 @media (max-width:640px) {
   .crate-table { min-width:0; table-layout:auto; }
   .crate-table thead { display:none; }
   .crate-table, .crate-table tbody, .crate-table tr, .crate-table td { display:block; width:auto; }
-  .crate-table tr { padding:10px 0; border-bottom:1px solid var(--line); }
-  .crate-table tr:last-child { border-bottom:0; }
-  .crate-table td { border:0; padding:3px 14px; }
-  .crate-table td::before { content:attr(data-label); display:block; font:600 11px/1.4 Inter, sans-serif; text-transform:uppercase; letter-spacing:.06em; color:var(--ink-2); }
+  .crate-table tr { padding:12px 0; border-bottom:1px solid var(--line); }
+  .crate-table td { border:0; padding:3px 0; }
+  .crate-table td::before { content:attr(data-label); display:block; font:400 10.5px/1.4 var(--mono); text-transform:uppercase; letter-spacing:.14em; color:var(--ink-3); }
   .crate-table td:first-child::before { display:none; }
   .marks { grid-template-columns:repeat(2,minmax(0,1fr)); }
-  .top-in, .hero, .layout, footer .in { padding-left:16px; padding-right:16px; }
   .pair { grid-template-columns:minmax(0,1fr); }
-  .hero .lede { font-size:16.5px; }
-  .brand small { display:none; }
-  ol.steps > li { padding-left:40px; }
-  pre { font-size:12px; padding:12px; }
+  .hero h1 { font-size:clamp(34px,11vw,56px); }
+  ol.steps > li { padding-left:44px; }
+  pre { font-size:12px; padding:14px 16px; }
+  .chap-head { gap:14px; }
   .chap-head .glyph.lg { width:48px; height:48px; border-radius:12px; }
+  .callout { flex-direction:column; gap:10px; }
 }
 </style>
 </head>
 <body>
 
-<header class="top">
-  <div class="top-in">
-    <a class="brand" href="#top"><span class="glyph sm"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="glyph-svg" aria-hidden="true" focusable="false">
-<path d="M4 28h56M4 50h56"/><path d="M5 28a7 7 0 0 1 14 0z"/><path d="M8.5 28l1-4M12 28v-5.5M15.5 28l-1-4" stroke-width="1.6"/><path d="M25 28a7 7 0 0 1 14 0z"/><path d="M28.5 28l1-4M32 28v-5.5M35.5 28l-1-4" stroke-width="1.6"/><path d="M45 28a7 7 0 0 1 14 0z"/><path d="M48.5 28l1-4M52 28v-5.5M55.5 28l-1-4" stroke-width="1.6"/><path d="M5 50a7 7 0 0 1 14 0z"/><path d="M8.5 50l1-4M12 50v-5.5M15.5 50l-1-4" stroke-width="1.6"/><path d="M25 50a7 7 0 0 1 14 0z" fill="#FF6B4A"/><path d="M28.5 50l1-4M32 50v-5.5M35.5 50l-1-4" stroke-width="1.6"/><path d="M45 50a7 7 0 0 1 14 0z"/><path d="M48.5 50l1-4M52 50v-5.5M55.5 50l-1-4" stroke-width="1.6"/><path d="M8 12h48" stroke-width="2" opacity=".55"/><path d="M12 12v4M32 12v4M52 12v4" stroke-width="2" opacity=".55"/>
-</svg></span>Sandcrab <small>repo walkthrough · V1</small></a>
-    <button class="btn" id="theme" type="button" aria-label="Toggle colour theme">Theme</button>
+<!-- SITE-HEADER:BEGIN -->
+<a class="sr-only" href="#main" onfocus="this.classList.remove('sr-only')" onblur="this.classList.add('sr-only')">Skip to content</a>
+<header class="site-bar">
+  <div class="site-bar-in">
+    <a class="site-brand" href="landing/index.html" aria-label="Sandcrab home"><svg class="site-logo" viewBox="-21 -17 42 31" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M-9 4l-5 5M-5 6l-3 6M9 4l5 5M5 6l3 6"/><path d="M-9 -1l-5 -5M9 -1l5 -5"/><circle cx="-16" cy="-8" r="4.2" fill="currentColor"/><circle cx="16" cy="-8" r="4.2" fill="currentColor"/><path d="M-4 -7l-1 -4M4 -7l1 -4"/><path d="M-12 3a12 10 0 0 1 24 0q0 4 -12 4t-12 -4z" fill="currentColor"/><g stroke="none"><circle cx="-5" cy="-12" r="2.8" fill="currentColor"/><circle cx="5" cy="-12" r="2.8" fill="currentColor"/><circle class="eye" cx="-5" cy="-12" r="1.15"/><circle class="eye" cx="5" cy="-12" r="1.15"/></g></svg><span>Sandcrab</span></a>
+    <nav class="site-nav" aria-label="Site"><a href="landing/index.html">Home</a><a href="walkthrough.html" aria-current="page">Walkthrough</a><a href="bench-report.html">Benchmarks</a><a href="symbology.html">Symbology</a><a href="presentation.html">Presentation</a><a href="https://github.com/polvera-org/sandcrab/tree/main/docs" target="_blank" rel="noopener">Docs<span class="sr-only"> (opens in a new tab)</span></a></nav>
+    <div class="site-actions"><a class="icon-btn" href="https://github.com/polvera-org/sandcrab" target="_blank" rel="noopener" aria-label="Sandcrab on GitHub (opens in a new tab)"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" d="M12 .5a11.5 11.5 0 0 0-3.64 22.41c.58.1.79-.25.79-.56v-2c-3.2.7-3.88-1.37-3.88-1.37-.52-1.33-1.28-1.69-1.28-1.69-1.05-.71.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.69 0-1.26.45-2.28 1.18-3.09-.12-.29-.51-1.46.11-3.04 0 0 .97-.31 3.17 1.18a11 11 0 0 1 5.76 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.58.23 2.75.11 3.04.74.81 1.18 1.83 1.18 3.09 0 4.42-2.7 5.4-5.27 5.68.41.36.78 1.06.78 2.14v3.17c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .5Z"/></svg></a><button class="icon-btn" type="button" data-theme-toggle aria-pressed="false" aria-label="Light theme on. Switch to dark theme"><svg class="ico ico-light" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2.5M12 19v2.5M2.5 12H5M19 12h2.5M5.3 5.3l1.8 1.8M16.9 16.9l1.8 1.8M5.3 18.7l1.8-1.8M16.9 7.1l1.8-1.8"/></svg><svg class="ico ico-dark" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z"/></svg></button><a class="pill pill-sm" href="landing/index.html#start">Quickstart</a></div>
   </div>
 </header>
+<!-- SITE-HEADER:END -->
+<main id="main">
 
 <div class="hero" id="top">
   <div>
@@ -237,7 +216,7 @@ footer .in { max-width:1240px; margin:0 auto; padding:24px; display:flex; gap:14
     <div class="facts">
       <span class="fact"><b>9</b> crates</span>
       <span class="fact"><b>16</b> tools in <code>crabd</code></span>
-      <span class="fact"><b>2</b> backends: DockerDev · Firecracker</span>
+      <span class="fact"><b>2</b> backends: Docker · Firecracker</span>
       <span class="fact"><b>1</b> wire protocol</span>
       <span class="fact">review: <b>PASS</b> after 3 rounds</span>
     </div>
@@ -264,7 +243,7 @@ footer .in { max-width:1240px; margin:0 auto; padding:24px; display:flex; gap:14
     </ol>
   </nav>
 
-  <main>
+  <article class="content">
     <details class="toc-mobile">
       <summary>Contents</summary>
       <ol>
@@ -286,12 +265,12 @@ footer .in { max-width:1240px; margin:0 auto; padding:24px; display:flex; gap:14
 <path d="M4 28h56M4 50h56"/><path d="M5 28a7 7 0 0 1 14 0z"/><path d="M8.5 28l1-4M12 28v-5.5M15.5 28l-1-4" stroke-width="1.6"/><path d="M25 28a7 7 0 0 1 14 0z"/><path d="M28.5 28l1-4M32 28v-5.5M35.5 28l-1-4" stroke-width="1.6"/><path d="M45 28a7 7 0 0 1 14 0z"/><path d="M48.5 28l1-4M52 28v-5.5M55.5 28l-1-4" stroke-width="1.6"/><path d="M5 50a7 7 0 0 1 14 0z"/><path d="M8.5 50l1-4M12 50v-5.5M15.5 50l-1-4" stroke-width="1.6"/><path d="M25 50a7 7 0 0 1 14 0z" fill="#FF6B4A"/><path d="M28.5 50l1-4M32 50v-5.5M35.5 50l-1-4" stroke-width="1.6"/><path d="M45 50a7 7 0 0 1 14 0z"/><path d="M48.5 50l1-4M52 50v-5.5M55.5 50l-1-4" stroke-width="1.6"/><path d="M8 12h48" stroke-width="2" opacity=".55"/><path d="M12 12v4M32 12v4M52 12v4" stroke-width="2" opacity=".55"/>
 </svg></span><div><span class="num">01</span><h2>What Sandcrab is</h2></div></div>
   <p>Sandcrab is a self-hostable Rust sandbox manager and SDK for running untrusted agent code. An agent (or the program driving it) asks for an <strong>ephemeral sandbox</strong> built from a pinned OCI template, mounts one or more <strong>persistent workspaces</strong> into it read-write or read-only, runs tools such as <code>bash</code>, <code>file_edit</code> and <code>grep</code>, and throws the sandbox away. The workspace survives, and the host may change its files before the next turn.</p>
-  <p>Isolation is pluggable through the <code>RuntimeBackend</code> trait. V1 ships two backends: <strong>DockerDev</strong> (a shared-kernel container, for local dev and CI only, behind an explicit opt-in) and <strong>Firecracker</strong> (KVM microVMs, hardware isolated). Both talk to the same in-sandbox daemon, <code>crabd</code>, over the same length-prefixed JSON-RPC protocol, so tests on Docker exercise the protocol that production uses. Sandcrab never falls back from one backend to another without being told.</p>
+  <p>Isolation is pluggable through the <code>RuntimeBackend</code> trait. V1 ships two backends: <strong>Docker</strong> (a hardened shared-kernel container, officially supported, selected explicitly) and <strong>Firecracker</strong> (KVM microVMs, hardware isolated). Both talk to the same in-sandbox daemon, <code>crabd</code>, over the same length-prefixed JSON-RPC protocol, so tests on Docker exercise the protocol that production uses. Sandcrab never falls back from one backend to another without being told.</p>
 
   <div class="diagram" role="img" aria-labelledby="arch-title arch-desc">
     <svg viewBox="0 0 760 560" xmlns="http://www.w3.org/2000/svg">
       <title id="arch-title">Sandcrab architecture</title>
-      <desc id="arch-desc">Callers (SDK, CLI, crabagent) use sandcrab-core, which holds the SandboxManager, WorkspaceRegistry and TemplateRegistry. The manager drives a RuntimeBackend, either DockerDev or Firecracker. Each backend starts a sandbox whose crabd daemon receives JSON-RPC frames over a Unix socket or vsock and runs the tools. Workspaces are bind-mounted (Docker) or attached as ext4 drives (Firecracker).</desc>
+      <desc id="arch-desc">Callers (SDK, CLI, crabagent) use sandcrab-core, which holds the SandboxManager, WorkspaceRegistry and TemplateRegistry. The manager drives a RuntimeBackend, either Docker or Firecracker. Each backend starts a sandbox whose crabd daemon receives JSON-RPC frames over a Unix socket or vsock and runs the tools. Workspaces are bind-mounted (Docker) or attached as ext4 drives (Firecracker).</desc>
       <defs>
         <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="d-head"/></marker>
         <marker id="ahc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="d-head c"/></marker>
@@ -322,7 +301,7 @@ footer .in { max-width:1240px; margin:0 auto; padding:24px; display:flex; gap:14
       <!-- backends -->
       <text x="20" y="282" class="d-l">RuntimeBackend</text>
       <rect x="20" y="292" width="340" height="62" rx="12" class="d-box"/>
-      <text x="36" y="317" class="d-t">DockerDev</text><text x="36" y="338" class="d-s">bollard · hardened container</text>
+      <text x="36" y="317" class="d-t">Docker</text><text x="36" y="338" class="d-s">bollard · hardened container</text>
       <rect x="400" y="292" width="340" height="62" rx="12" class="d-box"/>
       <text x="416" y="317" class="d-t">Firecracker</text><text x="416" y="338" class="d-s">KVM microVM · crabd as PID 1</text>
       <path d="M146 262 V276 H190 V292" class="d-arrow" marker-end="url(#ah)"/>
@@ -373,7 +352,7 @@ footer .in { max-width:1240px; margin:0 auto; padding:24px; display:flex; gap:14
       <tr><td data-label="Crate"><a href="../../crates/sandcrab-protocol/Cargo.toml"><code>sandcrab-protocol</code></a></td><td data-label="Role">Wire framing, JSON-RPC envelopes, typed tool params/results, JSON Schemas, the <code>init.*</code> control types.</td><td data-label="Key types"><code>encode_frame</code>, <code>FrameDecoder</code>, <code>RpcRequest</code>, <code>Call</code>, <code>ToolCall</code>, <code>ToolResult</code>, <code>ProtocolError</code>, <code>InitConfig</code>, <code>tool_definitions()</code></td><td data-label="Deps">none · <code>schemars</code>, <code>thiserror</code>, <code>uuid</code>. No tokio.</td></tr>
       <tr><td data-label="Crate"><a href="../../crates/sandcrab-guest/Cargo.toml"><code>sandcrab-guest</code></a> (<code>crabd</code>)</td><td data-label="Role">Static musl daemon inside every sandbox: tool server, plus PID 1 <code>init</code> mode for microVMs.</td><td data-label="Key types"><code>serve_connection</code>, <code>handle_request</code>, <code>tools::dispatch</code>, <code>ToolContext</code>, <code>init::*</code></td><td data-label="Deps">protocol · tokio (only the features it uses), <code>rustix</code>, <code>pty-process</code>, <code>ignore</code>, <code>globset</code>, <code>grep-searcher</code>, <code>similar</code>, <code>tar</code>; <code>tokio-vsock</code> on Linux</td></tr>
       <tr><td data-label="Crate"><a href="../../crates/sandcrab-core/Cargo.toml"><code>sandcrab-core</code></a></td><td data-label="Role">Backend trait, sandbox lifecycle, workspace registry and leases, templates, the crabd client, safe archive unpacking.</td><td data-label="Key types"><code>RuntimeBackend</code>, <code>SandboxHandle</code>, <code>BackendCapabilities</code>, <code>SandboxManager</code>, <code>SandboxConfig</code>, <code>WorkspaceRegistry</code>, <code>WorkspaceLease</code>, <code>TemplateRegistry</code>, <code>CrabdClient</code>, <code>unpack_safe</code></td><td data-label="Deps">protocol · <code>rustix</code> (fs), <code>tar</code>, <code>toml</code>. No backend crates.</td></tr>
-      <tr><td data-label="Crate"><a href="../../crates/sandcrab-backend-docker/Cargo.toml"><code>sandcrab-backend-docker</code></a></td><td data-label="Role">DockerDev backend: hardened containers running the host's <code>crabd</code> over a Unix socket. Dev/CI only.</td><td data-label="Key types"><code>DockerDevBackend</code>, <code>DockerDevConfig</code>, <code>build_container_spec</code>, orphan reaping</td><td data-label="Deps">core, protocol · <code>bollard</code>, <code>rustix</code>, <code>sha2</code></td></tr>
+      <tr><td data-label="Crate"><a href="../../crates/sandcrab-backend-docker/Cargo.toml"><code>sandcrab-backend-docker</code></a></td><td data-label="Role">Docker backend: hardened containers running the host's <code>crabd</code> over a Unix socket. Dev/CI only.</td><td data-label="Key types"><code>DockerBackend</code>, <code>DockerConfig</code>, <code>build_container_spec</code>, orphan reaping</td><td data-label="Deps">core, protocol · <code>bollard</code>, <code>rustix</code>, <code>sha2</code></td></tr>
       <tr><td data-label="Crate"><a href="../../crates/sandcrab-backend-firecracker/Cargo.toml"><code>sandcrab-backend-firecracker</code></a> (<code>sandcrab-rootfs</code>)</td><td data-label="Role">Firecracker microVMs: owned HTTP-over-UDS API client, vsock handshake, rootfs pipeline, workspace drives, tap pool, pinned artifacts.</td><td data-label="Key types"><code>FirecrackerBackend</code>, <code>FirecrackerConfig</code>, <code>ApiClient</code>, <code>vsock_connect</code>, <code>ControlClient</code>, <code>RootfsBuilder</code></td><td data-label="Deps">core, protocol · <code>flate2</code>, <code>tar</code>, <code>sha2</code>, <code>rustix</code>. No hyper.</td></tr>
       <tr><td data-label="Crate"><a href="../../crates/sandcrab-sdk/Cargo.toml"><code>sandcrab-sdk</code></a></td><td data-label="Role">Public API: builder with explicit backend, typed sandbox methods, LLM <code>tool_dispatch</code>, workspace and template clients.</td><td data-label="Key types"><code>Sandcrab</code>, <code>SandcrabBuilder</code>, <code>Sandbox</code>, <code>WorkspaceClient</code>, <code>ToolError</code></td><td data-label="Deps">core, protocol; backend-docker (feature <code>docker</code>, default), backend-firecracker (feature <code>firecracker</code>, Linux only)</td></tr>
       <tr><td data-label="Crate"><a href="../../crates/sandcrab-cli/Cargo.toml"><code>sandcrab-cli</code></a> (<code>sandcrab</code>)</td><td data-label="Role">Operator CLI: <code>doctor</code>, <code>workspace</code>, <code>template</code>, <code>rootfs</code>, <code>run</code>, <code>tool</code>.</td><td data-label="Key types"><code>Commands</code> in <code>main.rs</code>, <code>doctor.rs</code>, <code>run.rs</code></td><td data-label="Deps">sdk · <code>clap</code>, <code>anyhow</code></td></tr>
@@ -415,7 +394,7 @@ footer .in { max-width:1240px; margin:0 auto; padding:24px; display:flex; gap:14
 <path d="M-12 3a12 10 0 0 1 24 0q0 4 -12 4t-12 -4z" fill="#FF6B4A"/>
 <circle cx="-5" cy="-12" r="1.9" fill="currentColor" stroke="none"/><circle cx="5" cy="-12" r="1.9" fill="currentColor" stroke="none"/>
 </g><path d="M28 46v8M14 54h28M14 54v4M28 54v4M42 54v4" opacity=".55" stroke-width="2"/>
-</svg></span><span><b>One wire.</b> The same frames travel over a Unix socket (DockerDev), TCP (tests) and vsock (Firecracker). Follow <code>sandbox.bash("ls")</code> through six hops.</span></div>
+</svg></span><span><b>One wire.</b> The same frames travel over a Unix socket (Docker), TCP (tests) and vsock (Firecracker). Follow <code>sandbox.bash("ls")</code> through six hops.</span></div>
 
   <ol class="steps">
     <li>
@@ -491,7 +470,7 @@ footer .in { max-width:1240px; margin:0 auto; padding:24px; display:flex; gap:14
     }
     <span class="t">Ok</span>(len)
 }</pre></figure>
-      <p class="muted" style="font-size:14px">Transports: DockerDev returns <code>Endpoint::Unix(socket_dir.join(SOCKET_NAME))</code>, bind-mounted in the container at <code>/run/sandcrab/crabd.sock</code>. Firecracker connects to the VMM's vsock UDS, writes <code>CONNECT 1024\n</code> and expects <code>OK &lt;port&gt;\n</code> (<a class="ref" href="../../crates/sandcrab-backend-firecracker/src/vsock.rs">crates/sandcrab-backend-firecracker/src/vsock.rs:23</a>). After that the bytes are identical.</p>
+      <p class="muted" style="font-size:14px">Transports: Docker returns <code>Endpoint::Unix(socket_dir.join(SOCKET_NAME))</code>, bind-mounted in the container at <code>/run/sandcrab/crabd.sock</code>. Firecracker connects to the VMM's vsock UDS, writes <code>CONNECT 1024\n</code> and expects <code>OK &lt;port&gt;\n</code> (<a class="ref" href="../../crates/sandcrab-backend-firecracker/src/vsock.rs">crates/sandcrab-backend-firecracker/src/vsock.rs:23</a>). After that the bytes are identical.</p>
     </li>
     <li>
       <h3>crabd: read, spawn, answer by id</h3>
@@ -597,7 +576,7 @@ guard.kill(<span class="t">Signal</span>::KILL);</pre></figure>
   <h3>Spawn: everything is checked before the backend is touched</h3>
   <p><code>SandboxManager::spawn</code> (<a class="ref" href="../../crates/sandcrab-core/src/manager.rs">crates/sandcrab-core/src/manager.rs:146</a>) runs this sequence:</p>
   <ol class="tight">
-    <li><code>config.validate()</code>; then the <strong>capability gate</strong>: <code>require_hardware_isolation</code> on a backend without it → <code>InsecureBackendRejected</code>. Non-empty <code>secrets</code> → <code>PolicyUnenforceable</code> (reserved for Phase 3).</li>
+    <li><code>config.validate()</code>; then the <strong>capability gate</strong>: <code>require_hardware_isolation</code> on a backend without it → <code>HardwareIsolationRequired</code>. Non-empty <code>secrets</code> → <code>PolicyUnenforceable</code> (reserved for Phase 3).</li>
     <li><strong>Template resolve</strong> from the <code>TemplateRegistry</code>; the network policy defaults to the manifest's. If <code>backend.enforces_network_policy(&amp;network)</code> is false → <code>PolicyUnenforceable</code> (no V1 backend enforces <code>egress_restricted</code>).</li>
     <li>Resources = template limits plus overrides; user = config or manifest.</li>
     <li><strong>Mount resolution</strong> (<code>resolve_mounts</code>, <a class="ref" href="../../crates/sandcrab-core/src/mounts.rs">crates/sandcrab-core/src/mounts.rs:98</a>): guest paths normalised, no duplicates or nesting, none under <code>/proc /sys /dev /run/sandcrab /opt/sandcrab</code>. <code>default_cwd</code> = explicit → first rw mount → template workdir.</li>
@@ -617,7 +596,7 @@ guard.kill(<span class="t">Signal</span>::KILL);</pre></figure>
 <path d="M-12 3a12 10 0 0 1 24 0q0 4 -12 4t-12 -4z" fill="#FF6B4A"/>
 <circle cx="-5" cy="-12" r="1.9" fill="currentColor" stroke="none"/><circle cx="5" cy="-12" r="1.9" fill="currentColor" stroke="none"/>
 </g>
-</svg></span>DockerDev spawn</h4><ul>
+</svg></span>Docker spawn</h4><ul>
       <li><code>verify_image</code>: the image ID must match the template's <code>sha256</code> pin (unpinned images refused unless <code>allow_unpinned_images</code>).</li>
       <li>Per-sandbox socket dir on the host, mounted at <code>/run/sandcrab</code>.</li>
       <li>Hardened container (§6), entrypoint pinned to <code>/opt/sandcrab/crabd serve --unix /run/sandcrab/crabd.sock</code>; <code>crabd</code> is bind-mounted read-only from the host, never baked into the image.</li>
@@ -667,7 +646,7 @@ guard.kill(<span class="t">Signal</span>::KILL);</pre></figure>
         <span class="t">Err</span>(_) =&gt; <span class="t">Err</span>(<span class="k">self</span>.teardown_error(<span class="s">"teardown outcome channel closed"</span>)),
     }
 }</pre></figure>
-  <p>Backend teardown: DockerDev stops and removes the container and its socket dir with a stop grace. Firecracker first <strong>syncs back</strong> every rw drive (§5), then stops the VM (graceful <code>init.shutdown</code>, then fallbacks) and cleans the run dir, preserving images whose sync-back failed (<a class="ref" href="../../crates/sandcrab-backend-firecracker/src/vm.rs">crates/sandcrab-backend-firecracker/src/vm.rs:501</a>).</p>
+  <p>Backend teardown: Docker stops and removes the container and its socket dir with a stop grace. Firecracker first <strong>syncs back</strong> every rw drive (§5), then stops the VM (graceful <code>init.shutdown</code>, then fallbacks) and cleans the run dir, preserving images whose sync-back failed (<a class="ref" href="../../crates/sandcrab-backend-firecracker/src/vm.rs">crates/sandcrab-backend-firecracker/src/vm.rs:501</a>).</p>
 
   <h3>TTL reaper</h3>
   <div class="symbol"><span class="glyph sm"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="glyph-svg" aria-hidden="true" focusable="false">
@@ -684,7 +663,7 @@ guard.kill(<span class="t">Signal</span>::KILL);</pre></figure>
     <div class="mark"><code>TeardownStarted</code><span>destroy entered</span></div>
     <div class="mark"><code>TeardownFinished</code><span>resources released</span></div>
   </div>
-  <p class="muted" style="font-size:14px">Custom marks: DockerDev <code>image_verified</code>; Firecracker <code>rootfs_ready</code>, <code>ws_attach_start</code>, <code>ws_attach_done</code>, <code>vmm_started</code>, <code>ws_sync_done</code>, <code>vmm_exited</code>, <code>cleanup_done</code>.</p>
+  <p class="muted" style="font-size:14px">Custom marks: Docker <code>image_verified</code>; Firecracker <code>rootfs_ready</code>, <code>ws_attach_start</code>, <code>ws_attach_done</code>, <code>vmm_started</code>, <code>ws_sync_done</code>, <code>vmm_exited</code>, <code>cleanup_done</code>.</p>
 </section>
 
 <!-- ============================================================ 5 -->
@@ -781,11 +760,11 @@ guard.kill(<span class="t">Signal</span>::KILL);</pre></figure>
 <circle cx="-5" cy="-12" r="1.9" fill="currentColor" stroke="none"/><circle cx="5" cy="-12" r="1.9" fill="currentColor" stroke="none"/>
 </g>
 </svg></span><div><span class="num">06</span><h2>Security model &amp; invariants</h2></div></div>
-  <figure class="art"><img src="assets/crab/isolation.webp" alt="A crab sealed inside its own glass jar beside crabs sharing one tide pool" loading="lazy"><figcaption>Sealed jar (Firecracker microVM, own kernel) vs. shared tide pool (DockerDev, shared host kernel).</figcaption></figure>
+  <figure class="art"><img src="assets/crab/isolation.webp" alt="A crab sealed inside its own glass jar beside crabs sharing one tide pool" loading="lazy"><figcaption>Sealed jar (Firecracker microVM, own kernel) vs. shared tide pool (Docker, shared host kernel).</figcaption></figure>
 
   <h3>Declared capabilities</h3>
   <div class="tbl"><table>
-    <thead><tr><th>Capability</th><th>DockerDev</th><th>Firecracker (V1)</th><th>Meaning</th></tr></thead>
+    <thead><tr><th>Capability</th><th>Docker</th><th>Firecracker (V1)</th><th>Meaning</th></tr></thead>
     <tbody>
       <tr><td><code>hardware_isolated</code></td><td class="no">false</td><td class="yes">true</td><td>Guest behind a virtualization boundary, not a shared kernel.</td></tr>
       <tr><td><code>multi_tenant_safe</code></td><td class="no">false</td><td class="no">false</td><td>Firecracker stays false until <code>jailer</code> confinement lands (design §8).</td></tr>
@@ -802,18 +781,16 @@ guard.kill(<span class="t">Signal</span>::KILL);</pre></figure>
     <thead><tr><th>Situation</th><th>Where</th><th>Result</th></tr></thead>
     <tbody>
       <tr><td>No backend chosen in the builder</td><td><a class="ref" href="../../crates/sandcrab-sdk/src/lib.rs">sandcrab-sdk/src/lib.rs:248</a></td><td><code>InvalidConfig</code>: "Sandcrab never picks or falls back to a backend"</td></tr>
-      <tr><td><code>DockerDevBackend::new</code> without <code>allow_insecure_dev_backend</code> (default <code>false</code>)</td><td><a class="ref" href="../../crates/sandcrab-backend-docker/src/backend.rs">backend-docker/src/backend.rs:82</a></td><td><code>InsecureBackendRejected</code></td></tr>
-      <tr><td>Manager with a non-hardware-isolated backend and <code>allow_insecure_backend = false</code></td><td><a class="ref" href="../../crates/sandcrab-core/src/manager.rs">core/src/manager.rs:98</a></td><td><code>InsecureBackendRejected</code></td></tr>
-      <tr><td><code>require_hardware_isolation</code> on DockerDev</td><td>SDK builder and <code>spawn</code></td><td><code>InsecureBackendRejected</code></td></tr>
-      <tr><td><code>egress_restricted</code> on DockerDev</td><td><a class="ref" href="../../crates/sandcrab-backend-docker/src/spec.rs">backend-docker/src/spec.rs:75</a></td><td><code>PolicyUnenforceable</code>: "docker-dev cannot enforce network policy `egress_restricted`…"</td></tr>
+      <tr><td><code>require_hardware_isolation</code> on Docker</td><td>SDK builder and <code>spawn</code></td><td><code>HardwareIsolationRequired</code></td></tr>
+      <tr><td><code>egress_restricted</code> on Docker</td><td><a class="ref" href="../../crates/sandcrab-backend-docker/src/spec.rs">backend-docker/src/spec.rs:88</a></td><td><code>PolicyUnenforceable</code>: "docker cannot enforce network policy `egress_restricted`…"</td></tr>
       <tr><td>Any <code>secrets</code></td><td><code>spawn</code> + each backend's <code>reject_secrets</code></td><td><code>PolicyUnenforceable</code> (Phase 3)</td></tr>
-      <tr><td>Template image ID ≠ pinned <code>sha256</code></td><td>DockerDev <code>verify_image</code></td><td>refused unless <code>allow_unpinned_images</code> / <code>--allow-unpinned</code></td></tr>
+      <tr><td>Template image ID ≠ pinned <code>sha256</code></td><td>Docker <code>verify_image</code></td><td>refused unless <code>allow_unpinned_images</code> / <code>--allow-unpinned</code></td></tr>
       <tr><td>No <code>/dev/kvm</code></td><td><code>check_kvm</code> in <code>FirecrackerBackend::new</code></td><td>error; never a switch to Docker</td></tr>
     </tbody>
   </table></div>
-  <p>The CLI mirrors this: the Docker backend requires <code>--allow-insecure</code> or <code>SANDCRAB_ALLOW_INSECURE=1</code>.</p>
+  <p>The CLI mirrors this: the backend is always named explicitly (<code>--backend docker</code> or <code>--backend firecracker</code>); nothing falls back to Docker.</p>
 
-  <h3>DockerDev hardening</h3>
+  <h3>Docker hardening</h3>
   <p>Built as pure data in <code>build_container_spec</code>, so the whole matrix is unit-tested without a daemon:</p>
   <figure class="code"><figcaption><a href="../../crates/sandcrab-backend-docker/src/spec.rs">crates/sandcrab-backend-docker/src/spec.rs:265</a><span>Rust · trimmed</span></figcaption>
 <pre>host_config: <span class="t">Some</span>(<span class="t">HostConfig</span> {
@@ -955,7 +932,7 @@ tiers = [<span class="s">"core"</span>, <span class="s">"process"</span>]</pre><
         <li>Scenarios: <code>lifecycle</code>, <code>calls</code>, <code>agent-turn</code>, <code>resources</code>, <code>density</code>, <code>drift</code>.</li>
         <li>Seeded RNG and fixtures, ABAB scheduling, percentile and bootstrap stats, cgroup / <code>/proc</code> sampling, host declaration.</li>
         <li>Schema-versioned JSON results; the JSON Schema is committed at <code>docs/bench/results/schema.json</code>.</li>
-        <li>V1 measures DockerDev only. Firecracker is wired in but is recorded as <code>unavailable</code> on hosts without <code>/dev/kvm</code>, never substituted.</li>
+        <li>V1 measures Docker only. Firecracker is wired in but is recorded as <code>unavailable</code> on hosts without <code>/dev/kvm</code>, never substituted.</li>
       </ul></div>
   </div>
 </section>
@@ -981,8 +958,8 @@ scripts/build-crabd.sh            <span class="c"># or: scripts/build-crabd.sh a
 templates/build.sh --pin
 <span class="c"># check the host: crabd, Docker, template pins, Firecracker prerequisites</span>
 sandcrab doctor
-<span class="c"># one command in a throwaway sandbox (Docker needs the explicit opt-in)</span>
-sandcrab --backend docker --allow-insecure run -t python-dev -- 'python3 --version'</pre></figure>
+<span class="c"># one command in a throwaway sandbox (the backend is always chosen explicitly)</span>
+sandcrab --backend docker run -t python-dev -- 'python3 --version'</pre></figure>
 
   <h3>Reading order</h3>
   <ol class="tight">
@@ -1014,25 +991,23 @@ sandcrab --backend docker --allow-insecure run -t python-dev -- 'python3 --versi
     <li>Conventional Commits with crate scope, atomic commits, no <code>.sandcrab/</code> state committed.</li>
   </ul>
 </section>
-  </main>
+  <p class="see-also">See also <a href="symbology.html">crab symbology</a> · <a href="3d/index.html">3D kit</a> · <a href="../ROADMAP.md">roadmap</a></p>
+  </article>
 </div>
+</main>
 
-<footer>
-  <div class="in">
-    <span>Sandcrab V1 walkthrough · generated from branch <code>feat/phase-1</code> · Apache-2.0</span>
-    <span>See also <a href="symbology.html">crab symbology</a> · <a href="3d/index.html">3D kit</a> · <a href="../ROADMAP.md">roadmap</a></span>
+<!-- SITE-FOOTER:BEGIN note="Sandcrab V1 walkthrough, generated from branch feat/phase-1 · Apache-2.0" -->
+<footer class="site-foot">
+  <div class="site-foot-in">
+    <svg class="site-logo" viewBox="-21 -17 42 31" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M-9 4l-5 5M-5 6l-3 6M9 4l5 5M5 6l3 6"/><path d="M-9 -1l-5 -5M9 -1l5 -5"/><circle cx="-16" cy="-8" r="4.2" fill="currentColor"/><circle cx="16" cy="-8" r="4.2" fill="currentColor"/><path d="M-4 -7l-1 -4M4 -7l1 -4"/><path d="M-12 3a12 10 0 0 1 24 0q0 4 -12 4t-12 -4z" fill="currentColor"/><g stroke="none"><circle cx="-5" cy="-12" r="2.8" fill="currentColor"/><circle cx="5" cy="-12" r="2.8" fill="currentColor"/><circle class="eye" cx="-5" cy="-12" r="1.15"/><circle class="eye" cx="5" cy="-12" r="1.15"/></g></svg>
+    <nav aria-label="Footer"><a href="landing/index.html">Home</a><a href="walkthrough.html">Walkthrough</a><a href="bench-report.html">Benchmarks</a><a href="symbology.html">Symbology</a><a href="presentation.html">Presentation</a><a href="https://github.com/polvera-org/sandcrab/tree/main/docs" target="_blank" rel="noopener">Docs<span class="sr-only"> (opens in a new tab)</span></a><a href="https://github.com/polvera-org/sandcrab" target="_blank" rel="noopener">GitHub<span class="sr-only"> (opens in a new tab)</span></a></nav>
+    <p>Sandcrab V1 walkthrough, generated from branch feat/phase-1 · Apache-2.0</p>
   </div>
 </footer>
+<!-- SITE-FOOTER:END -->
 
 <script>
 (function(){
-  var r=document.documentElement, b=document.getElementById('theme'), k='sandcrab-theme';
-  try { var s=localStorage.getItem(k); if(s) r.setAttribute('data-theme',s); } catch(e) {}
-  function cur(){ var t=r.getAttribute('data-theme'); if(t) return t; return matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'; }
-  function label(){ b.textContent = cur()==='dark' ? 'Light' : 'Dark'; }
-  label();
-  b.addEventListener('click', function(){ var n=cur()==='dark'?'light':'dark'; r.setAttribute('data-theme',n); try { localStorage.setItem(k,n); } catch(e) {} label(); });
-
   // scroll-spy for the sticky TOC
   var links = Array.prototype.slice.call(document.querySelectorAll('.toc a'));
   var map = {}; links.forEach(function(a){ map[a.getAttribute('href').slice(1)] = a; });
