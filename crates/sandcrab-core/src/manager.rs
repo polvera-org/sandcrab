@@ -195,7 +195,7 @@ impl SandboxManager {
         let spec = ResolvedSpec {
             id,
             image: template.image().to_owned(),
-            image_sha256: manifest.template.sha256.clone(),
+            image_sha256: manifest.pinned_sha256_for_host().map(str::to_owned),
             mounts,
             default_cwd: resolved.default_cwd.clone(),
             env: config.env.clone(),

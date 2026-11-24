@@ -355,7 +355,7 @@ readiness probe.
 
 | Method | Params | Result |
 | --- | --- | --- |
-| `init.configure` | `InitConfig`: `sandbox_id`, `hostname`, `user {uid, gid, home?, name?}`, `env`, `default_cwd`, `mounts[] {drive_id, label?, guest_path, read_only}`, `network`, `dns[]`, `tools_port`, `host_time_unix_ms?` | `{serve_pid, boot_ms}`; once per boot |
+| `init.configure` | `InitConfig`: `sandbox_id`, `hostname`, `user {uid, gid, home?, name?}`, `env`, `default_cwd`, `mounts[]` (see below), `network`, `dns[]`, `tools_port`, `host_time_unix_ms?` | `{serve_pid, boot_ms}`; once per boot |
 | `init.export` | `{drive_id}` (a writable drive) | `{format: "sandcrab-tar-v1", guest_path}`, then **raw tar bytes until EOF** on the same connection |
 | `init.shutdown` | `{grace_ms}` (default 500) | `{}`; then processes get SIGTERM, SIGKILL after the grace, and the guest reboots so the VMM exits |
 
@@ -363,6 +363,17 @@ Configuration travels over vsock rather than the kernel command line because `en
 carry secrets and `/proc/cmdline` is world-readable. Drive ids are at most 20 bytes (the
 virtio-blk serial limit); ext4 labels at most 16. After an `init.export` ack the
 connection carries no more frames; open a new control connection for further requests.
+
+Each `mounts[]` entry (`GuestMount`) is a flat object with a `source` discriminator:
+
+| `source` | Fields | Used by |
+| --- | --- | --- |
+| `"block"` (default when absent) | `drive_id`, `label?`, `guest_path`, `read_only?` | Firecracker workspace drives, libkrun block volumes |
+| `"virtio_fs"` | `tag` (at most 36 bytes), `guest_path`, `read_only?` | libkrun host-dir workspaces (`mount -t virtiofs <tag>`) |
+
+Fields of the other kind are rejected. Hosts serialize block mounts **without** `source`,
+so configs stay byte-compatible with guests that predate it; configs without `source`
+parse as block.
 
 Full design: [design/firecracker-backend.md](design/firecracker-backend.md).
 

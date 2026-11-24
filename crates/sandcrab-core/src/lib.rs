@@ -44,9 +44,9 @@ pub use registry::{
 };
 pub use sandbox::{DEFAULT_TTL_SECS, SandboxConfig, SandboxId};
 pub use template::{
-    ImageVerifier, PinStatus, ResourceLimits, Template, TemplateManifest, TemplateMeta,
+    ImageArch, ImageVerifier, PinStatus, ResourceLimits, Template, TemplateManifest, TemplateMeta,
     TemplateNetwork, TemplateRegistry, ToolConfig, WorkspaceDefaults, check_digest,
-    verify_template_image,
+    verify_template_image, verify_template_image_for,
 };
 pub use timings::{LifecyclePhase, LifecycleTimings, PhaseOffset, TimingMarks, TimingReport};
 pub use workspace::{

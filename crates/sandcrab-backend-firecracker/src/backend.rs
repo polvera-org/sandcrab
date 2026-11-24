@@ -304,12 +304,12 @@ impl FirecrackerBackend {
                 }
             };
             drives.push(drive(&drive_id, &image, false, read_only));
-            guest_mounts.push(GuestMount {
-                drive_id: drive_id.clone(),
-                label: Some(drive_id),
-                guest_path: m.guest_path.clone(),
+            guest_mounts.push(GuestMount::block(
+                drive_id.clone(),
+                Some(drive_id),
+                m.guest_path.clone(),
                 read_only,
-            });
+            ));
         }
         vm.meta.save(&vm.dir)?;
         t.mark_custom("ws_attach_done");

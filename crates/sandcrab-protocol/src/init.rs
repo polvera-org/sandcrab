@@ -59,7 +59,8 @@ pub struct InitConfig {
     pub env: BTreeMap<String, String>,
     /// Absolute default working directory for tools.
     pub default_cwd: PathBuf,
-    /// Workspace drives to mount, in any order (the guest mounts parents first).
+    /// Workspaces to mount (block drives or virtio-fs shares), in any order (the guest mounts
+    /// parents first).
     #[serde(default)]
     pub mounts: Vec<GuestMount>,
     /// Whether the VM has a NIC (`eth0`, configured by the kernel `ip=` parameter).
@@ -95,21 +96,211 @@ pub struct InitUser {
     pub name: Option<String>,
 }
 
-/// One workspace drive and where it is mounted in the guest.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
+/// One workspace and where it is mounted in the guest.
+///
+/// Wire shape (flat object, `deny_unknown_fields`):
+/// - block drive: `{"drive_id", "label"?, "guest_path", "read_only"?}`, optionally with
+///   `"source": "block"`. A missing `source` means block, so configs written before
+///   [`MountSource`] existed still parse, and a block mount is serialized **without**
+///   `source` (byte-compatible with guests that predate it).
+/// - virtio-fs share: `{"source": "virtio_fs", "tag", "guest_path", "read_only"?}`.
+///
+/// Fields of the other source kind are rejected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "GuestMountWire", into = "GuestMountWire")]
 pub struct GuestMount {
-    /// Firecracker `drive_id` (`[A-Za-z0-9_]`, at most [`MAX_DRIVE_ID_LEN`] bytes). The guest
-    /// finds the device by `/sys/block/vd*/serial`.
-    pub drive_id: String,
-    /// ext4 label to match when no device serial matches (defaults to `drive_id`).
-    #[serde(default)]
-    pub label: Option<String>,
+    /// Where the filesystem comes from.
+    pub source: MountSource,
     /// Absolute guest mount point.
     pub guest_path: PathBuf,
-    /// Mount read-only (`MS_RDONLY` + `noload`).
-    #[serde(default)]
+    /// Mount read-only (`MS_RDONLY`; plus `noload` for block drives).
     pub read_only: bool,
+}
+
+impl GuestMount {
+    /// A virtio-blk drive found by serial / ext4 label (Firecracker, libkrun block volumes).
+    #[must_use]
+    pub fn block(
+        drive_id: impl Into<String>,
+        label: Option<String>,
+        guest_path: impl Into<PathBuf>,
+        read_only: bool,
+    ) -> Self {
+        Self {
+            source: MountSource::Block {
+                drive_id: drive_id.into(),
+                label,
+            },
+            guest_path: guest_path.into(),
+            read_only,
+        }
+    }
+
+    /// A virtio-fs share mounted by tag (libkrun host-dir workspaces).
+    #[must_use]
+    pub fn virtio_fs(
+        tag: impl Into<String>,
+        guest_path: impl Into<PathBuf>,
+        read_only: bool,
+    ) -> Self {
+        Self {
+            source: MountSource::VirtioFs { tag: tag.into() },
+            guest_path: guest_path.into(),
+            read_only,
+        }
+    }
+
+    /// The block `drive_id`, or `None` for a virtio-fs share.
+    #[must_use]
+    pub fn drive_id(&self) -> Option<&str> {
+        self.source.drive_id()
+    }
+}
+
+/// Source of a [`GuestMount`].
+///
+/// Serialized on its own as an internally tagged object (`"source": "block" | "virtio_fs"`);
+/// inside a [`GuestMount`] the fields are flattened and `source` defaults to `block`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "source", rename_all = "snake_case", deny_unknown_fields)]
+pub enum MountSource {
+    /// virtio-blk drive with an ext4 filesystem.
+    Block {
+        /// Firecracker `drive_id` (`[A-Za-z0-9_]`, at most [`MAX_DRIVE_ID_LEN`] bytes). The
+        /// guest finds the device by `/sys/block/vd*/serial`.
+        drive_id: String,
+        /// ext4 label to match when no device serial matches (defaults to `drive_id`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+    },
+    /// virtio-fs share, mounted with `mount -t virtiofs <tag>`. The host VMM enforces
+    /// read-only shares; the guest `MS_RDONLY` is defense in depth.
+    VirtioFs {
+        /// virtio-fs tag (at most [`MAX_VIRTIOFS_TAG_LEN`] bytes).
+        tag: String,
+    },
+}
+
+impl MountSource {
+    /// The block `drive_id`, or `None` for a virtio-fs share.
+    #[must_use]
+    pub fn drive_id(&self) -> Option<&str> {
+        match self {
+            Self::Block { drive_id, .. } => Some(drive_id),
+            Self::VirtioFs { .. } => None,
+        }
+    }
+
+    fn kind(&self) -> MountSourceKind {
+        match self {
+            Self::Block { .. } => MountSourceKind::Block,
+            Self::VirtioFs { .. } => MountSourceKind::VirtioFs,
+        }
+    }
+}
+
+/// The virtio-fs device config holds the tag in a 36-byte field.
+pub const MAX_VIRTIOFS_TAG_LEN: usize = 36;
+
+/// Discriminator of the flat [`GuestMount`] wire object.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum MountSourceKind {
+    #[default]
+    Block,
+    VirtioFs,
+}
+
+impl MountSourceKind {
+    fn is_block(&self) -> bool {
+        *self == Self::Block
+    }
+}
+
+/// Flat wire form of [`GuestMount`] (and its JSON Schema).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(rename = "GuestMount")]
+struct GuestMountWire {
+    /// `block` (default when absent) or `virtio_fs`.
+    #[serde(default, skip_serializing_if = "MountSourceKind::is_block")]
+    source: MountSourceKind,
+    /// Block only: Firecracker `drive_id` (`[A-Za-z0-9_]`, at most [`MAX_DRIVE_ID_LEN`]
+    /// bytes). The guest finds the device by `/sys/block/vd*/serial`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    drive_id: Option<String>,
+    /// Block only: ext4 label to match when no device serial matches (defaults to `drive_id`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    label: Option<String>,
+    /// virtio-fs only: the share tag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tag: Option<String>,
+    /// Absolute guest mount point.
+    guest_path: PathBuf,
+    /// Mount read-only.
+    #[serde(default)]
+    read_only: bool,
+}
+
+impl TryFrom<GuestMountWire> for GuestMount {
+    type Error = String;
+
+    fn try_from(w: GuestMountWire) -> Result<Self, String> {
+        let source = match w.source {
+            MountSourceKind::Block => {
+                if w.tag.is_some() {
+                    return Err("`tag` is only valid with `source: \"virtio_fs\"`".into());
+                }
+                MountSource::Block {
+                    drive_id: w.drive_id.ok_or("block mount is missing `drive_id`")?,
+                    label: w.label,
+                }
+            }
+            MountSourceKind::VirtioFs => {
+                if w.drive_id.is_some() || w.label.is_some() {
+                    return Err(
+                        "`drive_id` / `label` are only valid on block mounts, not virtio_fs".into(),
+                    );
+                }
+                MountSource::VirtioFs {
+                    tag: w.tag.ok_or("virtio_fs mount is missing `tag`")?,
+                }
+            }
+        };
+        Ok(Self {
+            source,
+            guest_path: w.guest_path,
+            read_only: w.read_only,
+        })
+    }
+}
+
+impl From<GuestMount> for GuestMountWire {
+    fn from(m: GuestMount) -> Self {
+        let source = m.source.kind();
+        let (drive_id, label, tag) = match m.source {
+            MountSource::Block { drive_id, label } => (Some(drive_id), label, None),
+            MountSource::VirtioFs { tag } => (None, None, Some(tag)),
+        };
+        Self {
+            source,
+            drive_id,
+            label,
+            tag,
+            guest_path: m.guest_path,
+            read_only: m.read_only,
+        }
+    }
+}
+
+impl JsonSchema for GuestMount {
+    fn schema_name() -> String {
+        GuestMountWire::schema_name()
+    }
+
+    fn json_schema(generator: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
+        GuestMountWire::json_schema(generator)
+    }
 }
 
 /// `init.configure` result.
@@ -209,6 +400,7 @@ mod tests {
         assert_eq!(cfg.tools_port, DEFAULT_TOOLS_PORT);
         assert!(!cfg.network && cfg.env.is_empty() && cfg.dns.is_empty());
         assert!(!cfg.mounts[0].read_only);
+        assert_eq!(cfg.mounts[0].drive_id(), Some("ws0"));
         let back: InitConfig = serde_json::from_value(serde_json::to_value(&cfg).unwrap()).unwrap();
         assert_eq!(back, cfg);
     }
@@ -225,5 +417,143 @@ mod tests {
     fn schemas_export() {
         let s = serde_json::to_value(schemars::schema_for!(InitConfig)).unwrap();
         assert!(s["properties"]["mounts"].is_object());
+        let m = &s["definitions"]["GuestMount"];
+        for field in [
+            "source",
+            "drive_id",
+            "label",
+            "tag",
+            "guest_path",
+            "read_only",
+        ] {
+            assert!(m["properties"][field].is_object(), "{field}: {m}");
+        }
+        assert_eq!(m["required"], json!(["guest_path"]));
+        assert_eq!(m["additionalProperties"], json!(false));
+    }
+
+    /// Pre-`MountSource` wire shape (no `source`), as an old host or guest writes it.
+    #[test]
+    fn legacy_mount_is_block() {
+        let m: GuestMount = serde_json::from_value(json!({
+            "drive_id": "ws1", "label": null, "guest_path": "/docs", "read_only": true,
+        }))
+        .unwrap();
+        assert_eq!(m, GuestMount::block("ws1", None, "/docs", true));
+        let m: GuestMount = serde_json::from_value(json!({
+            "drive_id": "ws0", "label": "data", "guest_path": "/w",
+        }))
+        .unwrap();
+        assert_eq!(
+            m.source,
+            MountSource::Block {
+                drive_id: "ws0".into(),
+                label: Some("data".into())
+            }
+        );
+        assert!(!m.read_only);
+    }
+
+    /// Block mounts serialize without `source`, so guests that predate it (and deny unknown
+    /// fields) still accept configs from a new host.
+    #[test]
+    fn block_mount_serializes_in_legacy_shape() {
+        let v = serde_json::to_value(GuestMount::block("ws0", None, "/workspace", false)).unwrap();
+        assert_eq!(
+            v,
+            json!({ "drive_id": "ws0", "guest_path": "/workspace", "read_only": false })
+        );
+        let v =
+            serde_json::to_value(GuestMount::block("ws0", Some("l".into()), "/w", true)).unwrap();
+        assert_eq!(
+            v,
+            json!({ "drive_id": "ws0", "label": "l", "guest_path": "/w", "read_only": true })
+        );
+        // An explicit `source: block` is accepted too.
+        let m: GuestMount = serde_json::from_value(json!({
+            "source": "block", "drive_id": "ws0", "guest_path": "/workspace",
+        }))
+        .unwrap();
+        assert_eq!(m, GuestMount::block("ws0", None, "/workspace", false));
+    }
+
+    #[test]
+    fn virtio_fs_round_trip() {
+        let m = GuestMount::virtio_fs("sc-ws0", "/workspace", true);
+        let v = serde_json::to_value(&m).unwrap();
+        assert_eq!(
+            v,
+            json!({ "source": "virtio_fs", "tag": "sc-ws0", "guest_path": "/workspace", "read_only": true })
+        );
+        assert_eq!(serde_json::from_value::<GuestMount>(v).unwrap(), m);
+        assert_eq!(m.drive_id(), None);
+
+        // Mixed block + virtio-fs config round-trips.
+        let cfg: InitConfig = serde_json::from_value(json!({
+            "sandbox_id": "sb-1",
+            "hostname": "sandcrab",
+            "user": { "uid": 501, "gid": 20 },
+            "default_cwd": "/workspace",
+            "mounts": [
+                { "source": "virtio_fs", "tag": "ws0", "guest_path": "/workspace" },
+                { "drive_id": "vol1", "guest_path": "/data", "read_only": true },
+            ],
+        }))
+        .unwrap();
+        assert_eq!(
+            cfg.mounts[0],
+            GuestMount::virtio_fs("ws0", "/workspace", false)
+        );
+        assert_eq!(
+            cfg.mounts[1],
+            GuestMount::block("vol1", None, "/data", true)
+        );
+        let back: InitConfig = serde_json::from_value(serde_json::to_value(&cfg).unwrap()).unwrap();
+        assert_eq!(back, cfg);
+    }
+
+    #[test]
+    fn mount_source_mismatches_rejected() {
+        for (bad, why) in [
+            (json!({ "guest_path": "/w" }), "missing `drive_id`"),
+            (
+                json!({ "source": "virtio_fs", "guest_path": "/w" }),
+                "missing `tag`",
+            ),
+            (
+                json!({ "drive_id": "ws0", "tag": "t", "guest_path": "/w" }),
+                "`tag` is only valid",
+            ),
+            (
+                json!({ "source": "virtio_fs", "tag": "t", "drive_id": "ws0", "guest_path": "/w" }),
+                "only valid on block",
+            ),
+            (
+                json!({ "source": "virtio_fs", "tag": "t", "label": "l", "guest_path": "/w" }),
+                "only valid on block",
+            ),
+            (
+                json!({ "source": "nfs", "guest_path": "/w" }),
+                "unknown variant",
+            ),
+            (
+                json!({ "drive_id": "ws0", "guest_path": "/w", "ro": true }),
+                "unknown field",
+            ),
+        ] {
+            let err = serde_json::from_value::<GuestMount>(bad.clone()).unwrap_err();
+            assert!(err.to_string().contains(why), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn mount_source_standalone_tagging() {
+        let s = MountSource::VirtioFs { tag: "t".into() };
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(v, json!({ "source": "virtio_fs", "tag": "t" }));
+        assert_eq!(serde_json::from_value::<MountSource>(v).unwrap(), s);
+        let b: MountSource =
+            serde_json::from_value(json!({ "source": "block", "drive_id": "ws0" })).unwrap();
+        assert_eq!(b.drive_id(), Some("ws0"));
     }
 }

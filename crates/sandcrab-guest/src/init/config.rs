@@ -10,8 +10,8 @@ use std::{
 };
 
 use sandcrab_protocol::init::{
-    CONTROL_PORT, GuestMount, InitConfig, MAX_DRIVE_ID_LEN, MAX_EXT4_LABEL_LEN, ROOT_DRIVE_ID,
-    SCRATCH_DRIVE_ID,
+    CONTROL_PORT, GuestMount, InitConfig, MAX_DRIVE_ID_LEN, MAX_EXT4_LABEL_LEN, MountSource,
+    ROOT_DRIVE_ID, SCRATCH_DRIVE_ID,
 };
 
 /// Guest paths that may never be (or contain) a workspace mount point.
@@ -139,9 +139,18 @@ pub fn plan_mounts(mounts: &[GuestMount]) -> io::Result<Vec<MountStep>> {
     let mut targets = BTreeSet::new();
     let mut steps = Vec::with_capacity(mounts.len());
     for m in mounts {
-        validate_drive_id(&m.drive_id)?;
-        if !ids.insert(m.drive_id.clone()) {
-            return Err(invalid(format!("duplicate drive_id `{}`", m.drive_id)));
+        let (drive_id, label) = match &m.source {
+            MountSource::Block { drive_id, label } => (drive_id, label),
+            // libkrun virtio-fs shares land with the guest-virtiofs step.
+            MountSource::VirtioFs { tag } => {
+                return Err(invalid(format!(
+                    "virtio-fs mount `{tag}` is not supported by this crabd"
+                )));
+            }
+        };
+        validate_drive_id(drive_id)?;
+        if !ids.insert(drive_id.clone()) {
+            return Err(invalid(format!("duplicate drive_id `{drive_id}`")));
         }
         let target = validate_mount_point(&m.guest_path)?;
         if !targets.insert(target.clone()) {
@@ -150,14 +159,14 @@ pub fn plan_mounts(mounts: &[GuestMount]) -> io::Result<Vec<MountStep>> {
                 target.display()
             )));
         }
-        let label = m.label.clone().unwrap_or_else(|| m.drive_id.clone());
+        let label = label.clone().unwrap_or_else(|| drive_id.clone());
         if label.is_empty() || label.len() > MAX_EXT4_LABEL_LEN || label.contains('\0') {
             return Err(invalid(format!(
                 "ext4 label `{label}` must be 1..={MAX_EXT4_LABEL_LEN} bytes"
             )));
         }
         steps.push(MountStep {
-            drive_id: m.drive_id.clone(),
+            drive_id: drive_id.clone(),
             label,
             target,
             read_only: m.read_only,
@@ -220,12 +229,7 @@ mod tests {
     use sandcrab_protocol::init::InitUser;
 
     fn gm(id: &str, path: &str, ro: bool) -> GuestMount {
-        GuestMount {
-            drive_id: id.into(),
-            label: None,
-            guest_path: path.into(),
-            read_only: ro,
-        }
+        GuestMount::block(id, None, path, ro)
     }
 
     fn cfg(mounts: Vec<GuestMount>) -> InitConfig {
@@ -288,9 +292,11 @@ mod tests {
             let err = plan_mounts(&m).unwrap_err().to_string();
             assert!(err.contains(why), "{m:?}: {err}");
         }
-        let mut long_label = gm("ws0", "/w", false);
-        long_label.label = Some("x".repeat(17));
+        let long_label = GuestMount::block("ws0", Some("x".repeat(17)), "/w", false);
         assert!(plan_mounts(&[long_label]).is_err());
+        let virtio_fs = GuestMount::virtio_fs("ws0", "/w", false);
+        let err = plan_mounts(&[virtio_fs]).unwrap_err().to_string();
+        assert!(err.contains("not supported"), "{err}");
     }
 
     #[test]

@@ -280,7 +280,11 @@ mod fake {
                     let (img, owner, guest_path) = {
                         let st = fake.state.lock().unwrap();
                         let cfg = st.configured.as_ref().unwrap();
-                        let m = cfg.mounts.iter().find(|m| m.drive_id == drive).unwrap();
+                        let m = cfg
+                            .mounts
+                            .iter()
+                            .find(|m| m.drive_id() == Some(drive.as_str()))
+                            .unwrap();
                         (
                             st.drives[&drive].clone(),
                             (cfg.user.uid, cfg.user.gid),
@@ -647,7 +651,7 @@ async fn spawn_tools_workspaces_sync_back_destroy() {
         .iter()
         .map(|m| {
             (
-                m.drive_id.as_str(),
+                m.drive_id().unwrap(),
                 m.guest_path.to_str().unwrap(),
                 m.read_only,
             )

@@ -186,12 +186,7 @@ mod tests {
             },
             env: Default::default(),
             default_cwd: "/workspace".into(),
-            mounts: vec![GuestMount {
-                drive_id: "ws0".into(),
-                label: None,
-                guest_path: "/workspace".into(),
-                read_only: false,
-            }],
+            mounts: vec![GuestMount::block("ws0", None, "/workspace", false)],
             network: false,
             dns: vec![],
             tools_port: 1024,
@@ -211,7 +206,10 @@ mod tests {
             let result = match req.method.as_str() {
                 METHOD_CONFIGURE => {
                     let c: InitConfig = serde_json::from_value(req.params.unwrap()).unwrap();
-                    assert_eq!(c.mounts[0].drive_id, "ws0");
+                    assert_eq!(
+                        c.mounts[0],
+                        GuestMount::block("ws0", None, "/workspace", false)
+                    );
                     serde_json::json!({"serve_pid": 9, "boot_ms": 120})
                 }
                 METHOD_PING => serde_json::json!({}),
