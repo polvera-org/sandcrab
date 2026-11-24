@@ -27,6 +27,11 @@ GLYPHS = ROOT / "docs/site/assets/crab/svg"
 BEGIN = "<!-- BENCH-DATA:BEGIN -->"
 END = "<!-- BENCH-DATA:END -->"
 
+# Bench runs before the Docker backend rename recorded it as "docker-dev"; new
+# runs record "docker". Normalise on read so old and new results line up.
+LEGACY_BACKENDS = {"docker-dev": "docker"}
+LEGACY_RE = re.compile(r"\b(" + "|".join(map(re.escape, LEGACY_BACKENDS)) + r")\b")
+
 # Steady-state call metrics have n=900; keep stats only to keep the page small.
 SAMPLES_SKIP = ("call.",)
 HOST_KEYS = (
@@ -46,6 +51,18 @@ def num(v):
     if isinstance(v, float) and v.is_integer():
         return int(v)
     return v
+
+
+def normalise_backends(o):
+    """Rewrite legacy backend names in every key and string (cells, density,
+    backends list, drift check, notes, not_measured reasons)."""
+    if isinstance(o, dict):
+        return {normalise_backends(k): normalise_backends(v) for k, v in o.items()}
+    if isinstance(o, list):
+        return [normalise_backends(v) for v in o]
+    if isinstance(o, str):
+        return LEGACY_RE.sub(lambda m: LEGACY_BACKENDS[m.group(1)], o)
+    return o
 
 
 def slim_metric(mid: str, m: dict, keep_samples: bool) -> dict:
@@ -85,7 +102,7 @@ def slim_run(path: Path, keep_samples: bool) -> dict:
             "steps": [[s["i"], s["spawn_ready_ns"], s["host_mem_available"], s["cgroup_mem_total"]]
                       for s in r["steps"]],
         })
-    return {
+    return normalise_backends({
         "file": f"docs/bench/results/{path.name}",
         "sha256": hashlib.sha256(raw).hexdigest(),
         "run_id": d["run_id"], "git": d["git"], "seed": d["seed"],
@@ -97,7 +114,7 @@ def slim_run(path: Path, keep_samples: bool) -> dict:
         "config": {k: d["config"].get(k) for k in CONFIG_KEYS},
         "templates": d["templates"], "backends": d["backends"],
         "cells": cells, "density": density,
-    }
+    })
 
 
 def rust_caps(rel: str) -> dict:
@@ -131,7 +148,7 @@ def main() -> None:
         "canonical": slim_run(RESULTS / CANONICAL, keep_samples=True),
         "rerun": slim_run(RESULTS / RERUN, keep_samples=False),
         "code_caps": {
-            "docker-dev": rust_caps("crates/sandcrab-backend-docker/src/backend.rs"),
+            "docker": rust_caps("crates/sandcrab-backend-docker/src/backend.rs"),
             "firecracker": rust_caps("crates/sandcrab-backend-firecracker/src/backend.rs"),
         },
         "glyphs": glyphs(),
