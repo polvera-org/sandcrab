@@ -83,7 +83,7 @@ steps:
     title: "ffi.rs (libloading table, sha-before-dlopen, safe Ctx) + bin/sandcrab-krun (config→verify→configure→lifeline→start_enter, exit codes 70-79); test /dev/fd/N for virtio-fs"
     depends_on: [lk-scaffold]
     artifacts: [crates/sandcrab-backend-libkrun/src/ffi.rs, crates/sandcrab-backend-libkrun/src/bin/sandcrab-krun.rs]
-    status: doing
+    status: done
 
   - id: lk-artifacts
     phase: implement
@@ -116,7 +116,7 @@ steps:
     title: Fake sandcrab-krun integration tests (spawn/ready/destroy, crash, escalation, lifeline, reaper, leases)
     depends_on: [lk-backend, lk-helper]
     artifacts: [crates/sandcrab-backend-libkrun/tests/fake_helper.rs]
-    status: todo
+    status: doing
 
   - id: lk-ports
     phase: implement
