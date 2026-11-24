@@ -5,99 +5,77 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>How Sandcrab Works</title>
 <meta name="description" content="An interactive 3D presentation of how Sandcrab works: sandboxes, the one wire protocol, crabd's tools, workspaces, isolation, safety and benchmark numbers.">
-<link rel="icon" type="image/svg+xml" href="landing/favicon.svg">
-<script>
-  // Apply a saved theme before first paint (shared with the landing page).
-  try { var t = localStorage.getItem('sandcrab-theme'); if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t); } catch (e) {}
-</script>
+<meta name="color-scheme" content="light">
+<meta name="theme-color" content="#FAFAF7">
+<link rel="icon" href="assets/brand/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="assets/brand/favicon-32.png" type="image/png" sizes="32x32">
+<link rel="apple-touch-icon" href="assets/brand/apple-touch-icon.png" sizes="180x180">
+<link rel="stylesheet" href="assets/brand/brand.css">
+<script src="assets/brand/theme.js"></script>
 <style>
-@font-face { font-family: "Inter"; font-weight: 100 900; font-display: swap; src: url("landing/assets/inter-latin-wght-normal-Dx4kXJAl.woff2") format("woff2"); }
-@font-face { font-family: "Space Grotesk"; font-weight: 300 700; font-display: swap; src: url("landing/assets/space-grotesk-latin-wght-normal-BhU9QXUp.woff2") format("woff2"); }
-@font-face { font-family: "JetBrains Mono"; font-weight: 400; font-display: swap; src: url("landing/assets/jetbrains-mono-latin-400-normal-V6pRDFza.woff2") format("woff2"); }
-@font-face { font-family: "JetBrains Mono"; font-weight: 500; font-display: swap; src: url("landing/assets/jetbrains-mono-latin-500-normal-BWZEU5yA.woff2") format("woff2"); }
+/* deck-only tokens on top of the brand layer (assets/brand/brand.css) */
 :root {
-  --bg:#F8F2E6; --surface:#FFFCF6; --surface-2:#F5ECD9; --ink:#0B2F38; --ink-2:#3C5A62; --ink-3:#5E7880; --line:#E2D3B4;
-  --accent:#D9472A; --teal:#1F7A8C; --dot:#CDB083; --dot-on:#0B2F38;
-  --lbl-bg:rgba(255,252,246,.92); --lbl-ink:#0B2F38; --lbl-line:rgba(11,47,56,.14);
-  --shadow:0 1px 2px rgba(11,47,56,.06),0 8px 24px rgba(11,47,56,.07);
-  color-scheme: light;
-}
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    --bg:#0A1B20; --surface:#10262D; --surface-2:#163239; --ink:#E9F1EF; --ink-2:#A9BFC0; --ink-3:#86A0A3; --line:#21414A;
-    --accent:#FF8466; --teal:#5FB7C7; --dot:#2C4B53; --dot-on:#E9F1EF;
-    --lbl-bg:rgba(16,38,45,.92); --lbl-ink:#E9F1EF; --lbl-line:rgba(233,241,239,.16);
-    --shadow:0 1px 2px rgba(0,0,0,.3),0 8px 24px rgba(0,0,0,.25);
-    color-scheme: dark;
-  }
+  --dot:var(--line-2); --dot-on:var(--rust);
+  --lbl-bg:rgba(255,255,255,.92); --lbl-ink:var(--ink); --lbl-line:rgba(29,37,41,.14);
+  --deck-top:var(--bar-h); /* deck.js sets the real header height */
 }
 :root[data-theme="dark"] {
-  --bg:#0A1B20; --surface:#10262D; --surface-2:#163239; --ink:#E9F1EF; --ink-2:#A9BFC0; --ink-3:#86A0A3; --line:#21414A;
-  --accent:#FF8466; --teal:#5FB7C7; --dot:#2C4B53; --dot-on:#E9F1EF;
-  --lbl-bg:rgba(16,38,45,.92); --lbl-ink:#E9F1EF; --lbl-line:rgba(233,241,239,.16);
-  --shadow:0 1px 2px rgba(0,0,0,.3),0 8px 24px rgba(0,0,0,.25);
-  color-scheme: dark;
+  --lbl-bg:rgba(22,34,42,.92); --lbl-line:rgba(233,231,224,.16);
 }
-* { box-sizing:border-box; }
 html, body { height:100%; }
-body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.55 Inter, system-ui, -apple-system, "Segoe UI", sans-serif; -webkit-font-smoothing:antialiased; overflow:hidden; }
-a { color:var(--accent); }
-code, .mono { font-family:"JetBrains Mono", ui-monospace, Menlo, monospace; }
-code { font-size:.88em; background:var(--surface-2); border:1px solid var(--line); border-radius:6px; padding:0 5px; }
+body { overflow:hidden; font-size:16px; line-height:1.55; }
+.site-bar { position:fixed; left:0; right:0; top:0; }
+code, .mono { font-family:var(--mono); }
 
-#stage { position:fixed; inset:0; cursor:pointer; touch-action:pan-y; }
+#stage { position:fixed; left:0; right:0; bottom:0; top:var(--deck-top); cursor:pointer; touch-action:pan-y; }
 #stage canvas { display:block; width:100%; height:100%; }
-#labels { position:fixed; inset:0; pointer-events:none; overflow:hidden; }
-.lbl { position:absolute; left:0; top:0; white-space:nowrap; font:500 11.5px/1.2 "JetBrains Mono", ui-monospace, monospace; letter-spacing:.06em; text-transform:uppercase;
-  color:var(--lbl-ink); background:var(--lbl-bg); border:1px solid var(--lbl-line); border-radius:6px; padding:4px 7px; will-change:transform, opacity; }
+#labels { position:fixed; left:0; right:0; bottom:0; top:var(--deck-top); pointer-events:none; overflow:hidden; }
+.lbl { position:absolute; left:0; top:0; white-space:nowrap; font:500 11px/1.2 var(--mono); letter-spacing:.1em; text-transform:uppercase;
+  color:var(--lbl-ink); background:var(--lbl-bg); border:1px solid var(--lbl-line); border-radius:999px; padding:4px 9px; will-change:transform, opacity; }
 .lbl.quiet { color:var(--ink-2); }
-.lbl.mono { text-transform:none; letter-spacing:0; white-space:pre; line-height:1.45; }
+.lbl.mono { text-transform:none; letter-spacing:0; white-space:pre; line-height:1.45; border-radius:8px; }
 .lbl.stat { font-size:13px; text-transform:none; letter-spacing:0; font-weight:500; }
 .lbl.bar { font-size:12px; }
 
-/* top bar */
-.top { position:fixed; left:0; right:0; top:0; height:56px; display:flex; align-items:center; justify-content:space-between; gap:12px; padding:0 24px; pointer-events:none; z-index:3; }
-.top > * { pointer-events:auto; }
-.brand { font:700 17px/1 "Space Grotesk", Inter, sans-serif; color:var(--ink); text-decoration:none; display:flex; align-items:baseline; gap:10px; }
-.brand span { font:500 11px/1 "JetBrains Mono", monospace; letter-spacing:.1em; text-transform:uppercase; color:var(--ink-2); }
-.tools { display:flex; align-items:center; gap:8px; }
-.btn { font:500 13px/1 Inter, system-ui, sans-serif; color:var(--ink); background:var(--surface); border:1px solid var(--line); border-radius:999px; padding:8px 12px; cursor:pointer; text-decoration:none; }
-.btn:hover { border-color:var(--teal); }
-.btn:focus-visible, .dot:focus-visible, .nav:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
-.btn[aria-pressed="true"] { background:var(--ink); color:var(--surface); border-color:var(--ink); }
-#counter { font:500 12px/1 "JetBrains Mono", monospace; color:var(--ink-2); letter-spacing:.06em; min-width:58px; text-align:right; }
+.btn, .pill { font-family:var(--font); }
+.btn { font:600 13px/1 var(--font); color:var(--ink); background:transparent; border:1.5px solid var(--ink); border-radius:999px; padding:8px 12px; cursor:pointer; text-decoration:none; }
+.btn:hover { border-color:var(--rust); color:var(--rust-text); }
+.btn:focus-visible, .dot:focus-visible, .nav:focus-visible { outline:2px solid var(--rust); outline-offset:2px; }
+#counter { font:500 12px/1 var(--mono); color:var(--ink-2); letter-spacing:.1em; min-width:64px; text-align:left; font-variant-numeric:tabular-nums; }
 
 /* captions */
-.slide { position:fixed; inset:0; pointer-events:none; z-index:2; visibility:hidden; }
+.slide { position:fixed; left:0; right:0; bottom:0; top:var(--deck-top); pointer-events:none; z-index:2; visibility:hidden; }
 .slide.active { visibility:visible; }
-.cap { position:absolute; left:48px; bottom:92px; width:min(400px, 33vw); pointer-events:auto; cursor:auto;
+.cap { position:absolute; left:var(--gutter); bottom:96px; width:min(440px, 34vw); pointer-events:auto; cursor:auto;
   opacity:0; transform:translateY(10px); transition:opacity .45s ease, transform .45s ease; }
 .slide.active .cap { opacity:1; transform:none; transition-delay:.35s; }
-.eyebrow { margin:0 0 10px; font:500 12px/1.3 "JetBrains Mono", monospace; text-transform:uppercase; letter-spacing:.1em; color:var(--accent); }
-.cap h1, .cap h2 { font-family:"Space Grotesk", Inter, sans-serif; letter-spacing:-.015em; line-height:1.08; margin:0; color:var(--ink); }
-.cap h2 { font-size:clamp(28px, 3.2vw, 42px); }
-.cap h1 { font-size:clamp(48px, 6.4vw, 88px); }
-.cap p { margin:12px 0 0; font-size:clamp(16px, 1.35vw, 18.5px); color:var(--ink-2); max-width:40ch; }
-.cap .epigraph { font-family:"Space Grotesk", Inter, sans-serif; font-style:italic; font-size:clamp(18px, 1.6vw, 22px); color:var(--ink); line-height:1.4; }
-.cap .src { font:12px/1.5 "JetBrains Mono", monospace; color:var(--ink-3); margin-top:14px; overflow-wrap:anywhere; }
-.cap .go { margin-top:18px; display:flex; gap:8px; flex-wrap:wrap; }
+.cap .eyebrow { margin:0 0 14px; font:400 11.5px/1.4 var(--mono); text-transform:uppercase; letter-spacing:.16em; color:var(--rust-text); }
+.cap h1, .cap h2 { font-family:var(--display); font-weight:800; font-stretch:82%; letter-spacing:-.035em; line-height:.94; margin:0; color:var(--ink); }
+.cap h2 { font-size:clamp(34px, 3.9vw, 56px); }
+.cap h1 { font-size:clamp(64px, 8.6vw, 128px); letter-spacing:-.045em; color:var(--rust); }
+.cap p { margin:14px 0 0; font-size:clamp(16px, 1.3vw, 18px); color:var(--ink-2); max-width:40ch; }
+.cap .epigraph { font:500 clamp(18px, 1.55vw, 22px)/1.35 var(--display); font-stretch:92%; letter-spacing:-.01em; color:var(--ink); border-left:3px solid var(--teal); padding-left:14px; }
+.cap .src { font:12px/1.5 var(--mono); color:var(--ink-3); margin-top:14px; overflow-wrap:anywhere; }
+.cap .go { margin-top:20px; display:flex; gap:8px; flex-wrap:wrap; }
+.cap :not(pre) > code { background:var(--bg-2); }
 img.fb { display:none; }
 
 /* bottom controls */
 .ctrl { position:fixed; left:0; right:0; bottom:20px; display:flex; align-items:center; justify-content:center; gap:14px; z-index:3; pointer-events:none; }
 .ctrl > * { pointer-events:auto; }
-.nav { width:40px; height:40px; border-radius:50%; border:1px solid var(--line); background:var(--surface); color:var(--ink); cursor:pointer; display:grid; place-items:center; font-size:18px; line-height:1; }
-.nav:hover:not(:disabled) { border-color:var(--teal); }
-.nav:disabled { opacity:.35; cursor:default; }
+.nav { width:42px; height:42px; border-radius:50%; border:1.5px solid var(--ink); background:var(--bg); color:var(--ink); cursor:pointer; display:grid; place-items:center; font:500 17px/1 var(--mono); }
+.nav:hover:not(:disabled) { background:var(--rust); border-color:var(--rust); color:#fff; }
+.nav:disabled { opacity:.3; cursor:default; }
 #dots { display:flex; gap:6px; align-items:center; }
-.dot { width:10px; height:10px; padding:0; border-radius:3px; border:0; background:var(--dot); cursor:pointer; transition:width .3s ease, background .3s ease; }
+.dot { width:10px; height:10px; padding:0; border-radius:999px; border:0; background:var(--dot); cursor:pointer; transition:width .3s ease, background .3s ease; }
 .dot:hover { background:var(--teal); }
-.dot[aria-current] { width:26px; background:var(--dot-on); }
+.dot[aria-current] { width:28px; background:var(--dot-on); }
 .dot[aria-current]:hover { background:var(--dot-on); }
-.keys { position:fixed; right:24px; bottom:28px; margin:0; font:11px/1 "JetBrains Mono", monospace; color:var(--ink-3); letter-spacing:.04em; z-index:3; }
+.ctrl #counter { margin-left:4px; }
+.keys { position:fixed; right:var(--gutter); bottom:33px; margin:0; font:11px/1 var(--mono); color:var(--ink-3); letter-spacing:.08em; text-transform:uppercase; z-index:3; }
 
 /* file:// / no-WebGL hint */
-#hint { position:fixed; left:50%; top:64px; transform:translateX(-50%); width:min(640px, calc(100vw - 32px)); z-index:4; background:var(--surface); border:1px solid var(--accent);
+#hint { position:fixed; left:50%; top:calc(var(--deck-top) + 12px); transform:translateX(-50%); width:min(640px, calc(100vw - 32px)); z-index:4; background:var(--surface); border:1.5px solid var(--rust);
   border-radius:14px; box-shadow:var(--shadow); padding:12px 16px; font-size:14px; color:var(--ink); }
 #hint p { margin:0; }
 #hint p + p { margin-top:6px; }
@@ -105,45 +83,46 @@ img.fb { display:none; }
 
 /* no-3D fallback: illustration beside (desktop) or above (phone) the caption */
 .no3d #stage { display:none; }
-.no3d img.fb { display:block; position:absolute; left:calc(min(400px, 33vw) + 96px); right:48px; top:72px; bottom:84px; width:auto; height:auto;
-  max-width:calc(100% - min(400px, 33vw) - 144px); max-height:calc(100% - 156px); margin:auto; object-fit:contain; border-radius:16px; }
+.no3d img.fb { display:block; position:absolute; left:calc(min(440px, 34vw) + var(--gutter) + 48px); right:48px; top:24px; bottom:84px; width:auto; height:auto;
+  max-width:calc(100% - min(440px, 34vw) - var(--gutter) - 96px); max-height:calc(100% - 108px); margin:auto; object-fit:contain; border-radius:16px; filter:var(--img-filter); }
 
 /* tuning panel (?tune) */
-.tune { position:fixed; right:16px; top:64px; width:min(320px, calc(100vw - 32px)); max-height:calc(100vh - 140px); overflow:auto; z-index:5;
+.tune { position:fixed; right:16px; top:calc(var(--deck-top) + 8px); width:min(320px, calc(100vw - 32px)); max-height:calc(100vh - var(--deck-top) - 90px); overflow:auto; z-index:5;
   background:var(--surface); border:1px solid var(--line); border-radius:16px; box-shadow:var(--shadow); padding:14px 16px; font-size:13px; }
-.tune h3 { margin:0 0 8px; font:600 12px/1.2 "JetBrains Mono", monospace; text-transform:uppercase; letter-spacing:.08em; }
+.tune h3 { margin:0 0 8px; font:600 12px/1.2 var(--mono); text-transform:uppercase; letter-spacing:.08em; }
 .tune label { display:grid; grid-template-columns:72px 1fr 40px; align-items:center; gap:8px; margin:6px 0; color:var(--ink-2); }
-.tune output { font:12px "JetBrains Mono", monospace; color:var(--ink); text-align:right; }
+.tune output { font:12px var(--mono); color:var(--ink); text-align:right; }
 .tune .row { display:flex; gap:6px; flex-wrap:wrap; margin-top:10px; }
 .tune .row .btn { padding:7px 10px; font-size:12px; }
-.tune .stat { color:var(--ink-2); font:11.5px/1.5 "JetBrains Mono", monospace; margin-top:8px; }
+.tune .stat { color:var(--ink-2); font:11.5px/1.5 var(--mono); margin-top:8px; }
 .tune input[type=range] { -webkit-appearance:none; appearance:none; width:100%; height:4px; border-radius:4px; background:var(--line); outline:none; }
 .tune input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; height:14px; border-radius:50%; background:var(--teal); border:2px solid var(--surface); box-shadow:0 0 0 1px var(--teal); cursor:pointer; }
 .tune input[type=range]::-moz-range-thumb { width:12px; height:12px; border-radius:50%; background:var(--teal); border:2px solid var(--surface); cursor:pointer; }
-.tune input[type=range]:focus-visible { outline:2px solid var(--accent); outline-offset:4px; }
+.tune input[type=range]:focus-visible { outline:2px solid var(--rust); outline-offset:4px; }
 .custom-scrollbar { scrollbar-width:thin; scrollbar-color:var(--line) transparent; }
 .custom-scrollbar::-webkit-scrollbar { width:8px; }
 .custom-scrollbar::-webkit-scrollbar-thumb { background:var(--line); border-radius:8px; }
 
 @media (max-width: 899px) {
-  .top { padding:0 16px; height:52px; }
-  .brand span, .keys, .top .links { display:none; }
+  .keys { display:none; }
   .cap { left:16px; right:16px; bottom:72px; width:auto; }
-  .cap h1 { font-size:44px; }
-  .cap h2 { font-size:26px; }
+  .cap h1 { font-size:60px; }
+  .cap h2 { font-size:32px; }
   .cap p { font-size:15.5px; margin-top:8px; max-width:none; }
   .cap .epigraph { font-size:17px; }
-  .eyebrow { margin-bottom:6px; font-size:11px; }
+  .cap .eyebrow { margin-bottom:8px; font-size:11px; }
   .ctrl { bottom:16px; gap:10px; }
-  .nav { width:36px; height:36px; }
+  .nav { width:38px; height:38px; }
   .dot { width:8px; height:8px; }
   .dot[aria-current] { width:20px; }
-  .lbl { font-size:9.5px; padding:3px 5px; letter-spacing:.03em; }
+  #counter { min-width:0; font-size:11px; }
+  .lbl { font-size:9.5px; padding:3px 6px; letter-spacing:.04em; }
   .lbl.stat { font-size:11px; }
   .lbl.ghost { visibility:hidden; } /* the caption names the dashed slots on phones */
-  .no3d .slide.active { display:flex; flex-direction:column; padding:60px 16px 64px; }
+  .no3d .slide.active { display:flex; flex-direction:column; padding:12px 16px 64px; }
   .no3d img.fb { position:static; flex:1 1 auto; min-height:0; max-width:100%; max-height:none; width:100%; margin:0 0 12px; }
   .no3d .cap { position:static; }
+  #hint code { white-space:normal; overflow-wrap:anywhere; }
 }
 @media (prefers-reduced-motion: reduce) {
   .cap, .slide.active .cap, .dot { transition:none; }
@@ -154,14 +133,16 @@ img.fb { display:none; }
 <div id="stage" aria-label="3D scene. Click the right side for the next slide, the left side for the previous one."></div>
 <div id="labels" aria-hidden="true"></div>
 
-<header class="top">
-  <a class="brand" href="landing/index.html">Sandcrab <span>How it works</span></a>
-  <div class="tools">
-    <span class="links"><a class="btn" href="walkthrough.html">Walkthrough</a> <a class="btn" href="bench-report.html">Bench report</a></span>
-    <button class="btn" id="theme" type="button">Auto</button>
-    <span id="counter" aria-live="polite"></span>
+<!-- SITE-HEADER:BEGIN -->
+<a class="sr-only" href="#main" onfocus="this.classList.remove('sr-only')" onblur="this.classList.add('sr-only')">Skip to content</a>
+<header class="site-bar">
+  <div class="site-bar-in">
+    <a class="site-brand" href="landing/index.html" aria-label="Sandcrab home"><svg class="site-logo" viewBox="-21 -17 42 31" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M-9 4l-5 5M-5 6l-3 6M9 4l5 5M5 6l3 6"/><path d="M-9 -1l-5 -5M9 -1l5 -5"/><circle cx="-16" cy="-8" r="4.2" fill="currentColor"/><circle cx="16" cy="-8" r="4.2" fill="currentColor"/><path d="M-4 -7l-1 -4M4 -7l1 -4"/><path d="M-12 3a12 10 0 0 1 24 0q0 4 -12 4t-12 -4z" fill="currentColor"/><g stroke="none"><circle cx="-5" cy="-12" r="2.8" fill="currentColor"/><circle cx="5" cy="-12" r="2.8" fill="currentColor"/><circle class="eye" cx="-5" cy="-12" r="1.15"/><circle class="eye" cx="5" cy="-12" r="1.15"/></g></svg><span>Sandcrab</span></a>
+    <nav class="site-nav" aria-label="Site"><a href="landing/index.html">Home</a><a href="walkthrough.html">Walkthrough</a><a href="bench-report.html">Benchmarks</a><a href="symbology.html">Symbology</a><a href="presentation.html" aria-current="page">Presentation</a><a href="https://github.com/polvera-org/sandcrab/tree/main/docs" target="_blank" rel="noopener">Docs<span class="sr-only"> (opens in a new tab)</span></a></nav>
+    <div class="site-actions"><a class="icon-btn" href="https://github.com/polvera-org/sandcrab" target="_blank" rel="noopener" aria-label="Sandcrab on GitHub (opens in a new tab)"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" d="M12 .5a11.5 11.5 0 0 0-3.64 22.41c.58.1.79-.25.79-.56v-2c-3.2.7-3.88-1.37-3.88-1.37-.52-1.33-1.28-1.69-1.28-1.69-1.05-.71.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.69 0-1.26.45-2.28 1.18-3.09-.12-.29-.51-1.46.11-3.04 0 0 .97-.31 3.17 1.18a11 11 0 0 1 5.76 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.58.23 2.75.11 3.04.74.81 1.18 1.83 1.18 3.09 0 4.42-2.7 5.4-5.27 5.68.41.36.78 1.06.78 2.14v3.17c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .5Z"/></svg></a><button class="icon-btn" type="button" data-theme-toggle aria-pressed="false" aria-label="Light theme on. Switch to dark theme"><svg class="ico ico-light" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2.5M12 19v2.5M2.5 12H5M19 12h2.5M5.3 5.3l1.8 1.8M16.9 16.9l1.8 1.8M5.3 18.7l1.8-1.8M16.9 7.1l1.8-1.8"/></svg><svg class="ico ico-dark" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z"/></svg></button><a class="pill pill-sm" href="landing/index.html#start">Quickstart</a></div>
   </div>
 </header>
+<!-- SITE-HEADER:END -->
 
 <main id="deck">
   <section class="slide" data-scene="shore" data-title="Sandcrab" aria-roledescription="slide">
@@ -188,7 +169,7 @@ img.fb { display:none; }
     <div class="cap">
       <p class="eyebrow">03 · Molting</p>
       <h2>One sandbox per turn</h2>
-      <p>Spawn, wait for crabd’s hello, call tools, destroy. On DockerDev: spawn → ready p50 <span data-v="spawnRange">227–258 ms</span>, destroy p50 <span data-v="tearRange">96–104 ms</span>.</p>
+      <p>Spawn, wait for crabd’s hello, call tools, destroy. On Docker: spawn → ready p50 <span data-v="spawnRange">227–258 ms</span>, destroy p50 <span data-v="tearRange">96–104 ms</span>.</p>
     </div>
   </section>
 
@@ -224,7 +205,7 @@ img.fb { display:none; }
     <div class="cap">
       <p class="eyebrow">07 · Tide pool vs. sealed jar</p>
       <h2>What isolates what</h2>
-      <p>DockerDev: a hardened container on the shared host kernel, dev and CI only. Firecracker: its own kernel behind KVM, built, real-KVM runs pending.</p>
+      <p>Docker: a hardened container on the shared host kernel, for single-tenant, trusted hosts. Firecracker: its own kernel behind KVM, built, real-KVM runs pending.</p>
     </div>
   </section>
 
@@ -242,7 +223,7 @@ img.fb { display:none; }
     <div class="cap">
       <p class="eyebrow">09 · The numbers</p>
       <h2>Measured, and what isn’t yet</h2>
-      <p>Canonical DockerDev run: n=<span data-v="benchN">30</span> per cell, p50 bars, p95 whiskers. Firecracker, Cloud Hypervisor and libkrun stay dashed until a KVM host measures them.</p>
+      <p>Canonical Docker run: n=<span data-v="benchN">30</span> per cell, p50 bars, p95 whiskers. Firecracker, Cloud Hypervisor and libkrun stay dashed until a KVM host measures them.</p>
       <p class="src"><span data-v="benchFile">results.json</span> · commit <span data-v="benchCommit">—</span> · <a href="bench-report.html">full report</a></p>
     </div>
   </section>
@@ -253,7 +234,7 @@ img.fb { display:none; }
       <p class="eyebrow">10 · Live check</p>
       <h2>crabagent built the landing page</h2>
       <p>Our test agent wrote it from inside Sandcrab sandboxes: <span data-v="toolCalls">188</span> tool calls, <span data-v="wall">36 minutes</span>, <span data-v="cost">$4.51</span>, <span data-v="toolErrors">zero</span> tool errors.</p>
-      <p class="go"><a class="btn" href="landing/index.html">Open the landing page</a></p>
+      <p class="go"><a class="pill pill-sm" href="landing/index.html">Open the landing page</a></p>
     </div>
   </section>
 
@@ -263,7 +244,7 @@ img.fb { display:none; }
       <p class="eyebrow">11 · Next</p>
       <h2>Stepping stones</h2>
       <p>Get a KVM host, publish Firecracker numbers, add Cloud Hypervisor and libkrun, then build the control plane.</p>
-      <p class="go"><a class="btn" href="walkthrough.html">Read the walkthrough</a></p>
+      <p class="go"><a class="pill pill-sm" href="walkthrough.html">Read the walkthrough</a></p>
     </div>
   </section>
 </main>
@@ -272,6 +253,7 @@ img.fb { display:none; }
   <button class="nav" id="prev" type="button" aria-label="Previous slide">←</button>
   <div id="dots"></div>
   <button class="nav" id="next" type="button" aria-label="Next slide">→</button>
+  <span id="counter" aria-live="polite"></span>
 </nav>
 <p class="keys" aria-hidden="true">← → space · 1–9 · click</p>
 

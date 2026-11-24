@@ -1,6 +1,6 @@
 // Sandcrab presentation — deck controller (classic script, works from file://).
 // Owns the slide index, captions, progress dots, keyboard / click / swipe
-// navigation, theme toggle, data-bound numbers and the no-3D fallback. The 3D
+// navigation, data-bound numbers and the no-3D fallback. The 3D
 // layer (world.js, an ES module) registers itself as window.__pres3d.
 (function () {
   'use strict';
@@ -65,7 +65,7 @@
     dots.forEach(function (d, j) {
       if (j === idx) d.setAttribute('aria-current', 'step'); else d.removeAttribute('aria-current');
     });
-    counter.textContent = String(idx + 1).padStart(2, '0') + ' / ' + String(N).padStart(2, '0');
+    if (counter) counter.textContent = String(idx + 1).padStart(2, '0') + ' / ' + String(N).padStart(2, '0');
     prevBtn.disabled = idx === 0;
     nextBtn.disabled = idx === N - 1;
     if (mode === 'fallback') loadImg(slides[idx]);
@@ -115,23 +115,13 @@
     if (Math.abs(dx) < 8 && Math.abs(dy) < 8) go(idx + (e.clientX < innerWidth / 3 ? -1 : 1));
   });
 
-  // ── theme toggle (auto → light → dark), shared key with the landing page ──
-  var themeBtn = document.getElementById('theme');
-  var THEMES = ['auto', 'light', 'dark'];
-  function applyTheme(t) {
-    if (t === 'light' || t === 'dark') root.setAttribute('data-theme', t); else root.removeAttribute('data-theme');
-    themeBtn.textContent = t.charAt(0).toUpperCase() + t.slice(1);
-    themeBtn.setAttribute('aria-label', 'Theme: ' + t + '. Change theme');
-  }
-  var theme = 'auto';
-  try { theme = localStorage.getItem('sandcrab-theme') || 'auto'; } catch (e) { /* ignore */ }
-  if (THEMES.indexOf(theme) < 0) theme = 'auto';
-  applyTheme(theme);
-  themeBtn.addEventListener('click', function () {
-    theme = THEMES[(THEMES.indexOf(theme) + 1) % THEMES.length];
-    try { localStorage.setItem('sandcrab-theme', theme); } catch (e) { /* ignore */ }
-    applyTheme(theme);
-  });
+  // ── theme: owned by assets/brand/theme.js (shared header toggle). Here we only
+  // keep the deck below the shared header, whose height wraps on narrow screens.
+  var bar = document.querySelector('.site-bar');
+  function fitTop() { if (bar) root.style.setProperty('--deck-top', bar.offsetHeight + 'px'); }
+  fitTop();
+  if (bar && 'ResizeObserver' in window) new ResizeObserver(fitTop).observe(bar);
+  else addEventListener('resize', fitTop);
 
   // ── fallback: symbology illustrations instead of 3D ──
   function loadImg(s) {

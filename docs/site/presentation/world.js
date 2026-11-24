@@ -83,7 +83,7 @@ function boot() {
   // the caption, by shifting the orthographic frustum, not the camera.
   function region() {
     const cap = document.querySelector('.slide.active .cap');
-    const top = 64, bottom = 64;
+    const top = 28, bottom = 64; // the stage already starts below the shared header
     if (innerWidth >= 900 && cap) {
       const x0 = cap.offsetLeft + cap.offsetWidth + 24;
       return { x0, y0: top, x1: w - 24, y1: h - bottom };
@@ -205,8 +205,8 @@ function boot() {
     if (!raf) render();
   }
   function applyTheme() {
-    const t = document.documentElement.getAttribute('data-theme');
-    const dark = t === 'dark' || (t !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches);
+    // same rule as the page (assets/brand/theme.js): light unless the toggle chose dark
+    const dark = document.documentElement.getAttribute('data-theme') === 'dark';
     catcherMat.opacity = dark ? 0.3 : 0.14;
     hemi.intensity = dark ? 1.35 : 1.5;
     if (!raf) render();
@@ -234,7 +234,6 @@ function boot() {
   new ResizeObserver(resize).observe(el);
   document.addEventListener('visibilitychange', sync);
   reduce.addEventListener('change', sync);
-  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyTheme);
   new MutationObserver(applyTheme).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
   canvas.addEventListener('webglcontextlost', (e) => { e.preventDefault(); deck.fallback('contextlost'); });
 
