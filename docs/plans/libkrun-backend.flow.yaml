@@ -196,7 +196,7 @@ steps:
     phase: implement
     agent: ada
     title: "Bench on kvm-dedicated, STANDARD tier (--resource-runs 10), --backends libkrun only; reuse the full docker,firecracker run from bench-kvm-fc"
-    depends_on: [lk-e2e-linux, bench-kvm-fc, bench-fixes]
+    depends_on: [lk-e2e-linux, bench-kvm-fc, bench-fixes, lk-w2-emfile]
     artifacts: [docs/bench/results/]
     status: todo
 
@@ -224,7 +224,7 @@ steps:
     title: "Bench: Firecracker memory/CPU probes (currently 'not measured'), fix the wrong 'firecracker has no VMM' message"
     depends_on: [bench-kvm-fc]
     artifacts: [crates/sandcrab-bench/]
-    status: doing
+    status: done
 
   - id: fc-net-egress
     phase: implement
@@ -249,6 +249,14 @@ steps:
     depends_on: [fc-net-egress]
     artifacts: [crates/sandcrab-backend-firecracker/src/net.rs, scripts/build-crabd.sh, crates/sandcrab-sdk/tests/common/mod.rs]
     status: todo
+
+  - id: lk-w2-emfile
+    phase: implement
+    agent: ada
+    title: "libkrun W2 (two workspaces) fails with EMFILE in the guest on Linux (found by bench smoke); root-cause + fix + regression test; also explain Firecracker idle CPU ~30x libkrun"
+    depends_on: [bench-fixes, lk-e2e-linux]
+    artifacts: [crates/sandcrab-backend-libkrun/, crates/sandcrab-guest/]
+    status: doing
 
   - id: lk-review
     phase: verify
