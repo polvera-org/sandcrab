@@ -27,6 +27,7 @@ use crate::util::{self, print_json};
 pub const E2E_NOTE: &str = "e2e pending";
 
 /// `$SANDCRAB_SIGN_IDENTITY`: codesign identity for the helper (default `-`, ad hoc).
+#[cfg(target_os = "macos")]
 pub const SIGN_IDENTITY_ENV: &str = "SANDCRAB_SIGN_IDENTITY";
 
 /// The state root, made absolute (the backend wants absolute library and socket paths).
