@@ -12,12 +12,22 @@
 //! - At most 64 tunnels per published port on the host, 64 per sandbox in `crabd`.
 //! - The forwards stop on destroy, on drop of the sandbox, and as soon as the helper exits
 //!   (crash watch), so a dead VM never leaves a listener behind.
+//!
+//! **Half-close (measured on HVF, libkrun 1.19.8):** a guest `SHUT_WR` reaches the host as EOF,
+//! but a host `SHUT_WR` on the `v.sock` Unix socket breaks the stream (the guest's reply is
+//! lost and the host never sees EOF). So the client's half-close is not forwarded
+//! ([`ForwarderConfig::forward_half_close`] `= false`, like Firecracker): HTTP/1.0 clients that
+//! half-close after the request get their reply, protocols that need the guest to see the
+//! client's EOF (upload-until-EOF) do not work.
 
 use std::sync::Arc;
 
 use sandcrab_core::{Connector, ForwarderConfig, PortForwards, PortSpec, Result};
 
 use crate::vm::{ExitRx, KrunConnector, until_exit};
+
+/// Whether a client's `SHUT_WR` is forwarded into the tunnel (see the module docs).
+pub const HOST_HALF_CLOSE: bool = false;
 
 /// Check the port list before anything is created.
 pub fn check(ports: &[PortSpec]) -> Result<()> {
@@ -36,7 +46,11 @@ pub(crate) async fn publish(
         })
     });
     let connector: Arc<dyn Connector> = connector;
-    PortForwards::bind(connector, ports, ForwarderConfig::default(), until).await
+    let config = ForwarderConfig {
+        forward_half_close: HOST_HALF_CLOSE,
+        ..ForwarderConfig::default()
+    };
+    PortForwards::bind(connector, ports, config, until).await
 }
 
 #[cfg(test)]

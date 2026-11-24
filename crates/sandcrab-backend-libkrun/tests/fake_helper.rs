@@ -1100,21 +1100,23 @@ async fn closed_port() -> u16 {
     l.local_addr().unwrap().port()
 }
 
-/// Send `data`, half-close, read the echo to EOF.
+/// Send `data` and read back as many bytes. The client does not half-close: libkrun does not
+/// forward a client's `SHUT_WR` into the tunnel (`ports::HOST_HALF_CLOSE`).
 async fn echo_round_trip(addr: std::net::SocketAddr, data: &[u8]) -> Vec<u8> {
     let s = tokio::net::TcpStream::connect(addr).await.unwrap();
     let (mut r, mut w) = s.into_split();
     let data = data.to_vec();
+    let len = data.len();
     let writer = tokio::spawn(async move {
         w.write_all(&data).await.unwrap();
-        w.shutdown().await.unwrap();
+        w
     });
-    let mut back = Vec::new();
-    tokio::time::timeout(Duration::from_secs(10), r.read_to_end(&mut back))
+    let mut back = vec![0u8; len];
+    tokio::time::timeout(Duration::from_secs(10), r.read_exact(&mut back))
         .await
         .expect("echo within 10 s")
         .unwrap();
-    writer.await.unwrap();
+    drop(writer.await.unwrap());
     back
 }
 
