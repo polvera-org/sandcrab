@@ -253,7 +253,7 @@ async fn base_boot_hello_bash_and_destroy() {
     assert!(r.stdout.starts_with(&host), "{}", r.stdout);
     assert!(r.stdout.contains("overlay"), "{}", r.stdout);
 
-    // Hardening (guest-hardening step): no_new_privs, no capabilities.
+    // Hardening (guest-hardening steps): no_new_privs, no capabilities, empty bounding set.
     let status = bash(&sb, "cat /proc/self/status").await.stdout;
     let field = |k: &str| {
         status
@@ -265,6 +265,7 @@ async fn base_boot_hello_bash_and_destroy() {
     };
     assert_eq!(field("NoNewPrivs:"), "1");
     assert_eq!(u64::from_str_radix(&field("CapEff:"), 16).unwrap(), 0);
+    assert_eq!(u64::from_str_radix(&field("CapBnd:"), 16).unwrap(), 0);
 
     // Orphans re-parented to PID 1 are reaped (no zombies), even when they escaped the
     // tool's process group.

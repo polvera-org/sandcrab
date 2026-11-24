@@ -164,6 +164,22 @@ async fn base_boot_hello_bash_and_destroy() {
     assert!(r.stdout.starts_with(&host), "{}", r.stdout);
     assert!(r.stdout.contains("overlay"), "{}", r.stdout);
 
+    // Docker-parity hardening by `crabd init`: empty bounding set, pids cgroup, /tmp tmpfs.
+    let r = bash(
+        &sb,
+        "grep CapBnd /proc/self/status; cat /proc/self/cgroup /sys/fs/cgroup/sandbox/pids.max; \
+         findmnt -no FSTYPE,OPTIONS /tmp",
+    )
+    .await;
+    let lines: Vec<_> = r.stdout.lines().collect();
+    assert_eq!(lines[0], "CapBnd:\t0000000000000000", "{}", r.stdout);
+    assert_eq!(lines[1], "0::/sandbox", "{}", r.stdout);
+    assert_eq!(lines[2], "1024", "{}", r.stdout);
+    assert!(lines[3].starts_with("tmpfs "), "{}", r.stdout);
+    for o in ["nosuid", "nodev", "noexec", "size=262144k"] {
+        assert!(lines[3].split([' ', ',']).any(|x| x == o), "{}", r.stdout);
+    }
+
     // bash timeout kills the whole process group.
     let started = Instant::now();
     let r = bash_t(&sb, "sleep 300 & sleep 301 & wait", Some(500)).await;
