@@ -83,7 +83,7 @@ steps:
     title: "artifacts.rs pins + scripts/fetch-libkrun.sh offering Homebrew bottles (default when brew present) and --from-source pinned tags (only option without brew; Linux path); `sandcrab libkrun install` support fn"
     depends_on: [lk-scaffold]
     artifacts: [crates/sandcrab-backend-libkrun/src/artifacts.rs, scripts/fetch-libkrun.sh]
-    status: doing
+    status: done
 
   - id: lk-backend
     phase: implement
