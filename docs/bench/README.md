@@ -24,6 +24,21 @@ KVM host (kvm-homelab), which is still to do.
 - Optional, as root: dropping page caches is needed for the `cold` cells. Without root those
   cells are recorded as `not_measured`, with the reason.
 
+## Benchmark tiers: pick the smallest that answers the question
+
+A full run is hours of machine time, mostly the `resources` cells (each run samples a 60 s idle
+window, ~72 s per iteration). Choose the tier on purpose:
+
+| Tier | Flags | Time (2 backends, 2 templates) | Use it for |
+|---|---|---|---|
+| **Smoke** | `--quick` | ~5 min | Revalidating after a change to a backend, the bench or the guest. The result is marked invalid and is never published. **This is the default for agents.** |
+| **Standard** | `--runs 30 --warmups 5 --resource-runs 10` (add `--allow-small-n`) | ~1 h | Step-level numbers, and before/after comparisons for perf work. The result is marked invalid for resources; say so in the README note. |
+| **Full** | the canonical command below | ~3 h+ | Published numbers only (bench report, landing page, presentation): once per host per release, or when a change plausibly moves the headline numbers. Requires an explicit request from the maintainer. |
+
+Reuse results instead of re-running: if a backend's code and the host have not changed, its
+last valid Full result still stands. Add the new backend in its own run and say in the README
+note which runs are combined.
+
 ## Running
 
 ```bash

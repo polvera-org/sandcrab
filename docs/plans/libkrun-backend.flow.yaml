@@ -195,8 +195,8 @@ steps:
   - id: lk-bench-kvm
     phase: implement
     agent: ada
-    title: "Bench on kvm-dedicated: --backends libkrun added to the docker,firecracker run (same host, same day where possible)"
-    depends_on: [lk-e2e-linux, bench-kvm-fc]
+    title: "Bench on kvm-dedicated, STANDARD tier (--resource-runs 10), --backends libkrun only; reuse the full docker,firecracker run from bench-kvm-fc"
+    depends_on: [lk-e2e-linux, bench-kvm-fc, bench-fixes]
     artifacts: [docs/bench/results/]
     status: todo
 
@@ -217,11 +217,36 @@ steps:
     status: todo
 
   # ---- verify / document
+  # ---- follow-ups for issues found during e2e/bench (not in the original plan)
+  - id: bench-fixes
+    phase: implement
+    agent: ada
+    title: "Bench: Firecracker memory/CPU probes (currently 'not measured'), fix the wrong 'firecracker has no VMM' message"
+    depends_on: [bench-kvm-fc]
+    artifacts: [crates/sandcrab-bench/]
+    status: todo
+
+  - id: fc-net-egress
+    phase: implement
+    agent: ada
+    title: "fc-net-setup.sh: block outbound SMTP (25/465/587) and the remaining reserved ranges (0/8, 192.0.0/24, 198.18/15, multicast); survive Docker restarts; re-apply on kvm-dedicated"
+    depends_on: [kvm-net]
+    artifacts: [scripts/fc-net-setup.sh, docs/hosting.md]
+    status: todo
+
+  - id: guest-hardening-2
+    phase: implement
+    agent: ada
+    title: "crabd parity with Docker hardening in microVMs: drop the capability bounding set, pids limit, /tmp as size-limited nosuid,nodev,noexec tmpfs; seccomp evaluated (design note, may defer)"
+    depends_on: [guest-hardening]
+    artifacts: [crates/sandcrab-guest/]
+    status: todo
+
   - id: lk-review
     phase: verify
     agent: nebula
-    title: QA + security review (helper unsafe island, TSI exposure, virtio-fs traversal/identity race, capability honesty, lifeline)
-    depends_on: [bench-report]
+    title: "QA + security review (helper unsafe island, TSI exposure, virtio-fs traversal/identity race, capability honesty, lifeline); decide: per-spawn root-disk hash, Linux lib-hash cost (~187 ms w/o SHA-NI)"
+    depends_on: [bench-report, fc-net-egress, guest-hardening-2]
     status: todo
 
   - id: lk-live

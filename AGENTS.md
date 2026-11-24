@@ -77,6 +77,14 @@ cargo clippy --workspace --all-targets -- -D warnings
 Note on macOS local dev:
 - `crabd` runs inside Linux containers/microVMs; cross-compile via `x86_64-unknown-linux-musl` / `aarch64-unknown-linux-musl` (or build inside a multi-stage Docker template stage) while unit-testing `sandcrab-guest` tool modules natively on macOS.
 
+### Benchmarks: smallest tier that answers the question
+
+`sandcrab-bench` has three tiers (see [`docs/bench/README.md`](docs/bench/README.md#benchmark-tiers-pick-the-smallest-that-answers-the-question)):
+**Smoke** (`--quick`, minutes, never published) is the default for revalidation; **Standard**
+(`--resource-runs 10`, ~1 h) for step-level and perf before/after numbers; **Full** (canonical, hours) only
+for published numbers and only when the human asks for it. Reuse earlier valid results when
+the backend and host have not changed.
+
 ### Disk hygiene (clean up after yourself)
 
 This repo is heavy on disk: Rust `target/` dirs (several GB each), template images, rootfs images, and Docker
