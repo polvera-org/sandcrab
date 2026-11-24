@@ -1,0 +1,308 @@
+//! `sandcrab-krun`: the per-sandbox libkrun VMM helper (design §2).
+//!
+//! 1. Read one [`HelperConfig`] JSON line from stdin and validate it (exit 70 on failure).
+//! 2. Start the **lifeline**: the rest of stdin moves to a private fd watched by a thread, and
+//!    fd 0 becomes `/dev/null` (libkrun takes over stdin for the guest console, which must not
+//!    swallow the pipe). EOF = the owning process is gone → SIGKILL ourselves, VM included.
+//!    On Linux `PR_SET_PDEATHSIG` is set as well.
+//! 3. Verify pins and identities: the libkrunfw leaf-name lookup can only find the pinned
+//!    file (74, see [`ffi::check_libkrunfw_lookup`]); libkrunfw + libkrun SHA-256 before
+//!    `dlopen` (71 / 74); disks exist, optional disk SHA-256s (70 / 71); workspace roots'
+//!    `(dev, ino)` against the lease identity (72). Shares are handed to libkrun as
+//!    `/dev/fd/<n>` of the verified directory fd, closing the verify → open race (§8).
+//!    Stale sockets at the vsock UDS paths (from a SIGKILLed run) are removed (70 if the
+//!    path is something else).
+//! 4. Apply the [`ffi::plan`] (each `krun_*` call is logged to stderr first; 73 on failure).
+//! 5. `krun_start_enter`: never returns on success (libkrun `exit()`s with the guest's
+//!    status); returning is 75.
+//!
+//! stdout/stderr belong to the caller (the backend points them at `vmm.log`).
+
+use std::io::{ErrorKind, Read};
+use std::os::fd::{AsFd, AsRawFd, OwnedFd};
+use std::os::unix::fs::MetadataExt;
+use std::path::PathBuf;
+use std::time::Instant;
+
+use sandcrab_backend_libkrun::ffi::{self, FfiError, Krun, KrunCall};
+use sandcrab_backend_libkrun::helper_proto::{HelperConfig, VirtioFsShare, exit_code};
+
+fn log(msg: impl std::fmt::Display) {
+    eprintln!("sandcrab-krun: {msg}");
+}
+
+/// A pre-start failure: message + helper exit code.
+struct Fail(i32, String);
+
+impl Fail {
+    fn new(code: i32, msg: impl std::fmt::Display) -> Self {
+        Self(code, msg.to_string())
+    }
+}
+
+fn main() {
+    let Fail(code, msg) = run();
+    log(format_args!(
+        "error: {msg} (exit {code}: {})",
+        exit_code::describe(code).unwrap_or("?")
+    ));
+    std::process::exit(code);
+}
+
+/// Only returns on failure; on success `krun_start_enter` takes over the process.
+fn run() -> Fail {
+    let t0 = Instant::now();
+    let cfg = match HelperConfig::read_from(std::io::stdin().lock()) {
+        Ok(c) => c,
+        Err(e) => return Fail::new(exit_code::CONFIG_INVALID, e),
+    };
+    if let Err(e) = start_lifeline() {
+        return Fail::new(exit_code::CONFIG_INVALID, format!("lifeline setup: {e}"));
+    }
+
+    if let Err(e) = ffi::check_libkrunfw_lookup(&cfg.libkrunfw.path, |k| std::env::var_os(k)) {
+        return Fail::new(exit_code::LIBKRUN_LOAD, e);
+    }
+    let t_pins = Instant::now();
+    let krun = match Krun::load(&cfg.libkrun, &cfg.libkrunfw) {
+        Ok(k) => {
+            log(format_args!(
+                "libkrun + libkrunfw sha256 ok, loaded ({} ms)",
+                t_pins.elapsed().as_millis()
+            ));
+            k
+        }
+        Err(e @ FfiError::ShaMismatch { .. }) => return Fail::new(exit_code::PIN_MISMATCH, e),
+        Err(e) => return Fail::new(exit_code::LIBKRUN_LOAD, e),
+    };
+    if let Err(f) = verify_disks(&cfg) {
+        return f;
+    }
+    if let Err(f) = clear_stale_sockets(&cfg) {
+        return f;
+    }
+    // Opened, verified workspace roots; kept open until start_enter.
+    let roots = match open_shares(&cfg.virtiofs) {
+        Ok(r) => r,
+        Err(f) => return f,
+    };
+
+    let config_err = |e: FfiError| Fail::new(exit_code::LIBKRUN_CONFIG, e);
+    log(format_args!("krun_set_log_level({})", cfg.log_level));
+    if let Err(e) = krun.set_log_level(cfg.log_level) {
+        return config_err(e);
+    }
+    match krun.max_vcpus() {
+        Ok(max) if u32::from(cfg.vcpus) > max => {
+            return Fail::new(
+                exit_code::LIBKRUN_CONFIG,
+                format!("vcpus {} exceeds krun_get_max_vcpus() = {max}", cfg.vcpus),
+            );
+        }
+        Ok(_) => {}
+        Err(e) => return config_err(e),
+    }
+    let ctx = match krun.create_ctx() {
+        Ok(c) => c,
+        Err(e) => return config_err(e),
+    };
+    log(format_args!("krun_create_ctx() = {}", ctx.id()));
+
+    let mut shares = roots.iter();
+    for mut call in ffi::plan(&cfg) {
+        if let KrunCall::AddVirtiofs { path, .. } = &mut call {
+            // The share root the identity check just pinned (see `share_path`).
+            let Some(root) = shares.next() else {
+                return Fail::new(exit_code::LIBKRUN_CONFIG, "virtio-fs plan/config mismatch");
+            };
+            *path = root.share_path();
+        }
+        log(&call);
+        if let Err(e) = ctx.apply(&call) {
+            return config_err(e);
+        }
+    }
+
+    log(format_args!(
+        "krun_start_enter({}) after {} ms",
+        ctx.id(),
+        t0.elapsed().as_millis()
+    ));
+    let e = ctx.start_enter();
+    drop(roots);
+    Fail::new(exit_code::START_FAILED, e)
+}
+
+/// Move the rest of stdin to a private fd watched by a thread; fd 0 becomes `/dev/null`.
+fn start_lifeline() -> std::io::Result<()> {
+    let pipe: OwnedFd = std::io::stdin().as_fd().try_clone_to_owned()?;
+    let devnull = std::fs::File::open("/dev/null")?;
+    rustix::stdio::dup2_stdin(&devnull)?;
+
+    #[cfg(target_os = "linux")]
+    let parent = rustix::process::getppid();
+
+    std::thread::Builder::new()
+        .name("lifeline".into())
+        .spawn(move || {
+            let mut pipe = std::fs::File::from(pipe);
+            let mut buf = [0u8; 64];
+            loop {
+                match pipe.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(_) => {}
+                    Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                    Err(_) => break,
+                }
+            }
+            die("lifeline closed (owner gone)");
+        })?;
+
+    #[cfg(target_os = "linux")]
+    {
+        // Belt and braces with the pipe. If the parent already died before the prctl, the
+        // signal never comes, so re-check the parent afterwards.
+        rustix::process::set_parent_process_death_signal(Some(rustix::process::Signal::KILL))?;
+        if rustix::process::getppid() != parent {
+            die("parent exited before PR_SET_PDEATHSIG");
+        }
+    }
+    Ok(())
+}
+
+/// SIGKILL ourselves (and so the VM, which lives in this process). No guest flush: the
+/// owner is gone, nobody would read the result.
+fn die(why: &str) -> ! {
+    log(format_args!("{why}: killing the VM"));
+    let _ = rustix::process::kill_process(rustix::process::getpid(), rustix::process::Signal::KILL);
+    // Delivery to a multi-threaded process is asynchronous; give it time before the fallback.
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    std::process::abort();
+}
+
+fn verify_disks(cfg: &HelperConfig) -> Result<(), Fail> {
+    for d in [&cfg.root, &cfg.scratch].into_iter().chain(&cfg.disks) {
+        match std::fs::metadata(&d.path) {
+            Ok(m) if m.is_file() => {}
+            Ok(_) => {
+                return Err(Fail::new(
+                    exit_code::CONFIG_INVALID,
+                    format!("disk `{}` is not a regular file", d.path.display()),
+                ));
+            }
+            Err(e) => {
+                return Err(Fail::new(
+                    exit_code::CONFIG_INVALID,
+                    format!("disk `{}`: {e}", d.path.display()),
+                ));
+            }
+        }
+        if let Some(sha) = &d.sha256 {
+            let t = Instant::now();
+            match ffi::verify_sha256(&d.path, sha) {
+                Ok(()) => log(format_args!(
+                    "{} sha256 ok ({} ms)",
+                    d.block_id,
+                    t.elapsed().as_millis()
+                )),
+                Err(e @ FfiError::ShaMismatch { .. }) => {
+                    return Err(Fail::new(exit_code::PIN_MISMATCH, e));
+                }
+                Err(e) => return Err(Fail::new(exit_code::CONFIG_INVALID, e)),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// libkrun binds the vsock → UDS listeners itself and fails with `EEXIST` on a leftover
+/// socket (e.g. from a SIGKILLed earlier helper on the same run dir). Remove it, but only if
+/// it really is a socket: anything else at that path is a config error.
+fn clear_stale_sockets(cfg: &HelperConfig) -> Result<(), Fail> {
+    use std::os::unix::fs::FileTypeExt;
+    for p in [&cfg.control_socket, &cfg.tools_socket] {
+        match std::fs::symlink_metadata(p) {
+            Err(e) if e.kind() == ErrorKind::NotFound => {}
+            Ok(m) if m.file_type().is_socket() => {
+                log(format_args!("removing stale socket `{}`", p.display()));
+                std::fs::remove_file(p).map_err(|e| {
+                    Fail::new(
+                        exit_code::CONFIG_INVALID,
+                        format!("removing stale socket `{}`: {e}", p.display()),
+                    )
+                })?;
+            }
+            Ok(_) => {
+                return Err(Fail::new(
+                    exit_code::CONFIG_INVALID,
+                    format!("`{}` exists and is not a socket", p.display()),
+                ));
+            }
+            Err(e) => {
+                return Err(Fail::new(
+                    exit_code::CONFIG_INVALID,
+                    format!("`{}`: {e}", p.display()),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A workspace root opened `O_DIRECTORY | O_NOFOLLOW` and checked against its lease identity.
+struct ShareRoot {
+    fd: OwnedFd,
+}
+
+impl ShareRoot {
+    /// Path handed to libkrun: `/dev/fd/<n>` of the verified directory fd, not the host path
+    /// (design §8 identity TOCTOU). Opening `/dev/fd/<n>` duplicates the fd (macOS fdesc;
+    /// Linux `/proc/self/fd` magic link), so libkrun's server gets exactly the inode whose
+    /// `(dev, ino)` was checked, even if the path is swapped in between. libkrun opens the
+    /// share root once while building the VM and works from that handle afterwards (verified
+    /// on macOS: nested create/rename/symlink/chmod/unlink work, and a host rename+recreate of
+    /// the path after boot stays invisible to the guest). The fd stays open (no exec happens,
+    /// so `CLOEXEC` is irrelevant) until `krun_start_enter` takes over the process.
+    fn share_path(&self) -> PathBuf {
+        PathBuf::from(format!("/dev/fd/{}", self.fd.as_raw_fd()))
+    }
+}
+
+fn open_shares(shares: &[VirtioFsShare]) -> Result<Vec<ShareRoot>, Fail> {
+    use rustix::fs::{Mode, OFlags};
+    shares
+        .iter()
+        .map(|s| {
+            let ident = |msg: String| Fail::new(exit_code::WORKSPACE_IDENTITY, msg);
+            let fd = rustix::fs::open(
+                &s.host_path,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|e| ident(format!("opening `{}`: {e}", s.host_path.display())))?;
+            if let Some(want) = s.identity {
+                let file = std::fs::File::from(fd.try_clone().map_err(|e| ident(e.to_string()))?);
+                let m = file
+                    .metadata()
+                    .map_err(|e| ident(format!("stat `{}`: {e}", s.host_path.display())))?;
+                if (m.dev(), m.ino()) != (want.dev, want.ino) {
+                    return Err(ident(format!(
+                        "`{}` is ({}, {}), lease has ({}, {})",
+                        s.host_path.display(),
+                        m.dev(),
+                        m.ino(),
+                        want.dev,
+                        want.ino
+                    )));
+                }
+            }
+            log(format_args!(
+                "virtio-fs {:?} = {:?} verified, passed as fd {}",
+                s.tag,
+                s.host_path,
+                fd.as_raw_fd()
+            ));
+            Ok(ShareRoot { fd })
+        })
+        .collect()
+}
