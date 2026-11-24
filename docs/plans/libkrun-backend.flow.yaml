@@ -149,7 +149,7 @@ steps:
     title: "kvm-dedicated: run scripts/fc-net-setup.sh --user ubuntu --persist (taps for unrestricted networking), re-pin base template"
     depends_on: [lk-approve]
     artifacts: []
-    status: todo
+    status: doing
     notes: Needs the human's OK (system change on kvm-dedicated). Host was set up 2026-11-24; FC KVM smoke 3/4 green, the 4th needs these taps.
 
   - id: fc-e2e-kvm
