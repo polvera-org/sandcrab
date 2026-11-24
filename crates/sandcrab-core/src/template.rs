@@ -73,7 +73,13 @@ impl TemplateManifest {
             }
         }
         if let Some(sha) = &t.sha256 {
-            validate_sha256(sha)?;
+            validate_sha256(sha)
+                .map_err(|e| SandboxError::Template(format!("template `{}`: {e}", t.name)))?;
+        }
+        for (arch, sha) in &t.sha256_by_arch {
+            validate_sha256(sha).map_err(|e| {
+                SandboxError::Template(format!("template `{}`: sha256_by_arch.{arch}: {e}", t.name))
+            })?;
         }
         self.resources.validate()?;
         if !self.workspace.workdir.is_absolute() {
@@ -94,6 +100,12 @@ impl TemplateManifest {
     pub fn image(&self) -> &str {
         self.template.image.as_deref().unwrap_or_default()
     }
+
+    /// Pinned digest for the host architecture ([`TemplateMeta::pinned_sha256`]).
+    #[must_use]
+    pub fn pinned_sha256_for_host(&self) -> Option<&str> {
+        self.template.pinned_sha256(ImageArch::host())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -105,12 +117,74 @@ pub struct TemplateMeta {
     /// OCI image reference. Required.
     #[serde(default)]
     pub image: Option<String>,
-    /// Expected digest of the built image / rootfs artifact, `sha256:<64 hex>`.
+    /// Expected digest of the built image / rootfs artifact, `sha256:<64 hex>`. Locally built
+    /// image IDs are arch-specific: this is the pin for any arch **not** listed in
+    /// [`Self::sha256_by_arch`] (the single-arch / legacy form).
     #[serde(default)]
     pub sha256: Option<String>,
+    /// Per-arch pins (`[template.sha256_by_arch] amd64 = "sha256:…", arm64 = "sha256:…"`).
+    /// An entry for an arch takes precedence over [`Self::sha256`]; both may be set.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sha256_by_arch: BTreeMap<ImageArch, String>,
     /// Default guest user, `uid:gid`. `SandboxConfig.user` overrides it.
     #[serde(default)]
     pub user: Option<UserSpec>,
+}
+
+impl TemplateMeta {
+    /// The pin that applies to `arch`: `sha256_by_arch[arch]` if present, else `sha256`.
+    /// With `arch = None` (a host arch with no OCI name here) only `sha256` applies.
+    #[must_use]
+    pub fn pinned_sha256(&self, arch: Option<ImageArch>) -> Option<&str> {
+        arch.and_then(|a| self.sha256_by_arch.get(&a))
+            .or(self.sha256.as_ref())
+            .map(String::as_str)
+    }
+}
+
+/// CPU architecture of a template image / rootfs, named as in OCI platforms
+/// (`linux/amd64`, `linux/arm64`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ImageArch {
+    Amd64,
+    Arm64,
+}
+
+impl ImageArch {
+    pub const ALL: [Self; 2] = [Self::Amd64, Self::Arm64];
+
+    /// OCI architecture name.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Amd64 => "amd64",
+            Self::Arm64 => "arm64",
+        }
+    }
+
+    /// Map a Rust `target_arch` / [`std::env::consts::ARCH`] name.
+    #[must_use]
+    pub fn from_rust_arch(arch: &str) -> Option<Self> {
+        match arch {
+            "x86_64" => Some(Self::Amd64),
+            "aarch64" => Some(Self::Arm64),
+            _ => None,
+        }
+    }
+
+    /// Architecture of the running host (guests run natively, so this is also the image
+    /// arch every backend boots).
+    #[must_use]
+    pub fn host() -> Option<Self> {
+        Self::from_rust_arch(std::env::consts::ARCH)
+    }
+}
+
+impl std::fmt::Display for ImageArch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -353,9 +427,9 @@ impl TemplateRegistry {
 /// Outcome of checking a template's pinned digest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PinStatus {
-    /// The artifact digest equals the manifest's `sha256`.
+    /// The artifact digest equals the manifest's pin for the checked arch.
     Verified { digest: String },
-    /// The manifest has no `sha256`; `digest` is what is actually present.
+    /// The manifest has no pin for the checked arch; `digest` is what is actually present.
     Unpinned { digest: String },
 }
 
@@ -385,22 +459,35 @@ pub fn check_digest(image: &str, expected: Option<&str>, actual: &str) -> Result
     }
 }
 
-/// Resolve the template image digest through `verifier` and check it against the pin.
-/// With `require_pin`, an unpinned template is rejected.
+/// Resolve the template image digest through `verifier` and check it against the pin for
+/// the host arch ([`TemplateManifest::pinned_sha256_for_host`]). With `require_pin`, a
+/// template without such a pin is rejected.
 pub async fn verify_template_image(
     verifier: &dyn ImageVerifier,
     manifest: &TemplateManifest,
     require_pin: bool,
 ) -> Result<PinStatus> {
+    verify_template_image_for(verifier, manifest, ImageArch::host(), require_pin).await
+}
+
+/// [`verify_template_image`] for an explicit image arch.
+pub async fn verify_template_image_for(
+    verifier: &dyn ImageVerifier,
+    manifest: &TemplateManifest,
+    arch: Option<ImageArch>,
+    require_pin: bool,
+) -> Result<PinStatus> {
     let image = manifest.image();
-    if require_pin && manifest.template.sha256.is_none() {
+    let pin = manifest.template.pinned_sha256(arch);
+    if require_pin && pin.is_none() {
+        let arch = arch.map_or("this host".to_owned(), |a| a.to_string());
         return Err(SandboxError::Template(format!(
-            "template `{}` has no `sha256` pin and pinning is required",
+            "template `{}` has no `sha256` pin for {arch} and pinning is required",
             manifest.template.name
         )));
     }
     let actual = verifier.image_digest(image).await?;
-    check_digest(image, manifest.template.sha256.as_deref(), &actual)
+    check_digest(image, pin, &actual)
 }
 
 #[cfg(test)]
@@ -573,6 +660,121 @@ tiers = ["core", "process"]
         assert!(reg.len() >= 4);
     }
 
+    fn digest(c: char) -> String {
+        format!("sha256:{}", c.to_string().repeat(64))
+    }
+
+    fn with_meta(extra: &str) -> String {
+        BASE.replace(
+            "description = \"Minimal\"",
+            &format!("description = \"Minimal\"\n{extra}"),
+        )
+    }
+
+    /// `base` plus `extra` in `[template]` and a `[template.sha256_by_arch]` table (placed
+    /// after the whole `[template]` section so it does not capture its keys).
+    fn with_arch_table(extra: &str, entries: &str) -> String {
+        with_meta(extra).replace(
+            "\n[resources]",
+            &format!("\n[template.sha256_by_arch]\n{entries}\n\n[resources]"),
+        )
+    }
+
+    #[test]
+    fn per_arch_pins_parse_and_select() {
+        let body = with_arch_table(
+            &format!("sha256 = \"{}\"", digest('a')),
+            &format!("arm64 = \"{}\"", digest('b')),
+        );
+        let m = TemplateManifest::from_toml_str(&body).unwrap();
+        m.validate().unwrap();
+        let t = &m.template;
+        assert_eq!(t.sha256_by_arch.len(), 1);
+        // Per-arch entry wins; `sha256` is the fallback for unlisted / unknown arches.
+        assert_eq!(
+            t.pinned_sha256(Some(ImageArch::Arm64)),
+            Some(digest('b').as_str())
+        );
+        assert_eq!(
+            t.pinned_sha256(Some(ImageArch::Amd64)),
+            Some(digest('a').as_str())
+        );
+        assert_eq!(t.pinned_sha256(None), Some(digest('a').as_str()));
+        let expected_host = if ImageArch::host() == Some(ImageArch::Arm64) {
+            digest('b')
+        } else {
+            digest('a')
+        };
+        assert_eq!(m.pinned_sha256_for_host(), Some(expected_host.as_str()));
+
+        // Only per-arch pins: unlisted arches are unpinned.
+        let body = with_meta(&format!(
+            "sha256_by_arch = {{ amd64 = \"{}\" }}",
+            digest('c')
+        ));
+        let m = TemplateManifest::from_toml_str(&body).unwrap();
+        m.validate().unwrap();
+        let t = &m.template;
+        assert_eq!(
+            t.pinned_sha256(Some(ImageArch::Amd64)),
+            Some(digest('c').as_str())
+        );
+        assert_eq!(t.pinned_sha256(Some(ImageArch::Arm64)), None);
+        assert_eq!(t.pinned_sha256(None), None);
+    }
+
+    #[test]
+    fn legacy_single_pin_applies_to_every_arch() {
+        let m =
+            TemplateManifest::from_toml_str(&with_meta(&format!("sha256 = \"{}\"", digest('a'))))
+                .unwrap();
+        m.validate().unwrap();
+        assert!(m.template.sha256_by_arch.is_empty());
+        for arch in ImageArch::ALL.map(Some).into_iter().chain([None]) {
+            assert_eq!(m.template.pinned_sha256(arch), Some(digest('a').as_str()));
+        }
+        // Serialization omits the empty map, keeping the legacy shape.
+        let back = toml::to_string(&m).unwrap();
+        assert!(!back.contains("sha256_by_arch"), "{back}");
+        assert_eq!(TemplateManifest::from_toml_str(&back).unwrap(), m);
+    }
+
+    #[test]
+    fn per_arch_pin_validation() {
+        let table = |entries: &str| with_arch_table("", entries);
+        // Unknown arch key: parse error.
+        let err = TemplateManifest::from_toml_str(&table(&format!("x86_64 = \"{}\"", digest('a'))))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown variant"), "{err}");
+        // Malformed digest: validation error naming the key.
+        let m = TemplateManifest::from_toml_str(&table("arm64 = \"sha256:abc\"")).unwrap();
+        let err = m.validate().unwrap_err().to_string();
+        assert!(err.contains("sha256_by_arch.arm64"), "{err}");
+        // Round-trip of a two-arch table.
+        let m = TemplateManifest::from_toml_str(&table(&format!(
+            "amd64 = \"{}\"\narm64 = \"{}\"",
+            digest('a'),
+            digest('b')
+        )))
+        .unwrap();
+        m.validate().unwrap();
+        let back = TemplateManifest::from_toml_str(&toml::to_string(&m).unwrap()).unwrap();
+        assert_eq!(back, m);
+    }
+
+    #[test]
+    fn arch_names() {
+        assert_eq!(ImageArch::from_rust_arch("x86_64"), Some(ImageArch::Amd64));
+        assert_eq!(ImageArch::from_rust_arch("aarch64"), Some(ImageArch::Arm64));
+        assert_eq!(ImageArch::from_rust_arch("riscv64"), None);
+        assert_eq!(ImageArch::Arm64.to_string(), "arm64");
+        assert_eq!(
+            ImageArch::host(),
+            ImageArch::from_rust_arch(std::env::consts::ARCH)
+        );
+    }
+
     struct FixedDigest(&'static str);
 
     #[async_trait]
@@ -607,12 +809,44 @@ tiers = ["core", "process"]
             verify_template_image(&FixedDigest(good_static), &m, true)
                 .await
                 .unwrap(),
-            PinStatus::Verified { digest: good }
+            PinStatus::Verified {
+                digest: good.clone()
+            }
         );
         m.template.sha256 = Some(bad);
         assert!(matches!(
             verify_template_image(&FixedDigest(good_static), &m, false).await,
             Err(SandboxError::DigestMismatch { .. })
         ));
+
+        // A per-arch pin overrides the (stale) fallback for that arch only.
+        m.template
+            .sha256_by_arch
+            .insert(ImageArch::Arm64, good.clone());
+        let v = FixedDigest(good_static);
+        assert_eq!(
+            verify_template_image_for(&v, &m, Some(ImageArch::Arm64), true)
+                .await
+                .unwrap(),
+            PinStatus::Verified {
+                digest: good.clone()
+            }
+        );
+        assert!(matches!(
+            verify_template_image_for(&v, &m, Some(ImageArch::Amd64), true).await,
+            Err(SandboxError::DigestMismatch { .. })
+        ));
+        m.template.sha256 = None;
+        let err = verify_template_image_for(&v, &m, Some(ImageArch::Amd64), true)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("for amd64"), "{err}");
+        assert_eq!(
+            verify_template_image_for(&v, &m, Some(ImageArch::Amd64), false)
+                .await
+                .unwrap(),
+            PinStatus::Unpinned { digest: good }
+        );
     }
 }
