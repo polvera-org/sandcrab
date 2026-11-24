@@ -68,6 +68,14 @@ steps:
     artifacts: [templates/]
     status: done
 
+  - id: template-pins-local
+    phase: implement
+    agent: ada
+    title: "Host-local template pins (option B): record image IDs per host in ~/.sandcrab at build time, verify against them; repo manifests keep base digests only; label as local integrity (reproducible pins = later option A)"
+    depends_on: [templates-arm64]
+    artifacts: [templates/, crates/sandcrab-core/src/template.rs, crates/sandcrab-cli/]
+    status: doing
+
   # ---- frontier 3 (parallel, disjoint files in the new crate)
   - id: lk-helper
     phase: implement
@@ -131,7 +139,7 @@ steps:
     phase: implement
     agent: ada
     title: tests/libkrun_vm.rs (#[ignore]) on the Mac — shared e2e matrix + loopback/listener/ro-remount regressions; fix gaps
-    depends_on: [lk-wire, lk-fake-tests, guest-virtiofs, templates-arm64, lk-ports]
+    depends_on: [lk-wire, lk-fake-tests, guest-virtiofs, templates-arm64, lk-ports, template-pins-local]
     artifacts: [crates/sandcrab-backend-libkrun/tests/libkrun_vm.rs]
     status: todo
 
