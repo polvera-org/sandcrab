@@ -875,8 +875,8 @@ export function startFilm(host, { onFail, lenis = null } = {}) {
         <mask id="trail-mask" maskUnits="userSpaceOnUse"><rect id="trail-mask-rect" x="0" y="0" width="100%" height="100%" fill="url(#trail-fade)"/></mask>
       </defs>
       <g mask="url(#trail-mask)" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
-        <path class="trail-path" stroke-width="1.3" stroke-dasharray="5 9"/>
-        <g class="trail-marks" stroke-width="1.3"></g>
+        <path class="trail-path" stroke-width="1.7" stroke-dasharray="7 10"/>
+        <g class="trail-marks" stroke-width="1.7"></g>
       </g>`;
     document.body.insertBefore(svg, document.body.firstChild);
     const path = svg.querySelector('.trail-path');
@@ -923,7 +923,7 @@ export function startFilm(host, { onFail, lenis = null } = {}) {
           const [x, y] = crabAt(kk.holdStart);
           const ox = x + (stations[i].side === 'right' ? 26 : -26), oy = y + 18;
           if (i === keys.length - 1) m += `<circle cx="${ox.toFixed(1)}" cy="${oy.toFixed(1)}" r="11" stroke-dasharray="2 4"/>`;
-          m += `<path d="M${ox - 5} ${oy - 5} l10 10 M${ox + 5} ${oy - 5} l-10 10"/>`;
+          m += `<path d="M${ox - 7} ${oy - 7} l14 14 M${ox + 7} ${oy - 7} l-14 14"/>`;
         });
         marks.innerHTML = m;
         lastY = NaN;
