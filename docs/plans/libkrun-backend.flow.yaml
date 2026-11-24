@@ -142,12 +142,54 @@ steps:
     depends_on: [lk-e2e-macos]
     status: todo
 
-  - id: lk-bench
+  # ---- benchmarks: microVMs vs Docker on bare metal (kvm-dedicated) + the Mac backends
+  - id: kvm-net
     phase: implement
     agent: ada
-    title: "Bench: docker,libkrun on the Mac; docker,firecracker,libkrun on kvm-dedicated; regenerate docs/site/bench-report.html"
-    depends_on: [lk-e2e-linux]
-    artifacts: [docs/bench/, docs/site/bench-report.html, scripts/bench-report-data.py]
+    title: "kvm-dedicated: run scripts/fc-net-setup.sh --user ubuntu --persist (taps for unrestricted networking), re-pin base template"
+    depends_on: [lk-approve]
+    artifacts: []
+    status: todo
+    notes: Needs the human's OK (system change on kvm-dedicated). Host was set up 2026-11-24; FC KVM smoke 3/4 green, the 4th needs these taps.
+
+  - id: fc-e2e-kvm
+    phase: implement
+    agent: ada
+    title: Full Firecracker e2e suite on kvm-dedicated (carries over phase-1 fc-e2e); fix backend gaps; fix the flaky net tap-lock test
+    depends_on: [kvm-net]
+    artifacts: [crates/sandcrab-backend-firecracker/, crates/sandcrab-sdk/tests/]
+    status: todo
+
+  - id: bench-kvm-fc
+    phase: implement
+    agent: ada
+    title: "Bench on kvm-dedicated (bare metal): --backends docker,firecracker, full matrix; sanitize host fields; record disk type (HDD RAID1) in results"
+    depends_on: [fc-e2e-kvm]
+    artifacts: [docs/bench/results/]
+    status: todo
+
+  - id: lk-bench-mac
+    phase: implement
+    agent: ada
+    title: "Bench on the Mac (M2, macOS): --backends docker,libkrun (Docker Desktop vs libkrun microVMs)"
+    depends_on: [lk-e2e-macos]
+    artifacts: [docs/bench/results/]
+    status: todo
+
+  - id: lk-bench-kvm
+    phase: implement
+    agent: ada
+    title: "Bench on kvm-dedicated: --backends libkrun added to the docker,firecracker run (same host, same day where possible)"
+    depends_on: [lk-e2e-linux, bench-kvm-fc]
+    artifacts: [docs/bench/results/]
+    status: todo
+
+  - id: bench-report
+    phase: implement
+    agent: ada
+    title: "Regenerate bench report: per-host sections (dev-vps Docker, kvm-dedicated Docker vs Firecracker vs libkrun, Mac Docker vs libkrun), host/disk/arch labels, microVM vs Docker comparison; update landing/presentation numbers if they change"
+    depends_on: [bench-kvm-fc, lk-bench-mac, lk-bench-kvm]
+    artifacts: [docs/site/bench-report.html, scripts/bench-report-data.py, docs/bench/README.md]
     status: todo
 
   - id: lk-net-userspace
@@ -163,14 +205,14 @@ steps:
     phase: verify
     agent: nebula
     title: QA + security review (helper unsafe island, TSI exposure, virtio-fs traversal/identity race, capability honesty, lifeline)
-    depends_on: [lk-bench]
+    depends_on: [bench-report]
     status: todo
 
   - id: lk-live
     phase: verify
     agent: nova
     title: Live crabagent session on --backend libkrun (Mac) with a host-dir workspace
-    depends_on: [lk-bench]
+    depends_on: [bench-report]
     status: todo
 
   - id: lk-docs

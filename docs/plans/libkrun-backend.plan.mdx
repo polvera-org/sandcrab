@@ -27,7 +27,13 @@ The work runs in waves:
 2. Scaffold the crate, then guest virtio-fs and arm64 templates.
 3. Build the helper, artifacts, backend and vsock tunnel, in parallel.
 4. Fake-helper tests, ports, and SDK/CLI/bench wiring.
-5. Mac e2e, then Linux e2e on the KVM box, then the benchmarks.
+5. Mac e2e, then Linux e2e on the KVM box.
+
+The benchmarks run as their own track:
+- **kvm-dedicated (bare metal):** set up the VM network taps, run the full Firecracker e2e, then benchmark Docker vs Firecracker. This track can start now, without waiting for libkrun.
+- **The Mac:** benchmark Docker vs libkrun.
+- **kvm-dedicated again:** add libkrun to the bare-metal run.
+- **Report:** one bench report covering the three hosts (dev-vps, kvm-dedicated, the Mac), labelled by host, disk and arch.
 6. Review, then docs.
 
 <ExecutionFlowchart src="./libkrun-backend.flow.yaml" />

@@ -43,9 +43,9 @@ steps:
     agent: nova
     title: Spike + bootstrap kvm-homelab (Proxmox, tailnet) as the KVM host for Firecracker and benchmarks
     depends_on: []
-    status: blocked
+    status: done
     notes: >-
-      DEFERRED by human 2026-11-23: build Firecracker now, test later. Spike 2026-11-23: kvm-homelab is a Proxmox VM (12 vCPU, 46 GiB, Ubuntu 26.04) with CPU type
+      RESOLVED 2026-11-24: bare-metal kvm-dedicated (rented) set up instead of kvm-homelab; native /dev/kvm, FC smoke 3/4. Earlier: DEFERRED by human 2026-11-23: build Firecracker now, test later. Spike 2026-11-23: kvm-homelab is a Proxmox VM (12 vCPU, 46 GiB, Ubuntu 26.04) with CPU type
       "QEMU Virtual CPU 2.5+" → no vmx/svm, no /dev/kvm. Runs 14 containers (ollama+GPU, postgres…).
       Needs Proxmox-host changes: nested virt on + cpu=host (recommended: a dedicated sandcrab-bench VM). Benchmarks must run BOTH backends on this same
       host (bare metal → credible numbers; nested virt adds overhead and skews FC results).
@@ -206,7 +206,7 @@ steps:
     depends_on: [fc-wire, e2e-tests, kvm-host]
     artifacts: [crates/sandcrab-sdk/tests/]
     status: blocked
-    notes: PENDING by human decision 2026-11-23 — no KVM host yet. Tests exist but are marked pending/ignored.
+    notes: MOVED 2026-11-24 to docs/plans/libkrun-backend.flow.yaml steps fc-e2e-kvm and bench-kvm-fc (kvm-dedicated).
 
   - id: three-kit
     phase: implement
