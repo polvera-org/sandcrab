@@ -131,6 +131,10 @@ fn no_firecracker_left(env: &Env) -> bool {
         .all(|c| !String::from_utf8_lossy(&c).contains(&me))
 }
 
+/// Serializes the `unrestricted` tests: each test's backend has its own `run_dir`, hence its
+/// own tap lock dir, so two of them in parallel would both pick `sctap0` (EBUSY).
+static TAP_POOL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 // PENDING: requires /dev/kvm (see flow step fc-e2e)
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "PENDING: requires /dev/kvm, pinned artifacts, sandcrab/base:0.1.0 and a static crabd (flow step fc-e2e)"]
@@ -286,6 +290,7 @@ async fn rw_and_ro_workspaces_with_sync_back() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "PENDING: requires /dev/kvm and a one-time `sudo scripts/fc-net-setup.sh` (flow step fc-e2e)"]
 async fn unrestricted_network_reaches_the_internet() {
+    let _taps = TAP_POOL.lock().await;
     let env = env();
     let sb = env
         .manager
@@ -322,6 +327,109 @@ async fn unrestricted_network_reaches_the_internet() {
     )
     .await;
     assert!(!r.stdout.contains("rc=0"), "{}", r.stdout);
+    sb.destroy().await.unwrap();
+    assert!(leftovers(&env).is_empty());
+}
+
+/// The egress policy of `scripts/fc-net-setup.sh` with default flags (no `--allow-smtp`,
+/// no `--allow-private`), seen from inside a guest: outbound SMTP is refused fast (tcp
+/// reset), reserved / private / host ranges are unreachable, HTTPS still works.
+/// Host-specific targets that must also be blocked (the host's public IP, the uplink
+/// gateway, ...) go in `SANDCRAB_EGRESS_EXTRA_BLOCKED="ip:port ip:port"`, so they are never
+/// written into the repo.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires /dev/kvm and `sudo scripts/fc-net-setup.sh` with default egress flags"]
+async fn unrestricted_network_egress_policy() {
+    let _taps = TAP_POOL.lock().await;
+    let env = env();
+    let sb = env
+        .manager
+        .spawn(SandboxConfig::from_template("base").network(NetworkConfig::unrestricted()))
+        .await
+        .unwrap();
+
+    // Outbound SMTP / submission to public hosts: refused by our tcp reset, not a timeout.
+    // Resolve IPv4 explicitly (the guest has no IPv6 route).
+    for (host, port) in [
+        ("gmail-smtp-in.l.google.com", 25),
+        ("smtp.gmail.com", 465),
+        ("smtp.gmail.com", 587),
+    ] {
+        let cmd = format!(
+            "ip=$(getent ahostsv4 {host} | awk 'NR==1{{print $1}}'); echo ip=$ip; \
+             timeout 5 bash -c \"</dev/tcp/$ip/{port}\" 2>&1; echo rc=$?"
+        );
+        let r = bash(&sb, &cmd).await;
+        eprintln!(
+            "smtp {host}:{port} -> {}",
+            r.stdout.trim().replace('\n', " | ")
+        );
+        assert!(!r.stdout.starts_with("ip=\n"), "DNS for {host}: {r:?}");
+        assert!(
+            !r.stdout.contains("rc=0"),
+            "SMTP {host}:{port} reachable: {}",
+            r.stdout
+        );
+        assert!(
+            r.stdout.contains("refused"),
+            "SMTP {host}:{port} not reset: {}",
+            r.stdout
+        );
+    }
+
+    // One address per blocked range. A TCP connect that must not succeed (drop → timeout
+    // rc=124; the guest kernel may also refuse some outright).
+    let mut blocked: Vec<String> = [
+        "0.1.2.3:80",         // 0.0.0.0/8
+        "192.0.0.8:80",       // 192.0.0.0/24 (IETF protocol assignments)
+        "192.0.2.1:80",       // TEST-NET-1
+        "198.18.0.1:80",      // benchmarking
+        "198.51.100.1:80",    // TEST-NET-2
+        "203.0.113.1:80",     // TEST-NET-3
+        "240.0.0.1:80",       // class E
+        "10.0.0.1:80",        // private
+        "172.16.0.1:80",      // private
+        "192.168.0.1:80",     // private
+        "100.64.0.1:80",      // CGNAT
+        "169.254.169.254:80", // cloud metadata
+        "172.30.0.1:22",      // tap gateway (guest -> host)
+        "172.17.0.1:80",      // docker0 (default bridge)
+    ]
+    .map(String::from)
+    .to_vec();
+    if let Ok(extra) = std::env::var("SANDCRAB_EGRESS_EXTRA_BLOCKED") {
+        blocked.extend(extra.split_whitespace().map(String::from));
+    }
+    for t in &blocked {
+        let (ip, port) = t.rsplit_once(':').expect("ip:port");
+        let cmd = format!("timeout 3 bash -c '</dev/tcp/{ip}/{port}' 2>&1; echo rc=$?");
+        let r = bash(&sb, &cmd).await;
+        eprintln!("tcp {t} -> {}", r.stdout.trim().replace('\n', " | "));
+        assert!(!r.stdout.contains("rc=0"), "{t} reachable: {}", r.stdout);
+    }
+    // Multicast / limited broadcast are UDP-only destinations. The guest-side send may
+    // succeed; the host drops the packet (see the reserved-range rule's counter).
+    let r = bash(
+        &sb,
+        "echo x >/dev/udp/224.0.0.251/5353 2>&1; echo mc=$?; \
+         echo x >/dev/udp/255.255.255.255/9 2>&1; echo bc=$?",
+    )
+    .await;
+    eprintln!(
+        "udp multicast/broadcast -> {}",
+        r.stdout.trim().replace('\n', " | ")
+    );
+
+    // Still allowed: HTTPS to the internet.
+    let r = bash(
+        &sb,
+        "curl -4 -sS -o /dev/null -m 15 -w '%{http_code}' https://example.com",
+    )
+    .await;
+    eprintln!("https example.com -> {r:?}");
+    assert_eq!(r.exit_code, Some(0), "HTTPS through NAT: {r:?}");
+    assert!(r.stdout.starts_with(['2', '3']), "{r:?}");
+
     sb.destroy().await.unwrap();
     assert!(leftovers(&env).is_empty());
 }
