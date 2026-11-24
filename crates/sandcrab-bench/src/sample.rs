@@ -139,6 +139,39 @@ pub fn rss(pid: u32) -> Result<u64, String> {
     }
 }
 
+/// Total CPU time (user + system, all threads; seconds) of one process: `/proc/<pid>/stat`
+/// ticks on Linux, `ps -o time=` on macOS (10 ms resolution). For a libkrun helper this
+/// includes the vCPU threads, i.e. the guest's CPU as seen by the host.
+pub fn process_cpu_s(pid: u32) -> Result<f64, String> {
+    #[cfg(target_os = "linux")]
+    {
+        proc_cpu_ticks(pid)
+            .map(ticks_to_s)
+            .ok_or_else(|| format!("/proc/{pid}/stat unreadable"))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let out = cmd("ps", &["-o", "time=", "-p", &pid.to_string()])
+            .ok_or_else(|| format!("ps -o time= -p {pid} failed (process gone?)"))?;
+        parse_ps_time(&out).ok_or_else(|| format!("ps -o time=: unexpected output {out:?}"))
+    }
+}
+
+/// `ps -o time=`: `[[dd-]hh:]mm:ss.cc` → seconds (either decimal separator).
+#[cfg_attr(target_os = "linux", allow(dead_code))]
+fn parse_ps_time(out: &str) -> Option<f64> {
+    let t = out.trim().replace(',', ".");
+    let (days, rest) = match t.split_once('-') {
+        Some((d, r)) => (d.parse::<f64>().ok()?, r.to_owned()),
+        None => (0.0, t),
+    };
+    let mut secs = 0.0;
+    for part in rest.split(':') {
+        secs = secs * 60.0 + part.parse::<f64>().ok()?;
+    }
+    Some(days * 86_400.0 + secs)
+}
+
 /// `ps -o rss=` prints KiB.
 #[cfg_attr(target_os = "linux", allow(dead_code))]
 fn parse_ps_rss_kib(out: &str) -> Option<u64> {
@@ -242,6 +275,16 @@ pub fn sampler_cpu_pct(dir: &Path, window: Duration) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ps_time_parses_all_shapes() {
+        assert_eq!(parse_ps_time("0:00.12"), Some(0.12));
+        assert_eq!(parse_ps_time(" 1:02.50\n"), Some(62.5));
+        assert_eq!(parse_ps_time("0:01,25"), Some(1.25));
+        assert_eq!(parse_ps_time("1:00:00.00"), Some(3600.0));
+        assert_eq!(parse_ps_time("2-00:00:01"), Some(172_801.0));
+        assert_eq!(parse_ps_time("garbage"), None);
+    }
 
     #[test]
     fn stat_ticks_with_spaces_in_comm() {

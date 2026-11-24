@@ -1116,10 +1116,12 @@ async fn resources_iter(ctx: &Ctx<'_>, bi: usize, spec: &CellSpec) -> IterOut {
 
 /// Resource metrics for a VMM process without a cgroup (libkrun on macOS, or Linux without
 /// `SANDCRAB_BENCH_KRUN_CGROUP`): helper **RSS** idle/post (`mem.helper_rss_*`, labelled RSS,
-/// never PSS: shared pages count fully) plus the guest view. cgroup-only metrics are skipped.
+/// never PSS: shared pages count fully), the helper's CPU over the idle window
+/// (`cpu.helper_idle_60s`) and the guest view. cgroup-only metrics are skipped.
 async fn helper_rss_iter(ctx: &Ctx<'_>, sb: &Sandbox, pid: u32, out: &mut IterOut) {
     let plan = ctx.plan;
-    let why = "no cgroup on this host (helper RSS recorded instead, see mem.helper_rss_*)";
+    let why = "no cgroup on this host (helper process recorded instead, see \
+               mem.helper_rss_* and cpu.helper_idle_60s)";
     for id in [
         "mem.host_pss_idle",
         "mem.host_pss_post",
@@ -1136,6 +1138,14 @@ async fn helper_rss_iter(ctx: &Ctx<'_>, sb: &Sandbox, pid: u32, out: &mut IterOu
     match guest_mem_available(sb).await {
         Ok(v) => out.bytes("mem.guest_available_idle", v),
         Err(e) => out.fail("mem.guest_available_idle", e),
+    }
+    // idle CPU of the whole helper process (VMM + vCPU threads) over the idle window
+    let c0 = sample::process_cpu_s(pid);
+    tokio::time::sleep(plan.idle_window).await;
+    let c1 = sample::process_cpu_s(pid);
+    match (c0, c1) {
+        (Ok(a), Ok(z)) => out.cpu("cpu.helper_idle_60s", (z - a).max(0.0)),
+        (Err(e), _) | (_, Err(e)) => out.skip("cpu.helper_idle_60s", e),
     }
     let touch = format!(
         "head -c {}M /dev/urandom > /tmp/bench-touch && cat /tmp/bench-touch > /dev/null",
@@ -1687,7 +1697,8 @@ pub async fn run(plan: &Plan) -> anyhow::Result<(RunResult, PathBuf)> {
         notes.push(
             "libkrun: workspaces are live virtio-fs shares (no attach / sync-back cost); without \
              a cgroup leaf (always on macOS) memory is the helper's RSS (mem.helper_rss_*), \
-             which counts shared pages fully: not comparable with the Linux PSS columns"
+             which counts shared pages fully: not comparable with the Linux PSS columns; idle \
+             CPU is the helper process's CPU time (cpu.helper_idle_60s)"
                 .into(),
         );
     }
