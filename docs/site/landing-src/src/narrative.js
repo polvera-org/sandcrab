@@ -805,7 +805,8 @@ export function startFilm(host, { onFail, lenis = null } = {}) {
         const a = st.el.querySelector('.aside').getBoundingClientRect();
         let L, Rr;
         if (st.side === 'right') { L = col.right + 32; Rr = vw - 24; } else { L = 24; Rr = col.left - 32; }
-        let top = barH + 20, bottom = vh - 20;
+        // stations sit a little high so more of the trail ahead stays visible below them
+        let top = barH + 20, bottom = Math.round(vh * 0.84);
         if (i === 0) {
           // hero: the dominant visual of the first screen, below the masthead, right of the copy;
           // it may bleed toward the edge and bottom, then shrinks to station size on the way down
@@ -873,15 +874,17 @@ export function startFilm(host, { onFail, lenis = null } = {}) {
         <linearGradient id="trail-fade" gradientUnits="userSpaceOnUse" x1="0" x2="0" y1="0" y2="1">
           <stop offset="0" stop-color="#fff" stop-opacity="0"/><stop offset="1" stop-color="#fff" stop-opacity="1"/></linearGradient>
         <mask id="trail-mask" maskUnits="userSpaceOnUse"><rect id="trail-mask-rect" x="0" y="0" width="100%" height="100%" fill="url(#trail-fade)"/></mask>
+        <mask id="trail-holes" maskUnits="userSpaceOnUse"><rect x="0" y="0" width="100%" height="100%" fill="#fff"/><g class="trail-hole-dots" fill="#000"></g></mask>
       </defs>
       <g mask="url(#trail-mask)" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
-        <path class="trail-path" stroke-width="32" stroke-dasharray="80 70"/>
+        <path class="trail-path" stroke-width="32" stroke-dasharray="80 70" mask="url(#trail-holes)"/>
         <g class="trail-marks" stroke-width="26"></g>
       </g>`;
     document.body.insertBefore(svg, document.body.firstChild);
     const path = svg.querySelector('.trail-path');
     const marks = svg.querySelector('.trail-marks');
     const grad = svg.querySelector('#trail-fade');
+    const holes = svg.querySelector('.trail-hole-dots');
     let lastY = NaN;
     const R = rng(23);
     const wob = Array.from({ length: 4 }, () => R() * TAU);
@@ -916,15 +919,22 @@ export function startFilm(host, { onFail, lenis = null } = {}) {
           d += ` C${c1[0].toFixed(1)} ${c1[1].toFixed(1)} ${c2[0].toFixed(1)} ${c2[1].toFixed(1)} ${p2[0].toFixed(1)} ${p2[1].toFixed(1)}`;
         }
         path.setAttribute('d', d);
-        // a small x beside the route at each station, a dotted circle at the final shore
-        let m = '';
+        const nearestOnRoute = ([x, y]) => {
+          let best = pts[0], bd = Infinity;
+          for (const q of pts) { const dd = (q[0] - x) ** 2 + (q[1] - y) ** 2; if (dd < bd) { bd = dd; best = q; } }
+          return best;
+        };
+        // an x ON the route at each station (it replaces a stripe: the dashes break around it),
+        // a dotted circle around the last one at the final shore
+        let m = '', h = '';
         keys.forEach((kk, i) => {
           if (i === 0) return;
-          const [x, y] = crabAt(kk.holdStart);
-          const ox = x + (stations[i].side === 'right' ? 150 : -150), oy = y + 70;
+          const [ox, oy] = nearestOnRoute(crabAt(kk.holdStart));
+          h += `<circle cx="${ox.toFixed(1)}" cy="${oy.toFixed(1)}" r="${i === keys.length - 1 ? 112 : 84}"/>`;
           if (i === keys.length - 1) m += `<circle cx="${ox.toFixed(1)}" cy="${oy.toFixed(1)}" r="80" stroke-dasharray="36 40"/>`;
           m += `<path d="M${ox - 34} ${oy - 34} l68 68 M${ox + 34} ${oy - 34} l-68 68"/>`;
         });
+        holes.innerHTML = h;
         marks.innerHTML = m;
         lastY = NaN;
       },
