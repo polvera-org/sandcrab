@@ -6,14 +6,18 @@
 //! - `docker` (default): the Docker backend. Needs a Docker daemon,
 //!   the template images pinned on this host (`templates/build.sh`) and a static `crabd` (`$SANDCRAB_CRABD`,
 //!   else `target/<arch>-unknown-linux-musl/release/crabd`, built on first use).
-//! - `firecracker`: not wired into the SDK yet → every test prints a SKIP line and passes.
-//!   TODO(fc-wire, fc-e2e): once `SandcrabBuilder` can select the Firecracker backend, build it
-//!   in [`Harness::new`] (the only backend-specific spot) and run this suite on a KVM host.
+//! - `firecracker`: the Firecracker backend (Linux + KVM). Needs `--features firecracker`
+//!   (otherwise every test prints a SKIP line and passes), a usable `/dev/kvm`, the pinned
+//!   artifacts (fetched on first use into `$SANDCRAB_HOME/cache`, shared with the CLI) and the
+//!   template images. `network: unrestricted` scenarios need the tap pool
+//!   (`scripts/fc-net-setup.sh`).
 //!
 //! All scenarios are `#[ignore]`d. Run with:
 //!
 //! ```text
 //! cargo test -p sandcrab-sdk -- --ignored --test-threads=2
+//! SANDCRAB_E2E_BACKEND=firecracker \
+//!   cargo test -p sandcrab-sdk --features firecracker -- --ignored --test-threads=2
 //! ```
 //!
 //! Each test gets its own temp state dir (workspace registry + sandbox sockets) and unique
@@ -122,13 +126,16 @@ impl Harness {
         let builder = base_builder(tmp.path());
         let sc = match backend {
             E2eBackend::Docker => builder.docker(docker_config()).build().unwrap(),
+            #[cfg(all(feature = "firecracker", target_os = "linux"))]
+            E2eBackend::Firecracker => builder
+                .firecracker(firecracker_config(tmp.path()))
+                .build()
+                .unwrap(),
+            #[cfg(not(all(feature = "firecracker", target_os = "linux")))]
             E2eBackend::Firecracker => {
-                // TODO(fc-wire): build with the Firecracker backend here
-                // (`builder.firecracker(..)` / `.backend(FirecrackerBackend::new(..))`).
-                // TODO(fc-e2e): run this suite on a KVM host and drop this skip.
                 eprintln!(
-                    "SKIP {test}: {BACKEND_ENV}=firecracker is not wired into the SDK yet \
-                     (pending flow steps fc-wire / fc-e2e)"
+                    "SKIP {test}: {BACKEND_ENV}=firecracker needs Linux and \
+                     `--features firecracker`"
                 );
                 return None;
             }
@@ -187,6 +194,19 @@ impl Harness {
             );
         }
     }
+}
+
+/// Firecracker config: artifacts and rootfs cache shared with the real Sandcrab home (slow to
+/// build); run / recovery dirs private to the test. `tmp` is under the system temp dir, which
+/// keeps socket paths under the 108-byte UDS limit.
+#[cfg(all(feature = "firecracker", target_os = "linux"))]
+fn firecracker_config(tmp: &Path) -> sandcrab_sdk::FirecrackerConfig {
+    let home = sandcrab_sdk::firecracker::sandcrab_home().unwrap();
+    let mut config = sandcrab_sdk::FirecrackerConfig::with_home(&home, crabd());
+    config.run_dir = tmp.join("run");
+    config.recovery_dir = tmp.join("recovery");
+    config.fetch_pinned_artifacts().unwrap();
+    config
 }
 
 fn base_builder(tmp: &Path) -> SandcrabBuilder {

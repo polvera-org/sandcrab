@@ -113,10 +113,12 @@ docker_rules() { # <-I|-D> : the two DOCKER-USER rules
   local b=(DOCKER-USER -o "${PREFIX}+" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT)
   for rule in a b; do
     local -n r="$rule"
+    # Explicit if/fi: a false `[[ .. ]] && cmd` as the last command would make the
+    # function return 1 and abort the (set -e) script on every idempotent re-run.
     if iptables -C "${r[@]}" 2>/dev/null; then
-      [[ $op == -D ]] && run iptables -D "${r[@]}"
+      if [[ $op == -D ]]; then run iptables -D "${r[@]}"; fi
     else
-      [[ $op == -I ]] && run iptables -I "${r[@]}"
+      if [[ $op == -I ]]; then run iptables -I "${r[@]}"; fi
     fi
   done
 }

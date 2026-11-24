@@ -610,17 +610,26 @@ fn entry_name(path: &str) -> &str {
         .unwrap_or(path)
 }
 
+/// A guest write to the rw workspace that the host can only see after teardown.
+struct PendingSync {
+    host: PathBuf,
+    token: String,
+}
+
 /// Workspace checks after ready: `ws_attach` (list_dir sees the expected entries) and
-/// `ws_sync_back` (the host sees a guest write).
+/// `ws_sync_back` (the host sees a guest write). With live host mounts (Docker) the write is
+/// polled for here; otherwise (Firecracker: copied in at spawn, synced back at teardown,
+/// `supports_host_dir_mounts = false`) it is returned and checked by [`check_sync_back`].
 async fn ws_checks(
     ctx: &Ctx<'_>,
     sb: &Sandbox,
+    live_mounts: bool,
     ws: Ws,
     lease: &WsLease,
     out: &mut IterOut,
-) -> Result<(), ()> {
+) -> Result<Option<PendingSync>, ()> {
     if ws == Ws::W0 {
-        return Ok(());
+        return Ok(None);
     }
     let t = Instant::now();
     let r: Result<(), String> = async {
@@ -669,6 +678,9 @@ async fn ws_checks(
         .host_dir()
         .expect("W1/W2 lease has a host dir")
         .join(".bench-sync");
+    if !live_mounts {
+        return Ok(Some(PendingSync { host, token }));
+    }
     loop {
         if fs::read(&host).is_ok_and(|b| b == token.as_bytes()) {
             break;
@@ -680,7 +692,31 @@ async fn ws_checks(
         tokio::task::yield_now().await;
     }
     out.ns("ws_sync_back", t.elapsed());
-    Ok(())
+    Ok(None)
+}
+
+/// Sync-at-teardown backends: after a successful destroy the host must hold the guest write;
+/// `ws_sync_back` is the backend's sync step (teardown start → `ws_sync_done` mark).
+fn check_sync_back(p: &PendingSync, marks: &TimingMarks, out: &mut IterOut) {
+    if !fs::read(&p.host).is_ok_and(|b| b == p.token.as_bytes()) {
+        out.fail(
+            "ws_sync_back",
+            "host never saw the guest write after teardown",
+        );
+        return;
+    }
+    let done = marks
+        .custom
+        .iter()
+        .find(|(name, _)| name == "ws_sync_done")
+        .map(|(_, at)| *at);
+    match (marks.teardown_started, done) {
+        (Some(t0), Some(at)) if at >= t0 => out.ns("ws_sync_back", at - t0),
+        _ => out.skip(
+            "ws_sync_back",
+            "backend reports no `ws_sync_done` teardown mark",
+        ),
+    }
 }
 
 /// The fixed 10-call agent-turn script (spec §1.1), run with cwd `/workspace` (W1).
@@ -773,27 +809,28 @@ fn sandbox_cpu_s(probe: Option<&Probe>) -> Option<f64> {
     Some(cg.cpu_usage_usec as f64 / 1e6 + shim)
 }
 
-/// Destroy and verify resources are gone; records `teardown` (+ phases).
+/// Destroy and verify resources are gone; records `teardown` (+ phases). Returns the
+/// destroy's timing marks on success.
 async fn timed_teardown(
     b: &LiveBackend,
     sb: Sandbox,
     probe: Option<&Probe>,
     out: &mut IterOut,
-) -> bool {
+) -> Option<TimingMarks> {
     let t = Instant::now();
     match sb.destroy().await {
         Ok(marks) => {
             if let Err(e) = b.verify_gone(probe).await {
                 out.fail("teardown", e);
-                return false;
+                return None;
             }
             out.ns("teardown", t.elapsed());
             out.phases_from(&marks);
-            true
+            Some(marks)
         }
         Err(e) => {
             out.fail("teardown", e);
-            false
+            None
         }
     }
 }
@@ -830,12 +867,15 @@ async fn lifecycle_iter(ctx: &Ctx<'_>, bi: usize, spec: &CellSpec) -> IterOut {
     let _ = ctx.crabd_version.set(sb.hello().crabd_version.clone());
     let probe = b.probe(&sb).await;
 
-    if out.failure.is_none()
-        && ws_checks(ctx, &sb, spec.ws, &lease, &mut out).await.is_ok()
-        && spec.scenario != Scenario::Drift
-        && ctx.plan.scenarios.contains(&Scenario::Calls)
-    {
-        let _ = steady_calls(ctx, &sb, spec.ws, &mut out).await;
+    let mut pending = None;
+    if out.failure.is_none() {
+        let live = b.caps.supports_host_dir_mounts;
+        if let Ok(p) = ws_checks(ctx, &sb, live, spec.ws, &lease, &mut out).await {
+            pending = p;
+            if spec.scenario != Scenario::Drift && ctx.plan.scenarios.contains(&Scenario::Calls) {
+                let _ = steady_calls(ctx, &sb, spec.ws, &mut out).await;
+            }
+        }
     }
 
     match &probe {
@@ -848,7 +888,11 @@ async fn lifecycle_iter(ctx: &Ctx<'_>, bi: usize, spec: &CellSpec) -> IterOut {
     let cpu = sandbox_cpu_s(probe.as_ref());
     let dockerd1 = ctx.dockerd_pid.and_then(sample::proc_cpu_ticks);
 
-    timed_teardown(b, sb, probe.as_ref(), &mut out).await;
+    if let Some(marks) = timed_teardown(b, sb, probe.as_ref(), &mut out).await
+        && let Some(p) = &pending
+    {
+        check_sync_back(p, &marks, &mut out);
+    }
     match cpu {
         Some(c) => {
             let daemon = match (dockerd0, dockerd1) {
@@ -894,7 +938,10 @@ async fn agent_turn_iter(ctx: &Ctx<'_>, bi: usize, spec: &CellSpec) -> IterOut {
         return out;
     }
     let mut td = IterOut::default();
-    if timed_teardown(b, sb, probe.as_ref(), &mut td).await {
+    if timed_teardown(b, sb, probe.as_ref(), &mut td)
+        .await
+        .is_some()
+    {
         out.ns("agent_turn", t0.elapsed().saturating_sub(probe_cost));
     } else if let Some((m, e)) = td.failure {
         out.fail(&m, e);

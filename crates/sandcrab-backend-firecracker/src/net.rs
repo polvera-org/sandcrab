@@ -97,6 +97,11 @@ impl TapPoolConfig {
 }
 
 /// An exclusively held tap; released on drop.
+///
+/// The `flock` belongs to the lock file's open file description. The fd is `O_CLOEXEC`, but
+/// a child forked by *another thread* of this process holds a copy of it until its `execve`
+/// completes, so the release can lag a drop by that fork→exec window (sub-millisecond).
+/// [`acquire_tap`] then just moves on to the next tap.
 #[derive(Debug)]
 pub struct TapLease {
     pub plan: TapPlan,
@@ -269,7 +274,19 @@ mod tests {
         let err = acquire_tap(&cfg, &locks, 1000).unwrap_err().to_string();
         assert!(err.contains("in use"), "{err}");
         drop(a);
-        let c = acquire_tap(&cfg, &locks, 1000).unwrap();
+        // Not necessarily immediate: a process spawned concurrently by another test can hold
+        // the lock fd for its fork→exec window (see `TapLease`), so retry briefly.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let c = loop {
+            match acquire_tap(&cfg, &locks, 1000) {
+                Ok(c) => break c,
+                Err(e) if std::time::Instant::now() < deadline => {
+                    assert!(e.to_string().contains("in use"), "{e}");
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                Err(e) => panic!("sctap1 not released after drop: {e}"),
+            }
+        };
         assert_eq!(c.plan.name, "sctap1");
         assert!(c.lock_path().ends_with("sctap1.lock"));
     }
