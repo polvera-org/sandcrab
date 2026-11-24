@@ -31,8 +31,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use rustix::process::{Pid, Signal, kill_process_group};
 use sandcrab_core::{
-    BoxedStream, Connector, Endpoint, LifecycleTimings, PublishedPort, Result, SandboxError,
-    SandboxHandle, SandboxId,
+    BoxedStream, Connector, Endpoint, LifecycleTimings, PortForwards, PublishedPort, Result,
+    SandboxError, SandboxHandle, SandboxId,
 };
 use sandcrab_protocol::init::{InitConfig, InitConfigureResult};
 use tokio::io::AsyncWriteExt;
@@ -101,10 +101,10 @@ impl std::fmt::Display for HelperExit {
     }
 }
 
-type ExitRx = watch::Receiver<Option<HelperExit>>;
+pub(crate) type ExitRx = watch::Receiver<Option<HelperExit>>;
 
 /// Wait until the helper has exited.
-async fn until_exit(mut rx: ExitRx) -> HelperExit {
+pub(crate) async fn until_exit(mut rx: ExitRx) -> HelperExit {
     let seen = rx.wait_for(Option::is_some).await.map(|v| v.clone()).ok();
     seen.flatten()
         .or_else(|| rx.borrow().clone())
@@ -277,6 +277,11 @@ impl KrunVm {
         }
         self.lifeline = Some(stdin);
         Ok(())
+    }
+
+    /// The crash watch (`None` before launch).
+    pub fn exit_watch(&self) -> Option<ExitRx> {
+        self.exit.clone()
     }
 
     /// The helper's exit, if it has exited.
@@ -468,8 +473,10 @@ impl Connector for KrunConnector {
     }
 }
 
-/// Live libkrun sandbox.
+/// Live libkrun sandbox. Dropping it without `destroy` closes the published ports (field
+/// order: before the VM is killed).
 pub(crate) struct KrunSandbox {
+    pub ports: PortForwards,
     pub vm: KrunVm,
     pub connector: Arc<KrunConnector>,
     pub timings: LifecycleTimings,
@@ -495,7 +502,7 @@ impl SandboxHandle for KrunSandbox {
     }
 
     fn published_ports(&self) -> Vec<PublishedPort> {
-        Vec::new()
+        self.ports.published().to_vec()
     }
 
     fn timings(&self) -> LifecycleTimings {
@@ -504,6 +511,10 @@ impl SandboxHandle for KrunSandbox {
 
     async fn destroy(mut self: Box<Self>) -> Result<()> {
         let t = self.timings.clone();
+        // Stop accepting first: no new tunnels into a VM that is going away.
+        std::mem::replace(&mut self.ports, PortForwards::none())
+            .shutdown()
+            .await;
         if let Some(exit) = self.vm.exited() {
             tracing::warn!(sandbox = %self.vm.id, %exit, "libkrun VM had already exited");
         }

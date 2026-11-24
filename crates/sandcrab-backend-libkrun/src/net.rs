@@ -11,10 +11,10 @@
 //! | `egress_restricted` | `PolicyUnenforceable` (no egress proxy before Phase 3) |
 //!
 //! A domain allow-list is only meaningful with `egress_restricted`; on any other policy it is
-//! rejected rather than ignored. Published ports are refused until the `tunnel.open` vsock
-//! tunnel lands (`ports.rs`, flow step `lk-ports`); TSI port mapping is never used.
+//! rejected rather than ignored. Published ports do not depend on the policy: they go through
+//! `tunnel.open` over vsock ([`crate::ports`]); TSI port mapping is never used.
 
-use sandcrab_core::{NetworkConfig, NetworkPolicy, PortSpec, Result, SandboxError};
+use sandcrab_core::{NetworkConfig, NetworkPolicy, Result, SandboxError};
 
 use crate::helper_proto::HelperNetwork;
 
@@ -59,23 +59,6 @@ pub fn plan(network: &NetworkConfig, opts: NetOptions) -> Result<HelperNetwork> 
 #[must_use]
 pub fn enforces(network: &NetworkConfig, opts: NetOptions) -> bool {
     plan(network, opts).is_ok()
-}
-
-/// Published ports need the `tunnel.open` vsock tunnel (flow step `lk-ports`); until then a
-/// non-empty list is an explicit error, never silently dropped.
-pub fn check_ports(ports: &[PortSpec]) -> Result<()> {
-    if ports.is_empty() {
-        return Ok(());
-    }
-    let list = ports
-        .iter()
-        .map(|p| p.guest.to_string())
-        .collect::<Vec<_>>()
-        .join(", ");
-    Err(SandboxError::InvalidConfig(format!(
-        "ports need tunnel support: the libkrun backend cannot publish guest port(s) {list} yet \
-         (TSI port mapping is never used because it binds the host wildcard address)"
-    )))
 }
 
 #[cfg(test)]
@@ -139,17 +122,5 @@ mod tests {
             let err = plan(&net, TSI).unwrap_err();
             assert!(matches!(err, SandboxError::InvalidConfig(_)), "{err}");
         }
-    }
-
-    #[test]
-    fn ports_are_refused_until_the_tunnel_lands() {
-        check_ports(&[]).unwrap();
-        let err = check_ports(&[PortSpec { guest: 8080 }, PortSpec { guest: 3000 }])
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("tunnel") && err.contains("8080, 3000"),
-            "{err}"
-        );
     }
 }

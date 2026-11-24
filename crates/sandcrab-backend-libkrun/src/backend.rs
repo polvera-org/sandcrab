@@ -20,6 +20,7 @@ use crate::helper_proto::{
     MIN_MEMORY_MIB, PinnedFile, ROOT_DRIVE_ID, SCRATCH_DRIVE_ID, TOOLS_PORT,
 };
 use crate::net::{self, NetOptions};
+use crate::ports;
 use crate::reap::{self, ReapReport};
 use crate::vm::{BACKEND, KrunSandbox, KrunVm, Launch, SCRATCH_FILE, krun_err, scratch_disk};
 use crate::workspace::{self, MountPlan};
@@ -493,14 +494,27 @@ impl RuntimeBackend for LibkrunBackend {
         spec.reject_secrets()?;
         // Fail before creating anything: policy, ports, sizes.
         net::plan(&spec.network, self.net_options())?;
-        net::check_ports(&spec.ports)?;
+        ports::check(&spec.ports)?;
         vm_size(spec.resources.vcpu, spec.resources.memory_mb)?;
 
         let (dir, meta) = reap::create_run_dir(&self.config.run_dir, spec.id)?;
         let mut vm = KrunVm::new(spec.id, dir, meta);
-        match self.spawn_vm(spec, &mut vm).await {
-            Ok(()) => Ok(Box::new(KrunSandbox {
-                connector: Arc::new(vm.connector()),
+        let started = async {
+            self.spawn_vm(spec, &mut vm).await?;
+            let connector = Arc::new(vm.connector());
+            // Published ports: 127.0.0.1 listeners → `tunnel.open` over v.sock (§9).
+            let ports =
+                ports::publish(Arc::clone(&connector), &spec.ports, vm.exit_watch()).await?;
+            if !ports.is_empty() {
+                spec.timings.mark_custom("ports_published");
+            }
+            Ok::<_, SandboxError>((connector, ports))
+        }
+        .await;
+        match started {
+            Ok((connector, ports)) => Ok(Box::new(KrunSandbox {
+                ports,
+                connector,
                 vm,
                 timings: spec.timings.clone(),
                 config: Arc::clone(&self.config),
@@ -646,9 +660,12 @@ image = "sandcrab/base:0.1.0"
         assert!(matches!(err, SandboxError::PolicyUnenforceable(_)), "{err}");
 
         let mut s = spec();
-        s.ports = vec![PortSpec { guest: 8080 }];
+        s.ports = vec![PortSpec { guest: 8080 }, PortSpec { guest: 8080 }];
         let err = b.spawn(&s).await.err().unwrap();
-        assert!(err.to_string().contains("tunnel"), "{err}");
+        assert!(matches!(err, SandboxError::InvalidConfig(_)), "{err}");
+        s.ports = vec![PortSpec { guest: 0 }];
+        let err = b.spawn(&s).await.err().unwrap();
+        assert!(matches!(err, SandboxError::InvalidConfig(_)), "{err}");
 
         let mut s = spec();
         s.resources.vcpu = 256;
