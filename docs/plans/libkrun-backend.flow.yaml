@@ -248,7 +248,7 @@ steps:
     title: "Host-wide tap-pool lock dir (two Sandcrab processes with different run dirs can grab the same tap); build-crabd.sh honours CARGO_TARGET_DIR; unused-mut warning in sdk tests (firecracker-only build)"
     depends_on: [fc-net-egress]
     artifacts: [crates/sandcrab-backend-firecracker/src/net.rs, scripts/build-crabd.sh, crates/sandcrab-sdk/tests/common/mod.rs]
-    status: todo
+    status: done
 
   - id: lk-w2-emfile
     phase: implement
