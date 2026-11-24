@@ -55,7 +55,9 @@ pub use template::{
     verify_image_pin,
 };
 pub use timings::{LifecyclePhase, LifecycleTimings, PhaseOffset, TimingMarks, TimingReport};
-pub use tunnel::{ForwarderConfig, PortForwarder};
+pub use tunnel::{
+    ForwarderConfig, MAX_PUBLISHED_PORTS, PortForwarder, PortForwards, StopSignal, validate_ports,
+};
 pub use workspace::{
     MountMode, RootIdentity, SafeRelPath, Workspace, WorkspaceBacking, WorkspaceId, WorkspaceMount,
     WorkspaceRef, WorkspaceState, validate_workspace_name,
