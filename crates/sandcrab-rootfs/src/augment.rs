@@ -148,6 +148,13 @@ pub fn augment<R: Read, W: Write, C: Read>(
             continue;
         }
         let mut header = entry.header().clone();
+        // The path is re-set below. tar's ustar `set_path` only rewrites `name` when the new
+        // path fits in it, so a `prefix` inherited from the source header (`docker export`
+        // splits long paths into prefix/name) would survive and readers (mke2fs -d) would
+        // see `<old prefix>/<new path>`.
+        if let Some(ustar) = header.as_ustar_mut() {
+            ustar.prefix = [0; 155];
+        }
         let kind = header.entry_type();
 
         // Forward xattrs (e.g. security.capability) carried as PAX records.
@@ -305,6 +312,41 @@ mod tests {
         h.set_gid(1000);
         b.append_data(&mut h, &long, &b"abc"[..]).unwrap();
         b.into_inner().unwrap()
+    }
+
+    /// `docker export` stores `<prefix>/tests/` as ustar prefix + name; once normalised (no
+    /// trailing `/`) the full path fits in `name`, and the stale prefix must not be kept.
+    #[test]
+    fn split_ustar_paths_are_not_doubled() {
+        let dir = format!("opt/{}/certifi", "p".repeat(82));
+        let mut b = Builder::new(Vec::new());
+        for p in [format!("{dir}/"), format!("{dir}/tests/")] {
+            let mut h = Header::new_ustar();
+            h.set_entry_type(EntryType::Directory);
+            h.set_mode(0o755);
+            h.set_size(0);
+            b.append_data(&mut h, &p, std::io::empty()).unwrap();
+        }
+        let src = b.into_inner().unwrap();
+        // Precondition: the source really uses the ustar prefix field for `tests/`.
+        let mut entries = tar::Archive::new(&src[..]);
+        let tests = entries.entries().unwrap().nth(1).unwrap().unwrap();
+        assert!(tests.header().as_ustar().unwrap().prefix[0] != 0);
+        let want = format!("{dir}/tests");
+        assert!(want.len() <= 100, "{}", want.len());
+
+        let mut out = Vec::new();
+        augment(&src[..], &mut out, &b""[..], 0).unwrap();
+        let paths: Vec<String> = tar::Archive::new(&out[..])
+            .entries()
+            .unwrap()
+            .map(|e| normalize(&e.unwrap().path().unwrap()))
+            .collect();
+        assert!(paths.contains(&want), "{paths:?}");
+        assert!(
+            paths.iter().all(|p| !p.contains("certifi/opt")),
+            "{paths:?}"
+        );
     }
 
     #[test]
