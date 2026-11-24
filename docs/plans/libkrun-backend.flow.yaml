@@ -116,7 +116,7 @@ steps:
     title: Fake sandcrab-krun integration tests (spawn/ready/destroy, crash, escalation, lifeline, reaper, leases)
     depends_on: [lk-backend, lk-helper]
     artifacts: [crates/sandcrab-backend-libkrun/tests/fake_helper.rs]
-    status: doing
+    status: done
 
   - id: lk-ports
     phase: implement
