@@ -21,12 +21,13 @@ pub mod template;
 #[cfg(any(test, feature = "test-util"))]
 pub mod testing;
 pub mod timings;
+pub mod tunnel;
 pub mod workspace;
 
 pub use backend::{BackendCapabilities, BackendKind, ResolvedSpec, RuntimeBackend, SandboxHandle};
 pub use client::{
     AsyncStream, BoxedStream, CALL_TIMEOUT_GRACE, Connector, CrabdClient, DEFAULT_CALL_TIMEOUT,
-    Endpoint, ReadyClient, effective_timeout, wait_ready,
+    Endpoint, ReadyClient, effective_timeout, open_tunnel, wait_ready,
 };
 pub use error::{Result, SandboxError};
 pub use manager::{ManagerConfig, Sandbox, SandboxInfo, SandboxManager};
@@ -49,6 +50,7 @@ pub use template::{
     verify_template_image, verify_template_image_for,
 };
 pub use timings::{LifecyclePhase, LifecycleTimings, PhaseOffset, TimingMarks, TimingReport};
+pub use tunnel::{ForwarderConfig, PortForwarder};
 pub use workspace::{
     MountMode, RootIdentity, SafeRelPath, Workspace, WorkspaceBacking, WorkspaceId, WorkspaceMount,
     WorkspaceRef, WorkspaceState, validate_workspace_name,
