@@ -231,3 +231,85 @@ cargo test -p sandcrab-backend-firecracker --test firecracker_kvm -- --ignored  
 ```
 
 Benchmarks: [bench/README.md](bench/README.md) (`sandcrab-bench run --backends docker,firecracker`).
+
+## 3. libkrun on Linux (KVM host)
+
+The libkrun backend runs on the same KVM host as Firecracker, as the unprivileged `<user>`. It
+uses the same `/dev/kvm` access (the `kvm` group), templates, template pins and `crabd`. It
+needs no root, no taps and no nftables: with networking `disabled` (the default), TSI is off
+and the guest has no NIC. Results and caveats are in
+[design/libkrun-backend.md §12.2](design/libkrun-backend.md).
+
+### Install
+
+Build prerequisites: Rust (`cargo`), `make`, `gcc`, `git`, `curl`, `patchelf`, and
+e2fsprogs ≥ 1.47.1 for the rootfs images.
+
+```sh
+cargo build --release -p sandcrab-backend-libkrun --bin sandcrab-krun
+sandcrab libkrun install --helper target/release/sandcrab-krun
+sandcrab doctor --backend libkrun
+```
+
+`sandcrab libkrun install` runs `scripts/fetch-libkrun.sh`. It builds libkrun from the pinned
+tag (with `BLK=1`), takes libkrunfw from its pinned prebuilt release, and installs both into
+`<state root>/artifacts/libkrun/<version>/`. It also copies the helper into
+`<state root>/bin/`. Linux needs no code signing.
+
+### Host-side cap: cgroup v2 delegation (recommended)
+
+Without a cgroup, the guest RAM bounds the guest, but the helper's own VMM overhead
+(virtio-fs and vsock threads, device buffers) is not capped. The backend warns once per
+process, and `doctor` reports `lk:cgroup`. To cap it, give each helper a cgroup v2 leaf
+(`memory.max` = guest RAM + 128 MiB, `pids.max` = 64) under a parent delegated to `<user>`:
+
+```ini
+# ~/.config/systemd/user/sandcrab-vms.service
+[Unit]
+Description=Delegated cgroup v2 parent for sandcrab VMM leaves
+
+[Service]
+ExecStart=/bin/sleep infinity
+Delegate=memory pids
+# Keep the unit cgroup free of processes so it can hold per-VM leaves.
+DelegateSubgroup=supervisor
+# Runs in <unit>/supervisor: enable memory + pids for the leaves in <unit>.
+ExecStartPost=/bin/sh -c "echo +memory +pids > /sys/fs/cgroup$(dirname $(cut -d: -f3 /proc/self/cgroup))/cgroup.subtree_control"
+Restart=always
+
+[Install]
+WantedBy=default.target
+```
+
+```sh
+sudo loginctl enable-linger <user>            # keep the user manager (and the unit) running
+systemctl --user daemon-reload
+systemctl --user enable --now sandcrab-vms.service
+export SANDCRAB_LIBKRUN_CGROUP=/sys/fs/cgroup$(systemctl --user show -P ControlGroup sandcrab-vms.service)
+```
+
+`DelegateSubgroup=` needs systemd ≥ 254. Linger is required: without it, the user manager
+stops at the last logout and takes the unit with it.
+
+**The owning process must run inside the user manager's tree.** Moving a pid between cgroups
+needs write access to `cgroup.procs` of the common ancestor of both cgroups. For a process in
+an SSH session (`user-<uid>.slice/session-N.scope`), that ancestor is root-owned. Run the
+sandcrab process (CLI, bench, tests) under a user scope:
+
+```sh
+systemd-run --user --scope -q -- sandcrab --backend libkrun run -t base -- 'uname -a'
+systemd-run --user --scope -q -- \
+  cargo test -p sandcrab-backend-libkrun --test libkrun_vm -- --ignored --test-threads=1
+```
+
+A configured parent that cannot be used (not delegated, controllers not enabled, or the caller
+outside the tree) fails backend construction with `InvalidConfig` and the fix. It never
+silently runs uncapped. The bench reads the same variable, and `SANDCRAB_BENCH_KRUN_CGROUP`
+overrides it there.
+
+### Run
+
+```sh
+cargo test -p sandcrab-backend-libkrun --test libkrun_vm -- --ignored --test-threads=1
+SANDCRAB_E2E_BACKEND=libkrun cargo test -p sandcrab-sdk --features libkrun -- --ignored --test-threads=2
+```
