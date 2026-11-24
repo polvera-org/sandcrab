@@ -22,10 +22,16 @@ Before planning or writing code, read:
 4. **First-Class Persistent Workspaces**:
    - Ephemeral sandboxes and durable workspaces are separate lifecycles.
    - Workspaces must support host-side mutation between turns, multi-mount (`ReadWrite` / `ReadOnly`) on spawn, explicit `default_cwd`, and path-traversal/symlink safety.
-5. **Pinned & Reproducible Templates**:
+5. **Pinned Templates (local integrity now, reproducible later)**:
    - Templates are standard OCI `Dockerfile`s + `sandcrab.toml` manifests.
    - Keep runtime versions modern (as of late 2026: Debian 13 `trixie-slim`, Python 3.15 + `uv`, Node.js 26 Active LTS).
-   - Pin built rootfs/kernel/init artifacts with SHA-256 digests.
+   - Base images are digest-pinned in the repo (`FROM …@sha256:…`).
+   - Built template images are pinned **host-locally** (`~/.sandcrab/template-pins/`, written by `templates/build.sh` or
+     `sandcrab template pin`). That is local integrity ("unchanged since this host built it"), not provenance. Never
+     commit host image IDs to `sandcrab.toml`, and never auto-trust an unpinned image. See
+     [`docs/template-pins.md`](docs/template-pins.md).
+   - microVM rootfs, kernel, libkrun libraries and `crabd` are pinned with SHA-256 digests.
+   - Reproducible template content digests (pinnable in the repo, i.e. provenance) are a planned follow-up.
 6. **Own Core Infrastructure**:
    - Do NOT pull in `kombuse-microvm` as a core dependency (see `BRIEF.md` §3). Keep `sandcrab-core`, `sandcrab-protocol`, and `sandcrab-guest` clean, owned, and modular.
 

@@ -16,7 +16,7 @@ KVM host (kvm-homelab), which is still to do.
 ## Prerequisites
 
 - A Linux host with a rootful Docker daemon, and your user in the `docker` group.
-- Template images built and pinned: `templates/build.sh --pin` (at least `base`, plus `ts-dev`
+- Template images built and pinned on this host: `templates/build.sh` (at least `base`, plus `ts-dev`
   if you bench it).
 - A static `crabd`: `scripts/build-crabd.sh`, or point `--crabd` / `SANDCRAB_CRABD` at one.
 - Run from the repo root. `--templates-dir` defaults to `templates`, and git info is read

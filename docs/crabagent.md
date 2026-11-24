@@ -12,7 +12,7 @@ Backends: **Docker only** in V1 (`--backend docker`; `docker-dev` is accepted as
 
 Prerequisites are the same as the [README quickstart](../README.md#quickstart-linux--docker):
 Docker, a static `crabd` (`scripts/build-crabd.sh`) and pinned template images
-(`templates/build.sh --pin`).
+(`templates/build.sh`, which pins them on this host).
 
 ```sh
 cargo build --release -p sandcrab-agent      # binary: target/release/crabagent

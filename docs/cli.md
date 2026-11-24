@@ -25,7 +25,7 @@ Accepted by every command.
 | `--state-dir <DIR>` | `$SANDCRAB_HOME`, else `~/.sandcrab` | State root: workspace registry, sandbox sockets, caches |
 | `--templates-dir <DIR>` | `./templates`, then `<state root>/templates` | Repeatable; first match wins |
 | `--backend <docker\|firecracker>` | none (`$SANDCRAB_BACKEND`) | Runtime backend. **Explicit, no fallback.** `firecracker` exists only in Linux builds. The pre-rename name `docker-dev` is still accepted as an alias of `docker` |
-| `--allow-unpinned` | off | `docker` only: run template images that have no `sha256` pin in `sandcrab.toml` (refused by default) |
+| `--allow-unpinned` | off | `docker` only: run template images that have no host-local pin (refused by default; see [template-pins.md](template-pins.md)) |
 | `--crabd <PATH>` | `$SANDCRAB_CRABD`, else `target/<arch>-unknown-linux-musl/release/crabd` | Host path of the static musl `crabd` that gets injected |
 | `--json` | off | Machine-readable JSON output |
 | `-v`, `-vv` | off | Lifecycle timings to stderr (`-vv`: debug logs) |
@@ -44,7 +44,7 @@ another backend.
 sandcrab doctor [--fix [--all [-y]]]
 ```
 
-Checks `crabd`, Docker, every template image against its `sha256` pin, the state
+Checks `crabd`, Docker, every template image against this host's pin (local integrity), the state
 directory, and the Firecracker prerequisites: `/dev/kvm` readable and writable (with a
 hint for VMs without nested virtualization), `kvm` group membership, pinned kernel and
 `firecracker` binary, `mke2fs` (e2fsprogs >= 1.47.1 for tar input), the rootfs cache per
@@ -82,12 +82,15 @@ sandbox with it mounted `rw`). Reads are always allowed.
 
 | Command | |
 | --- | --- |
-| `template list` | List templates found in the template directories |
-| `template build [NAMES]... [--all] [--no-pin]` | Build images with `templates/build.sh` and write their image IDs into each `sandcrab.toml` `sha256` (unless `--no-pin`). `--all` builds every template, `base` first |
+| `template list` | List templates found in the template directories, with this host's pin (`host-local`, `legacy-manifest` or `no`) |
+| `template build [NAMES]... [--all] [--no-pin]` | Build images with `templates/build.sh` and record their image IDs as host-local pins (unless `--no-pin`). `--all` builds every template, `base` first |
+| `template pin [NAMES]... [--all]` | Adopt the images already present: record their current IDs as host-local pins without rebuilding (prints a warning) |
 
-The same build is available as `templates/build.sh [--pin] [NAMES...]`. The pin is the
-*local* image ID: it pins integrity, not bit-for-bit reproducibility (apt packages are not
-pinned yet), so re-pin after every rebuild.
+The same build is available as `templates/build.sh [--no-pin] [NAMES...]`. Pins live in
+`~/.sandcrab/template-pins/` (or `$SANDCRAB_TEMPLATE_PINS`), never in `sandcrab.toml`. A
+pin is the *local* image ID: it proves the image is unchanged since this host built it, not
+where it came from, because image IDs do not reproduce across hosts yet. See
+[template-pins.md](template-pins.md).
 
 ## `rootfs`
 

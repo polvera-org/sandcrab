@@ -4,7 +4,7 @@
 //! any backend. The backend is picked by `SANDCRAB_E2E_BACKEND`:
 //!
 //! - `docker` (default): the Docker backend. Needs a Docker daemon,
-//!   the template images (`templates/build.sh --pin`) and a static `crabd` (`$SANDCRAB_CRABD`,
+//!   the template images pinned on this host (`templates/build.sh`) and a static `crabd` (`$SANDCRAB_CRABD`,
 //!   else `target/<arch>-unknown-linux-musl/release/crabd`, built on first use).
 //! - `firecracker`: not wired into the SDK yet → every test prints a SKIP line and passes.
 //!   TODO(fc-wire, fc-e2e): once `SandcrabBuilder` can select the Firecracker backend, build it
