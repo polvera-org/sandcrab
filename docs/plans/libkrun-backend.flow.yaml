@@ -58,7 +58,7 @@ steps:
     title: "crabd init: EBUSY-tolerant early mounts under init.krun, virtio-fs mount planning (MS_RDONLY for ro), unit tests"
     depends_on: [protocol-mounts]
     artifacts: [crates/sandcrab-guest/src/init/]
-    status: doing
+    status: done
 
   - id: templates-arm64
     phase: implement
@@ -99,7 +99,7 @@ steps:
     title: "tunnel.open in protocol + crabd serve + core port forwarder (127.0.0.1); shared by FC and libkrun"
     depends_on: [guest-virtiofs]
     artifacts: [crates/sandcrab-protocol/src/, crates/sandcrab-guest/src/server.rs, crates/sandcrab-core/src/client.rs]
-    status: todo
+    status: doing
 
   # ---- frontier 4
   - id: lk-fake-tests
