@@ -249,3 +249,92 @@ async fn shutdown_closes_open_tunnels() {
     srv.shutdown().await;
     assert_eof(&mut s).await;
 }
+
+/// Loopback server that sends `bye`, half-closes, then reports everything it reads
+/// afterwards on the channel (once the client side is closed).
+async fn half_closing_server() -> (SocketAddr, tokio::sync::mpsc::Receiver<Vec<u8>>) {
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    tokio::spawn(async move {
+        loop {
+            let (s, _) = l.accept().await.unwrap();
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let (mut r, mut w) = s.into_split();
+                w.write_all(b"bye").await.unwrap();
+                w.shutdown().await.unwrap();
+                let mut seen = Vec::new();
+                let _ = r.read_to_end(&mut seen).await;
+                let _ = tx.send(seen).await;
+            });
+        }
+    });
+    (addr, rx)
+}
+
+/// Unix-socket transport (Docker): the target's half-close reaches the host as EOF and the
+/// host can keep sending.
+#[tokio::test]
+async fn target_half_close_is_propagated_by_default() {
+    let (target, mut seen) = half_closing_server().await;
+    let srv = TestServer::start(|_| {}).await;
+    let (mut s, resp) = srv.tunnel(target.port()).await;
+    result(&resp);
+    let mut got = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), s.read_to_end(&mut got))
+        .await
+        .expect("EOF within 5s")
+        .unwrap();
+    assert_eq!(got, b"bye");
+    s.write_all(b"after").await.unwrap();
+    s.shutdown().await.unwrap();
+    let after = tokio::time::timeout(Duration::from_secs(5), seen.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        after, b"after",
+        "host → guest still open after the target's FIN"
+    );
+    srv.shutdown().await;
+}
+
+/// vsock policy: the target's EOF flushes its bytes and closes the whole tunnel, so a
+/// read-until-close client finishes even if the transport drops half-close.
+#[tokio::test]
+async fn close_on_target_eof_flushes_then_closes() {
+    let (target, mut seen) = half_closing_server().await;
+    let srv = TestServer::start(|c| c.tunnels.close_on_target_eof = true).await;
+    let (mut s, resp) = srv.tunnel(target.port()).await;
+    result(&resp);
+    let mut got = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), s.read_to_end(&mut got))
+        .await
+        .expect("EOF within 5s")
+        .unwrap();
+    assert_eq!(got, b"bye");
+    // The tunnel is fully closed: the target's read side ends with nothing more.
+    let after = tokio::time::timeout(Duration::from_secs(5), seen.recv())
+        .await
+        .expect("target sees the close")
+        .unwrap();
+    assert!(after.is_empty(), "{after:?}");
+
+    // Large payloads are flushed before the close; host EOF still reaches the target.
+    let echo = echo_server().await;
+    let (mut s, resp) = srv.tunnel(echo.port()).await;
+    result(&resp);
+    let data = vec![5u8; 1 << 20];
+    let (mut r, mut w) = s.split();
+    let send = async {
+        w.write_all(&data).await.unwrap();
+        w.shutdown().await.unwrap();
+    };
+    let mut back = Vec::new();
+    let recv = tokio::time::timeout(Duration::from_secs(10), r.read_to_end(&mut back));
+    let ((), res) = tokio::join!(send, recv);
+    res.unwrap().unwrap();
+    assert_eq!(back.len(), data.len());
+    srv.shutdown().await;
+}

@@ -295,7 +295,7 @@ The helper maps guest **listening** vsock ports to host sockets: `krun_add_vsock
 and `(1024, "<run>/v.sock", true)`. A host `connect()` to the socket becomes a guest vsock connection **[spike]**. There is
 no `CONNECT` handshake (unlike FC), so the connector is the core `Endpoint::Unix` connector the Docker backend uses.
 
-Readiness is the same as FC: poll `ctl.sock` (backoff 2 ms ×1.5 ≤ 20 ms, deadline `boot_timeout`, default 10 s) →
+Readiness is the same as FC: poll `ctl.sock` (backoff 2 ms ×1.5 ≤ 5 ms, deadline `boot_timeout`, default 10 s) →
 `init.configure` → poll `v.sock` → first `hello` = `t_ready`. A connect before the guest listens returns
 `ECONNREFUSED`/EOF; the spike took 12–17 attempts within ~100 ms. If the helper exits during the poll, it aborts immediately with the log tail.
 
@@ -402,6 +402,35 @@ BackendCapabilities { hardware_isolated: true, multi_tenant_safe: false,
 | e2e macOS | Real libkrun + signed helper + arm64 `base` rootfs. The shared e2e matrix (tools, rw/ro mounts, host mutation between turns, `default_cwd`, cross-backend workspace handoff with Docker). Plus libkrun-specific: ro survives guest remount, **host loopback unreachable with `disabled`**, no host listener appears, case-insensitivity warning | `tests/libkrun_vm.rs`, `#[ignore]`, `cfg(all(target_os="macos", target_arch="aarch64"))` |
 | e2e Linux KVM | The same file, `cfg(target_os="linux")`, needs `/dev/kvm` rw. Run on `kvm-dedicated` | `#[ignore]` |
 | CI | Unit and fake-helper tests run everywhere. **GitHub-hosted macOS arm64 runners are themselves VMs and are not expected to allow nested Hypervisor.framework guests** (Apple Silicon nested virt needs M3+ and macOS 15+; to be confirmed), so real e2e is **local-only on the Mac** and on `kvm-dedicated` (self-hosted runner later). Linux hosted runners with `/dev/kvm` (larger runners) could run the Linux e2e. That is optional |
+
+### 12.1 Results on the Mac (step `lk-e2e-macos`, 2026-11-24, M2, macOS 26.2, libkrun 1.19.8)
+
+- `tests/libkrun_vm.rs`: 7/7 (boot/hello/bash, `NoNewPrivs: 1`, no capabilities, orphans reaped
+  by PID 1; live rw/ro virtio-fs both ways, symlinks inert, files host-owned; ro share refuses
+  `mount -o remount,rw`; share root pinned by fd: swapping the host dir after spawn does not
+  redirect the share; TSI-off regressions; `unrestricted` refused without the opt-in; published
+  ports; rejected policies leave no run dir or helper).
+- SDK e2e (`SANDCRAB_E2E_BACKEND=libkrun`): 14/14. Differences, asserted: `unrestricted` is
+  `PolicyUnenforceable` (the dev-server scenario runs with `disabled` over tunnels).
+- **TSI off holds:** with network `disabled` the guest cannot reach a `127.0.0.1` listener on the
+  Mac nor the Mac's LAN address, and a guest listener on `0.0.0.0` is not reachable from the
+  host's loopback or LAN address.
+- **`dummy0`:** libkrunfw's kernel always creates `dummy0` (TSI's interface). With TSI off it is
+  down, unaddressed and without routes, and the sandbox user has no `CAP_NET_ADMIN`. Deleting it
+  in `crabd init` (`RTM_DELLINK`) works but adds ~25 ms to `init.configure` (netdev teardown),
+  so it is kept and the tests accept a down `dummy*` link only on libkrun.
+- **Half-close on `v.sock`:** a guest `SHUT_WR` reaches the host as EOF; a host `SHUT_WR`
+  breaks the stream (reply lost, no EOF). So `forward_half_close = false`, and `crabd` closes
+  vsock tunnels on target EOF (same behaviour as Firecracker; `docs/protocol.md`).
+- **Spawn time (warm, `base`, 1 vCPU):** ~235 ms → **~165 ms**. Where it goes now: helper
+  launch ~3 ms; pin check of libkrun + libkrunfw ~20 ms (was ~95 ms: sha2 now uses the ARMv8 SHA2
+  instructions); libkrun VM setup until `ctl.sock` exists ~60 ms; guest kernel + `init.krun` +
+  `crabd init` ~80 ms (`guest_boot_ms`); `init.configure` + `hello` ~1 ms (the second `hello` by
+  the manager costs ~0.3 ms). The first spawn of a process adds ~60 ms (debug build: up to
+  ~260 ms) in `rootfs_ready`: a cache hit still runs `docker image inspect` (~150 ms with
+  Docker Desktop) and hashes `crabd`; later spawns hit the in-process cache. A cold rootfs build
+  is 9–22 s (`base`) and ~60 s (`ts-dev`). The CLI pays the first-spawn cost on every `run`.
+  Teardown is ~25 ms (`init.shutdown`).
 
 ## 13. Bench
 

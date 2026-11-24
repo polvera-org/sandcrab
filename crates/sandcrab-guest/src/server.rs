@@ -195,6 +195,13 @@ enum Conn {
 }
 
 impl Listener {
+    fn is_vsock(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        return matches!(self, Self::Vsock(..));
+        #[cfg(not(target_os = "linux"))]
+        false
+    }
+
     async fn accept(&self) -> io::Result<Conn> {
         match self {
             Self::Unix { listener, .. } => listener.accept().await.map(|(s, _)| Conn::Unix(s)),
@@ -289,7 +296,12 @@ impl Server {
             config,
         } = self;
         let handler = tool_handler(Arc::clone(&ctx));
-        let tunnels = Arc::new(TunnelService::new(config.tunnels));
+        // vsock bridges drop half-close: end tunnels on target EOF (see `crate::tunnel`).
+        let tunnel_config = TunnelConfig {
+            close_on_target_eof: config.tunnels.close_on_target_eof || listener.is_vsock(),
+            ..config.tunnels
+        };
+        let tunnels = Arc::new(TunnelService::new(tunnel_config));
         let (stop_tx, stop_rx) = watch::channel(false);
         let slots = Arc::new(Semaphore::new(config.max_connections));
         let mut conns = JoinSet::new();

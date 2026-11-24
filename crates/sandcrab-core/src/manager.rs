@@ -176,10 +176,13 @@ impl SandboxManager {
             .unwrap_or_else(|| manifest.network.to_config());
         network.validate()?;
         if !backend.enforces_network_policy(&network) {
-            let hint = if network.policy == NetworkPolicy::EgressRestricted {
+            let hint = if let Some(h) = backend.network_policy_hint(&network) {
+                format!(": {h}")
+            } else if network.policy == NetworkPolicy::EgressRestricted {
                 " (no V1 backend enforces egress_restricted; use `disabled` or `unrestricted`)"
+                    .to_owned()
             } else {
-                ""
+                String::new()
             };
             return Err(SandboxError::PolicyUnenforceable(format!(
                 "backend `{}` cannot enforce network policy `{}`{hint}",

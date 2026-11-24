@@ -108,6 +108,12 @@ pub trait RuntimeBackend: Send + Sync {
     /// returns false; backends must also fail `spawn` themselves — never ignore a policy.
     fn enforces_network_policy(&self, network: &NetworkConfig) -> bool;
 
+    /// Why `network` is not enforced and what would make it work (appended to the manager's
+    /// `PolicyUnenforceable` error). `None`: no backend-specific advice.
+    fn network_policy_hint(&self, _network: &NetworkConfig) -> Option<String> {
+        None
+    }
+
     /// Start a sandbox running `crabd` and return as soon as it can be connected to
     /// (readiness is awaited by the manager via [`SandboxHandle::connector`]).
     /// On error the backend must have cleaned up everything it created.

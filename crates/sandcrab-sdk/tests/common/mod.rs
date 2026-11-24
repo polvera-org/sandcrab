@@ -11,6 +11,10 @@
 //!   artifacts (fetched on first use into `$SANDCRAB_HOME/cache`, shared with the CLI) and the
 //!   template images. `network: unrestricted` scenarios need the tap pool
 //!   (`scripts/fc-net-setup.sh`).
+//! - `libkrun`: the libkrun backend (Apple Silicon macOS or Linux KVM). Needs
+//!   `--features libkrun` (otherwise every test prints a SKIP line and passes), the signed
+//!   helper and pinned libraries (`sandcrab libkrun install`), `mke2fs` on `PATH` and the
+//!   template images pinned on this host. TSI is never enabled: `unrestricted` is refused.
 //!
 //! All scenarios are `#[ignore]`d. Run with:
 //!
@@ -18,6 +22,8 @@
 //! cargo test -p sandcrab-sdk -- --ignored --test-threads=2
 //! SANDCRAB_E2E_BACKEND=firecracker \
 //!   cargo test -p sandcrab-sdk --features firecracker -- --ignored --test-threads=2
+//! SANDCRAB_E2E_BACKEND=libkrun \
+//!   cargo test -p sandcrab-sdk --features libkrun -- --ignored --test-threads=2
 //! ```
 //!
 //! Each test gets its own temp state dir (workspace registry + sandbox sockets) and unique
@@ -49,6 +55,7 @@ static HOST_LOCK: RwLock<()> = RwLock::const_new(());
 pub enum E2eBackend {
     Docker,
     Firecracker,
+    Libkrun,
 }
 
 impl E2eBackend {
@@ -56,7 +63,10 @@ impl E2eBackend {
         match std::env::var(BACKEND_ENV).as_deref() {
             Err(_) | Ok("" | "docker") => Self::Docker,
             Ok("firecracker") => Self::Firecracker,
-            Ok(other) => panic!("{BACKEND_ENV} must be `docker` or `firecracker`, got `{other}`"),
+            Ok("libkrun") => Self::Libkrun,
+            Ok(other) => {
+                panic!("{BACKEND_ENV} must be `docker`, `firecracker` or `libkrun`, got `{other}`")
+            }
         }
     }
 }
@@ -112,6 +122,8 @@ pub struct Harness {
     pub sc: Sandcrab,
     pub backend: E2eBackend,
     tmp: tempfile::TempDir,
+    /// Short-path run dir (libkrun: Unix socket paths must fit in 104 bytes on macOS).
+    _run: Option<tempfile::TempDir>,
     scope: String,
 }
 
@@ -124,6 +136,7 @@ impl Harness {
             .tempdir()
             .unwrap();
         let builder = base_builder(tmp.path());
+        let mut run = None;
         let sc = match backend {
             E2eBackend::Docker => builder.docker(docker_config()).build().unwrap(),
             #[cfg(all(feature = "firecracker", target_os = "linux"))]
@@ -139,6 +152,30 @@ impl Harness {
                 );
                 return None;
             }
+            #[cfg(all(
+                feature = "libkrun",
+                any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))
+            ))]
+            E2eBackend::Libkrun => {
+                let r = tempfile::Builder::new()
+                    .prefix("sclk")
+                    .tempdir_in("/tmp")
+                    .unwrap();
+                let sc = builder.libkrun(libkrun_config(r.path())).build().unwrap();
+                run = Some(r);
+                sc
+            }
+            #[cfg(not(all(
+                feature = "libkrun",
+                any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))
+            )))]
+            E2eBackend::Libkrun => {
+                eprintln!(
+                    "SKIP {test}: {BACKEND_ENV}=libkrun needs macOS aarch64 or Linux and \
+                     `--features libkrun`"
+                );
+                return None;
+            }
         };
         let tag = SandboxId::new().to_string();
         let scope = format!("{}-{}", slug(test), &tag[..8]);
@@ -146,12 +183,19 @@ impl Harness {
             sc,
             backend,
             tmp,
+            _run: run,
             scope,
         })
     }
 
     pub fn is_docker(&self) -> bool {
         self.backend == E2eBackend::Docker
+    }
+
+    /// Workspaces are live host directories (Docker bind mounts, libkrun virtio-fs): guest
+    /// writes land on the host as the host user while the sandbox runs.
+    pub fn live_workspaces(&self) -> bool {
+        matches!(self.backend, E2eBackend::Docker | E2eBackend::Libkrun)
     }
 
     /// Unique workspace name for this test (`[a-z0-9][a-z0-9-_]{0,62}`).
@@ -179,7 +223,9 @@ impl Harness {
     pub fn backend_has(&self, id: SandboxId) -> bool {
         match self.backend {
             E2eBackend::Docker => !docker_ps(&format!("sandcrab.sandbox_id={id}")).is_empty(),
-            E2eBackend::Firecracker => self.sc.list_sandboxes().iter().any(|i| i.id == id),
+            E2eBackend::Firecracker | E2eBackend::Libkrun => {
+                self.sc.list_sandboxes().iter().any(|i| i.id == id)
+            }
         }
     }
 
@@ -206,6 +252,18 @@ fn firecracker_config(tmp: &Path) -> sandcrab_sdk::FirecrackerConfig {
     config.run_dir = tmp.join("run");
     config.recovery_dir = tmp.join("recovery");
     config.fetch_pinned_artifacts().unwrap();
+    config
+}
+
+/// libkrun config: helper, libraries and rootfs cache shared with the real Sandcrab home; run
+/// dir private to the test (under `/tmp`, short enough for Unix socket paths). TSI stays off.
+#[cfg(all(
+    feature = "libkrun",
+    any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))
+))]
+fn libkrun_config(run: &Path) -> sandcrab_sdk::LibkrunConfig {
+    let mut config = sandcrab_sdk::LibkrunConfig::from_env(crabd()).unwrap();
+    config.run_dir = run.join("run");
     config
 }
 

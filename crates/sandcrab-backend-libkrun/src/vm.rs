@@ -630,6 +630,22 @@ mod tests {
         (tmp, KrunVm::new(meta.sandbox_id, dir, meta), helper)
     }
 
+    /// Launch the fake helper. A test thread may fork while another test's script is still
+    /// open for writing; the child holds that fd until its own exec, so exec'ing the script
+    /// can fail with ETXTBSY for a moment (the inode is the same whatever its name). Retry.
+    async fn launch_fake(vm: &mut KrunVm, helper: &Path, lib_dir: &Path) {
+        for _ in 0..50 {
+            match vm.launch(&launch(helper, lib_dir)).await {
+                Ok(()) => return,
+                Err(e) if e.to_string().contains("Text file busy") => {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                Err(e) => panic!("launch: {e}"),
+            }
+        }
+        panic!("fake helper stayed busy (ETXTBSY)");
+    }
+
     fn launch<'a>(helper: &'a Path, lib_dir: &'a Path) -> Launch<'a> {
         Launch {
             helper,
@@ -644,7 +660,7 @@ mod tests {
         let (tmp, mut vm, helper) = fake(
             "read line; echo \"got: $line lib=$DYLD_FALLBACK_LIBRARY_PATH$LD_LIBRARY_PATH\"; exit 71",
         );
-        vm.launch(&launch(&helper, tmp.path())).await.unwrap();
+        launch_fake(&mut vm, &helper, tmp.path()).await;
         let meta = RunMeta::load(&vm.dir).unwrap();
         assert_eq!(meta.helper.as_ref().map(|p| p.pid), vm.pid);
         let init = crate::control::tests::init_cfg();
@@ -683,7 +699,7 @@ mod tests {
     async fn stop_escalates_to_sigterm() {
         // Never answers the control port; dies on SIGTERM.
         let (tmp, mut vm, helper) = fake("read line; exec sleep 30");
-        vm.launch(&launch(&helper, tmp.path())).await.unwrap();
+        launch_fake(&mut vm, &helper, tmp.path()).await;
         let mut cfg = LibkrunConfig::with_home(tmp.path(), "/c");
         cfg.term_after = Duration::from_millis(100);
         cfg.kill_after = Duration::from_millis(2000);
@@ -695,7 +711,7 @@ mod tests {
     async fn stop_escalates_to_sigkill() {
         let (tmp, mut vm, helper) =
             fake("trap '' TERM; read line; touch armed; while :; do sleep 0.05; done");
-        vm.launch(&launch(&helper, tmp.path())).await.unwrap();
+        launch_fake(&mut vm, &helper, tmp.path()).await;
         // The config write returns before the script ran `trap`: wait until it is armed.
         for _ in 0..500 {
             if vm.dir.join("armed").exists() {
@@ -720,7 +736,7 @@ mod tests {
     #[tokio::test]
     async fn drop_kills_and_cleans_up() {
         let (tmp, mut vm, helper) = fake("read line; exec sleep 30");
-        vm.launch(&launch(&helper, tmp.path())).await.unwrap();
+        launch_fake(&mut vm, &helper, tmp.path()).await;
         let id = vm.meta.helper.clone().unwrap();
         let dir = vm.dir.clone();
         assert!(id.is_alive());
