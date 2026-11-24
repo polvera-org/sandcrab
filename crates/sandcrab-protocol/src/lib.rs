@@ -45,6 +45,7 @@ mod results;
 mod rpc;
 mod schema;
 mod tools;
+pub mod tunnel;
 
 pub use error::{ProtocolError, RpcError, codes};
 pub use framing::{
@@ -59,6 +60,7 @@ pub use rpc::{
 };
 pub use schema::{ToolDefinition, input_schema, output_schema};
 pub use tools::{TOOL_NAMES, ToolCall, ToolResult, tool_definitions};
+pub use tunnel::{METHOD_TUNNEL_OPEN, TunnelOpenAck, TunnelOpenParams};
 
 /// Version of this wire protocol, reported by `hello`.
 pub const PROTOCOL_VERSION: &str = "0.1";

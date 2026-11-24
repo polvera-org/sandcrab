@@ -19,7 +19,8 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use sandcrab_protocol::{
     Call, HEADER_LEN, HelloParams, HelloResult, METHOD_HELLO, PROTOCOL_VERSION, ProtocolError,
-    Reply, RequestId, RpcMessage, RpcResponse, ToolCall, ToolResult, encode_frame, parse_header,
+    Reply, RequestId, RpcMessage, RpcResponse, ToolCall, ToolResult, TunnelOpenAck,
+    TunnelOpenParams, encode_frame, parse_header,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -482,6 +483,75 @@ pub async fn wait_ready(connector: &dyn Connector, deadline: Instant) -> Result<
     }
 }
 
+/// Open a `tunnel.open` byte stream to guest loopback `port` on a **fresh** connection from
+/// `connector`.
+///
+/// Sends the `tunnel.open` frame, reads exactly the ack frame (never past it), and returns
+/// the stream, which from then on carries raw bytes to and from `127.0.0.1:<port>` inside
+/// the guest. A refusal from `crabd` (nothing listening, tunnel limit, bad port) comes back
+/// as the typed protocol error; `timeout` bounds connect + handshake.
+pub async fn open_tunnel(
+    connector: &dyn Connector,
+    port: u16,
+    timeout: Duration,
+) -> Result<BoxedStream> {
+    let params = TunnelOpenParams::new(port)?;
+    let handshake = async {
+        let mut stream = connector
+            .connect()
+            .await
+            .map_err(|e| SandboxError::Transport(format!("connect {connector:?}: {e}")))?;
+        let frame = encode_frame(&params.to_request(1)).map_err(ProtocolError::from)?;
+        stream
+            .write_all(&frame)
+            .await
+            .map_err(|e| SandboxError::Transport(format!("send tunnel.open: {e}")))?;
+        stream
+            .flush()
+            .await
+            .map_err(|e| SandboxError::Transport(format!("send tunnel.open: {e}")))?;
+        let resp = read_one_response(&mut stream).await?;
+        let ack = TunnelOpenAck::from_value(resp.into_result()?)?;
+        if ack.port != port {
+            return Err(SandboxError::Transport(format!(
+                "crabd acked a tunnel to port {} instead of {port}",
+                ack.port
+            )));
+        }
+        Ok(stream)
+    };
+    tokio::time::timeout(timeout, handshake)
+        .await
+        .map_err(|_| SandboxError::Timeout {
+            what: format!("tunnel.open to guest port {port}"),
+            after: timeout,
+        })?
+}
+
+/// Read exactly one response frame (header + payload, nothing more).
+async fn read_one_response<R: AsyncRead + Unpin + ?Sized>(reader: &mut R) -> Result<RpcResponse> {
+    let mut header = [0u8; HEADER_LEN];
+    reader.read_exact(&mut header).await.map_err(|e| {
+        SandboxError::Transport(if e.kind() == io::ErrorKind::UnexpectedEof {
+            "crabd closed the connection before answering".to_owned()
+        } else {
+            format!("read failed: {e}")
+        })
+    })?;
+    let len = parse_header(header).map_err(ProtocolError::from)?;
+    let mut payload = vec![0u8; len];
+    reader
+        .read_exact(&mut payload)
+        .await
+        .map_err(|e| SandboxError::Transport(format!("stream ended mid-frame: {e}")))?;
+    match RpcMessage::from_slice(&payload)? {
+        RpcMessage::Response(r) => Ok(r),
+        other => Err(SandboxError::Transport(format!(
+            "expected a response from crabd, got {other:?}"
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::AtomicU32;
@@ -711,6 +781,71 @@ mod tests {
         let err = wait_ready(&conn, Instant::now() + Duration::from_secs(5))
             .await
             .unwrap_err();
+        assert!(matches!(err, SandboxError::Protocol(_)), "{err:?}");
+    }
+
+    /// Connector whose single stream is served by a scripted fake `crabd`.
+    #[derive(Debug)]
+    struct ScriptedTunnel {
+        ack_port: u16,
+        trailing: &'static [u8],
+    }
+
+    #[async_trait]
+    impl Connector for ScriptedTunnel {
+        async fn connect(&self) -> io::Result<BoxedStream> {
+            let (a, mut b) = tokio::io::duplex(1 << 16);
+            let (ack_port, trailing) = (self.ack_port, self.trailing);
+            tokio::spawn(async move {
+                let mut header = [0u8; HEADER_LEN];
+                b.read_exact(&mut header).await.unwrap();
+                let mut req = vec![0u8; parse_header(header).unwrap()];
+                b.read_exact(&mut req).await.unwrap();
+                let RpcMessage::Request(req) = RpcMessage::from_slice(&req).unwrap() else {
+                    panic!("request")
+                };
+                assert_eq!(req.method, sandcrab_protocol::METHOD_TUNNEL_OPEN);
+                let ack = RpcResponse::success(req.id, serde_json::json!({ "port": ack_port }));
+                // Ack and the first raw bytes in one write: the client must not swallow them.
+                let mut out = encode_frame(&ack).unwrap();
+                out.extend_from_slice(trailing);
+                b.write_all(&out).await.unwrap();
+                let mut sink = Vec::new();
+                let _ = b.read_to_end(&mut sink).await;
+            });
+            Ok(Box::new(a))
+        }
+    }
+
+    #[tokio::test]
+    async fn open_tunnel_does_not_read_past_the_ack() {
+        let conn = ScriptedTunnel {
+            ack_port: 8080,
+            trailing: b"HTTP/1.1 200 OK\r\n",
+        };
+        let mut s = open_tunnel(&conn, 8080, Duration::from_secs(5))
+            .await
+            .unwrap();
+        let mut got = vec![0u8; conn.trailing.len()];
+        s.read_exact(&mut got).await.unwrap();
+        assert_eq!(got, conn.trailing);
+    }
+
+    #[tokio::test]
+    async fn open_tunnel_rejects_wrong_port_ack_and_port_zero() {
+        let conn = ScriptedTunnel {
+            ack_port: 9,
+            trailing: b"",
+        };
+        let err = open_tunnel(&conn, 8080, Duration::from_secs(5))
+            .await
+            .err()
+            .unwrap();
+        assert!(matches!(err, SandboxError::Transport(_)), "{err:?}");
+        let err = open_tunnel(&conn, 0, Duration::from_secs(5))
+            .await
+            .err()
+            .unwrap();
         assert!(matches!(err, SandboxError::Protocol(_)), "{err:?}");
     }
 }

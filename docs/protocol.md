@@ -16,6 +16,7 @@ behaviour. `sandcrab tools schema` prints the JSON Schema of every tool's input 
 - [Errors](#errors)
 - [Tools](#tools)
 - [Transports](#transports)
+- [Tunnels: `tunnel.open` (port forwarding)](#tunnels-tunnelopen-port-forwarding)
 - [`init.*` control contract (microVMs)](#init-control-contract-microvms)
 - [Archive format `sandcrab-tar-v1`](#archive-format-sandcrab-tar-v1)
 
@@ -341,9 +342,66 @@ The same frames run over every transport.
 | vsock | Firecracker | `crabd serve --vsock 1024` (any CID). The host side uses Firecracker's vsock-over-UDS: connect to the VM's vsock Unix socket, write `CONNECT <port>\n`, read one line `OK <host_port>\n`; after that the stream carries frames. Any other reply, or EOF (no guest listener yet), means retry. |
 
 `crabd serve` flags: `--default-cwd` (default `/workspace`), `--max-connections` (64),
-`--max-inflight` (64), `--shutdown-grace-ms` (10 000). On SIGTERM / SIGINT it stops
+`--max-inflight` (64), `--max-tunnels` (64), `--shutdown-grace-ms` (10 000). On SIGTERM / SIGINT it stops
 accepting, lets in-flight requests finish within the grace period, kills background
 process groups and removes the Unix socket. Logs go to stderr (`RUST_LOG`, default `info`).
+
+## Tunnels: `tunnel.open` (port forwarding)
+
+microVMs have no Docker-style published ports: Firecracker cannot publish ports, and
+libkrun's TSI is disabled because it exposes the host's loopback to the guest. Instead the
+host forwards TCP connections to a guest **loopback** port through `crabd`, over the same
+transport as tool calls (vsock, vsock-over-UDS, or a Unix socket). The same primitive works
+on every backend.
+
+**Wire design: one dedicated connection per tunnel.** The host opens a *new* transport
+connection for every forwarded TCP connection. Its first frame is `tunnel.open`; after the
+ack the connection leaves frame mode and carries raw bytes in both directions:
+
+```text
+-> {"jsonrpc":"2.0","id":1,"method":"tunnel.open","params":{"port":3000}}
+<- {"jsonrpc":"2.0","id":1,"result":{"port":3000}}
+   ... raw bytes both ways, no more frames, until either side closes ...
+```
+
+Multiplexed data frames on the tool connection were rejected: they would add a flow-control
+layer to the protocol, let one busy tunnel delay tool responses (head-of-line blocking), and
+add per-chunk JSON overhead. vsock and Unix sockets both allow many cheap connections, and
+`init.export` already uses the same "ack, then raw bytes" switch.
+
+| | |
+| --- | --- |
+| Params | `port: u16` (1..=65535). Nothing else: unknown fields such as `host` are `-32602` |
+| Target | `127.0.0.1:<port>` inside the guest, then `[::1]:<port>`. Never any other address |
+| Result | `{port}`, sent only **after** the guest TCP connect succeeded, so an ack means the stream is live |
+| Errors (then `crabd` closes) | `-32602` bad port; `-32004` nothing listening; `-32001` tunnel limit reached or connect failed; `-32002` connect timeout (5 s) |
+| Position | must be the **first** frame. Later on a connection it is `-32600` and the connection stays in frame mode |
+| Close | EOF on one side is propagated as a half-close (`shutdown(SHUT_WR)`) to the other; the tunnel ends when both directions are done or either side errors |
+
+It is a connection-level verb, not a tool: it is not in `TOOL_NAMES` and not in `hello`. A
+`crabd` that predates it answers `-32601`.
+
+**Limits and safety**
+
+- **Guest:** at most `--max-tunnels` (64) open tunnels; the next `tunnel.open` fails at
+  once with `-32001` (no queueing). Tunnel connections give back their
+  `--max-connections` slot, so port forwards and tool connections cannot starve each other.
+- **Host:** `sandcrab_core::PortForwarder` binds **`127.0.0.1` only** (the address is not
+  configurable; port `0` = ephemeral). At most 64 tunnels per forwarder
+  (`ForwarderConfig::max_tunnels`); excess TCP connections are accepted and closed at once.
+  The connect + `tunnel.open` handshake is bounded (10 s). A refused tunnel closes the host
+  client's TCP connection.
+- **No amplification:** both relays copy bytes 1:1 with fixed buffers (32 KiB per
+  direction in the guest, 64 KiB on the host); nothing is generated or repeated.
+- **Teardown:** `PortForwarder::shutdown` (or drop) closes the listener and every open
+  tunnel. When `crabd` shuts down (sandbox destroy) it closes all tunnels without waiting for
+  the grace period, and the host side sees EOF.
+- `tunnel.open` is served on the tools port only, never on the `init.*` control port, and
+  runs as the `crabd serve` user.
+
+Host API (`sandcrab-core`): `open_tunnel(&dyn Connector, port, timeout) -> BoxedStream`
+for a single stream, and `PortForwarder::bind(connector, guest_port, host_port, config)`
+for a listener. Backends wire `SandboxConfig.ports` onto the forwarder.
 
 ## `init.*` control contract (microVMs)
 

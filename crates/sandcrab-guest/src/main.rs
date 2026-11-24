@@ -51,6 +51,10 @@ struct ServeArgs {
     #[arg(long, value_name = "N", default_value_t = 64, value_parser = clap::value_parser!(u32).range(1..))]
     max_inflight: u32,
 
+    /// Max concurrently open `tunnel.open` port forwards (separate from --max-connections).
+    #[arg(long, value_name = "N", default_value_t = 64, value_parser = clap::value_parser!(u32).range(1..))]
+    max_tunnels: u32,
+
     /// Grace period for in-flight requests on SIGTERM / SIGINT, in milliseconds.
     #[arg(long, value_name = "MS", default_value_t = 10_000)]
     shutdown_grace_ms: u64,
@@ -122,6 +126,7 @@ async fn serve(args: ServeArgs) -> std::io::Result<()> {
     let mut config = ServerConfig::new(args.listen.addr());
     config.max_connections = args.max_connections as usize;
     config.max_inflight_per_connection = args.max_inflight as usize;
+    config.tunnels.max_tunnels = args.max_tunnels as usize;
     config.shutdown_grace = Duration::from_millis(args.shutdown_grace_ms);
 
     let shutdown = shutdown_signal()?;

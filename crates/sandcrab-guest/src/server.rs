@@ -19,6 +19,14 @@
 //!
 //! Inbound notifications and responses are ignored (Phase 1 hosts send neither).
 //!
+//! # Tunnels
+//!
+//! A connection whose **first** frame is `tunnel.open` leaves frame mode: after the ack it
+//! is a raw byte relay to a guest loopback port ([`crate::tunnel`]). Tunnel connections give
+//! back their `max_connections` slot and are bounded separately by
+//! [`TunnelConfig::max_tunnels`], so port forwards cannot starve tool connections (nor the
+//! reverse). `tunnel.open` on a connection that already carried a frame is `-32600`.
+//!
 //! # Shutdown
 //!
 //! [`Server::run`] takes a shutdown future (normally [`shutdown_signal`]). When it fires the
@@ -48,18 +56,21 @@ use std::{
 };
 
 use sandcrab_protocol::{
-    Call, FrameError, HelloParams, HelloResult, PROTOCOL_VERSION, PingResult, ProtocolError, Reply,
-    RpcMessage, RpcRequest, RpcResponse, TOOL_NAMES, encode_frame,
+    Call, FrameError, HelloParams, HelloResult, METHOD_TUNNEL_OPEN, PROTOCOL_VERSION, PingResult,
+    ProtocolError, Reply, RpcMessage, RpcRequest, RpcResponse, TOOL_NAMES, encode_frame,
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, TcpStream, UnixListener, UnixStream},
-    sync::{Semaphore, mpsc, watch},
+    sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch},
     task::JoinSet,
 };
 use tracing::{debug, error, info, warn};
 
-use crate::{CRABD_VERSION, ToolContext, codec, tools};
+use crate::{
+    CRABD_VERSION, ToolContext, codec, tools,
+    tunnel::{self, TunnelConfig, TunnelService},
+};
 
 /// Where the server listens.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,6 +93,8 @@ pub struct ServerConfig {
     pub max_inflight_per_connection: usize,
     /// How long in-flight requests may run after shutdown starts.
     pub shutdown_grace: Duration,
+    /// `tunnel.open` limits.
+    pub tunnels: TunnelConfig,
 }
 
 impl ServerConfig {
@@ -92,6 +105,7 @@ impl ServerConfig {
             max_connections: 64,
             max_inflight_per_connection: 64,
             shutdown_grace: Duration::from_secs(10),
+            tunnels: TunnelConfig::default(),
         }
     }
 }
@@ -211,10 +225,13 @@ pub struct Server {
 impl Server {
     /// Bind the configured transport.
     pub async fn bind(config: ServerConfig, ctx: Arc<ToolContext>) -> io::Result<Self> {
-        if config.max_connections == 0 || config.max_inflight_per_connection == 0 {
+        if config.max_connections == 0
+            || config.max_inflight_per_connection == 0
+            || config.tunnels.max_tunnels == 0
+        {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "max_connections and max_inflight_per_connection must be at least 1",
+                "max_connections, max_inflight_per_connection and max_tunnels must be at least 1",
             ));
         }
         let listener = match &config.listen {
@@ -272,6 +289,7 @@ impl Server {
             config,
         } = self;
         let handler = tool_handler(Arc::clone(&ctx));
+        let tunnels = Arc::new(TunnelService::new(config.tunnels));
         let (stop_tx, stop_rx) = watch::channel(false);
         let slots = Arc::new(Semaphore::new(config.max_connections));
         let mut conns = JoinSet::new();
@@ -304,19 +322,18 @@ impl Server {
             let handler = Arc::clone(&handler);
             let stop = stop_rx.clone();
             let inflight = config.max_inflight_per_connection;
+            let tunnels = Arc::clone(&tunnels);
             match conn {
                 Conn::Unix(s) => conns.spawn(async move {
-                    serve_connection(s, handler, inflight, stop, "unix".into()).await;
-                    drop(permit);
+                    serve_stream(s, handler, inflight, stop, "unix".into(), permit, tunnels).await;
                 }),
                 Conn::Tcp(s, peer) => conns.spawn(async move {
-                    serve_connection(s, handler, inflight, stop, peer.to_string()).await;
-                    drop(permit);
+                    let peer = peer.to_string();
+                    serve_stream(s, handler, inflight, stop, peer, permit, tunnels).await;
                 }),
                 #[cfg(target_os = "linux")]
                 Conn::Vsock(s, peer) => conns.spawn(async move {
-                    serve_connection(s, handler, inflight, stop, peer).await;
-                    drop(permit);
+                    serve_stream(s, handler, inflight, stop, peer, permit, tunnels).await;
                 }),
             };
         }
@@ -379,19 +396,69 @@ fn bind_unix(path: &Path) -> io::Result<UnixListener> {
     Ok(listener)
 }
 
-/// Serve one connection until EOF, a fatal framing error, or `stop` turns `true`; then
-/// wait for in-flight requests and flush their responses.
+/// Serve an accepted connection: a raw tunnel if its first frame is `tunnel.open`, else
+/// frame mode ([`serve_connection`]). `conn_slot` is the `max_connections` permit; a tunnel
+/// releases it once it has its own slot.
+pub async fn serve_stream<S>(
+    mut stream: S,
+    handler: Handler,
+    max_inflight: usize,
+    mut stop: watch::Receiver<bool>,
+    peer: String,
+    conn_slot: OwnedSemaphorePermit,
+    tunnels: Arc<TunnelService>,
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    debug!(%peer, "connection opened");
+    let first = tokio::select! {
+        biased;
+        _ = stop.wait_for(|s| *s) => return,
+        f = codec::read_frame(&mut stream) => f,
+    };
+    if let Ok(Some(payload)) = &first
+        && let Some(req) = tunnel::as_tunnel_open(payload)
+    {
+        drop(conn_slot);
+        tunnels.serve(stream, req, stop, &peer).await;
+        debug!(%peer, "tunnel connection closed");
+        return;
+    }
+    let (rd, wr) = tokio::io::split(stream);
+    serve_frames(rd, wr, Some(first), handler, max_inflight, stop, peer).await;
+    drop(conn_slot);
+}
+
+/// Serve one connection in frame mode until EOF, a fatal framing error, or `stop` turns
+/// `true`; then wait for in-flight requests and flush their responses. No tunnels.
 pub async fn serve_connection<S>(
     stream: S,
     handler: Handler,
     max_inflight: usize,
-    mut stop: watch::Receiver<bool>,
+    stop: watch::Receiver<bool>,
     peer: String,
 ) where
     S: AsyncRead + AsyncWrite + Send + 'static,
 {
     debug!(%peer, "connection opened");
-    let (mut rd, wr) = tokio::io::split(stream);
+    let (rd, wr) = tokio::io::split(stream);
+    serve_frames(rd, wr, None, handler, max_inflight, stop, peer).await;
+}
+
+type FirstFrame = Result<Option<Vec<u8>>, FrameError>;
+
+async fn serve_frames<R, W>(
+    mut rd: R,
+    wr: W,
+    mut first: Option<FirstFrame>,
+    handler: Handler,
+    max_inflight: usize,
+    mut stop: watch::Receiver<bool>,
+    peer: String,
+) where
+    R: AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
     let (tx, rx) = mpsc::channel::<RpcResponse>(max_inflight + 4);
     let writer = tokio::spawn(write_loop(wr, rx, peer.clone()));
     let slots = Arc::new(Semaphore::new(max_inflight));
@@ -405,10 +472,14 @@ pub async fn serve_connection<S>(
             p = Arc::clone(&slots).acquire_owned() => p.expect("request semaphore is never closed"),
         };
         // Cancelling `read_frame` loses a partial frame; fine, we are closing anyway.
-        let frame = tokio::select! {
-            biased;
-            _ = stop.wait_for(|s| *s) => break,
-            f = codec::read_frame(&mut rd) => f,
+        let frame = if let Some(f) = first.take() {
+            f
+        } else {
+            tokio::select! {
+                biased;
+                _ = stop.wait_for(|s| *s) => break,
+                f = codec::read_frame(&mut rd) => f,
+            }
         };
         let payload = match frame {
             Ok(Some(p)) => p,
@@ -424,6 +495,13 @@ pub async fn serve_connection<S>(
             }
         };
         match RpcMessage::from_slice(&payload) {
+            Ok(RpcMessage::Request(req)) if req.method == METHOD_TUNNEL_OPEN => {
+                let e = ProtocolError::InvalidRequest(
+                    "`tunnel.open` must be the first frame of a fresh connection".into(),
+                );
+                let _ = tx.send(RpcResponse::failure(Some(req.id), &e)).await;
+                drop(permit);
+            }
             Ok(RpcMessage::Request(req)) => {
                 let handler = Arc::clone(&handler);
                 let tx = tx.clone();
