@@ -59,9 +59,12 @@ pub struct Probe {
     /// `containerd-shim` (outside the container cgroup).
     pub shim_pid: Option<u32>,
     pub cgroup: Option<PathBuf>,
-    /// libkrun: the `sandcrab-krun` helper (the VMM process) and the sandbox run dir.
-    pub helper_pid: Option<u32>,
+    /// The VMM process (Firecracker's `firecracker`, libkrun's `sandcrab-krun` helper) and the
+    /// sandbox run dir. `None` for Docker (no VMM: shared kernel).
+    pub vmm_pid: Option<u32>,
     pub run_dir: Option<PathBuf>,
+    /// Configured guest RAM (template `memory_mb`), to find the guest mapping in the VMM.
+    pub guest_mem_bytes: Option<u64>,
 }
 
 /// One opened backend.
@@ -171,6 +174,11 @@ fn fc_config(opts: &OpenOpts) -> Result<sandcrab_sdk::FirecrackerConfig, String>
     let mut config = sandcrab_sdk::FirecrackerConfig::with_home(&home, opts.crabd.clone());
     config.run_dir = opts.state_dir.join("run");
     config.recovery_dir = opts.state_dir.join("recovery");
+    // Optional delegated cgroup v2 parent: per-VMM leaves give cgroup metrics too. Without it the
+    // VMM process itself is sampled (smaps PSS/RSS, /proc/<pid>/stat CPU).
+    if let Some(cg) = std::env::var_os("SANDCRAB_BENCH_FC_CGROUP").filter(|v| !v.is_empty()) {
+        config.cgroup_parent = Some(PathBuf::from(cg));
+    }
     Ok(config)
 }
 
@@ -322,15 +330,36 @@ impl LiveBackend {
             let meta = sandcrab_sdk::libkrun::reap::RunMeta::load(&dir).ok()?;
             return Some(Probe {
                 name: sb.id().to_string(),
-                helper_pid: meta.helper.map(|h| h.pid),
+                vmm_pid: meta.helper.map(|h| h.pid),
                 cgroup: meta.cgroup.filter(|p| p.join("memory.current").exists()),
                 run_dir: Some(dir),
+                guest_mem_bytes: self.guest_mem_bytes(sb),
                 ..Probe::default()
             });
         }
-        // TODO(fc-bench): VMM pid + run dir from the Firecracker backend for RSS/PSS.
+        // Firecracker: `<run_dir>/<id>/meta.json` records the VMM pid (and its cgroup leaf).
+        #[cfg(all(feature = "firecracker", target_os = "linux"))]
+        if let Some(fc) = self.sc.firecracker_backend() {
+            let dir = fc.config().run_dir.join(sb.id().to_string());
+            let meta = sandcrab_sdk::firecracker::rundir::RunMeta::load(&dir).ok()?;
+            return Some(Probe {
+                name: sb.id().to_string(),
+                vmm_pid: meta.vmm.map(|p| p.pid),
+                cgroup: meta.cgroup.filter(|p| p.join("memory.current").exists()),
+                run_dir: Some(dir),
+                guest_mem_bytes: self.guest_mem_bytes(sb),
+                ..Probe::default()
+            });
+        }
         let _ = sb;
         None
+    }
+
+    /// Guest RAM of a sandbox spawned from its template's defaults.
+    #[allow(dead_code)] // unused when no VMM backend is compiled in
+    fn guest_mem_bytes(&self, sb: &Sandbox) -> Option<u64> {
+        let tpl = self.sc.manager().templates().get(sb.template()).ok()?;
+        Some(tpl.manifest.resources.memory_mb * 1024 * 1024)
     }
 
     /// Writable-layer bytes of the sandbox (`docker inspect --size` → `SizeRw`).
@@ -390,7 +419,7 @@ impl LiveBackend {
     /// Docker: `inspect` → 404 and the cgroup dir removed.
     pub async fn verify_gone(&self, probe: Option<&Probe>) -> Result<(), String> {
         let Some(probe) = probe else {
-            // TODO(fc-bench): VMM pid exited, tap / vsock UDS / API socket / overlay removed.
+            // No probe (lookup failed): nothing to poll.
             return Ok(());
         };
         let deadline = Instant::now() + VERIFY_TIMEOUT;
@@ -410,13 +439,12 @@ impl LiveBackend {
 
     async fn resources_gone(&self, probe: &Probe) -> Result<bool, String> {
         let cgroup_gone = probe.cgroup.as_deref().is_none_or(|p| !p.exists());
-        // libkrun: `destroy` removes the run dir only after the helper has exited.
+        // VMM backends: `destroy` removes the run dir (API/vsock sockets, scratch, workspace
+        // images) only after the VMM has exited.
         let run_dir_gone = probe.run_dir.as_deref().is_none_or(|p| !p.exists());
-        let helper_gone = probe
-            .helper_pid
-            .is_none_or(|pid| !sample::process_alive(pid));
-        if probe.helper_pid.is_some() || probe.run_dir.is_some() {
-            return Ok(cgroup_gone && run_dir_gone && helper_gone);
+        let vmm_gone = probe.vmm_pid.is_none_or(|pid| !sample::process_alive(pid));
+        if probe.vmm_pid.is_some() || probe.run_dir.is_some() {
+            return Ok(cgroup_gone && run_dir_gone && vmm_gone);
         }
         #[cfg(feature = "docker")]
         if let Some(docker) = &self.docker {

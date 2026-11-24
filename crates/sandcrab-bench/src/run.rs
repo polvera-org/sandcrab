@@ -798,10 +798,17 @@ async fn steady_calls(ctx: &Ctx<'_>, sb: &Sandbox, ws: Ws, out: &mut IterOut) ->
     Ok(())
 }
 
-/// CPU attributable to the sandbox so far: cgroup usage + shim ticks.
+/// CPU attributable to the sandbox so far: cgroup usage + shim ticks; without a cgroup, the
+/// VMM process's own `utime + stime` (`/proc/<pid>/stat`, all threads, Linux only).
 fn sandbox_cpu_s(probe: Option<&Probe>) -> Option<f64> {
     let probe = probe?;
-    let cg = sample::read_cgroup(probe.cgroup.as_deref()?).ok()?;
+    let Some(cg) = probe.cgroup.as_deref() else {
+        return probe
+            .vmm_pid
+            .and_then(sample::proc_cpu_ticks)
+            .map(sample::ticks_to_s);
+    };
+    let cg = sample::read_cgroup(cg).ok()?;
     let shim = probe
         .shim_pid
         .and_then(sample::proc_cpu_ticks)
@@ -901,7 +908,10 @@ async fn lifecycle_iter(ctx: &Ctx<'_>, bi: usize, spec: &CellSpec) -> IterOut {
             };
             out.cpu("cpu.lifecycle_s", c + daemon);
         }
-        None => out.skip("cpu.lifecycle_s", "container cgroup not found"),
+        None => out.skip(
+            "cpu.lifecycle_s",
+            "neither a sandbox cgroup nor a readable VMM /proc/<pid>/stat",
+        ),
     }
     lease.cleanup(b);
     out
@@ -961,14 +971,18 @@ async fn guest_mem_available(sb: &Sandbox) -> Result<u64, String> {
         .ok_or_else(|| format!("unexpected /proc/meminfo output {:?}", r.stdout))
 }
 
+/// `host_pss_total` of one sandbox (spec §2): Docker = cgroup PSS + shim PSS; VMM backends =
+/// cgroup-leaf PSS, or without a leaf the VMM process PSS (both include touched guest RAM).
 fn host_pss(probe: &Probe) -> Result<u64, String> {
-    let cg = probe
-        .cgroup
-        .as_deref()
-        .ok_or("container cgroup not found")?;
+    let Some(cg) = probe.cgroup.as_deref() else {
+        return match probe.vmm_pid {
+            Some(pid) => sample::pss(pid),
+            None => Err("container cgroup not found".into()),
+        };
+    };
     let inner = sample::cgroup_pss(cg)?;
-    // libkrun: the helper *is* the VMM and lives inside its cgroup leaf (no shim).
-    if probe.helper_pid.is_some() {
+    // VMM backends: the VMM lives inside its cgroup leaf (no shim).
+    if probe.vmm_pid.is_some() {
         return Ok(inner);
     }
     let shim = match probe.shim_pid {
@@ -998,19 +1012,21 @@ async fn resources_iter(ctx: &Ctx<'_>, bi: usize, spec: &CellSpec) -> IterOut {
         }
     };
     let probe = b.probe(&sb).await;
-    // Guest RAM vs VMM split: only VMM backends have one; Docker shares the host kernel.
-    let why = match b.id {
-        BackendId::Docker => "docker has no VMM (shared kernel): no guest RAM vs VMM split",
-        _ => "VMM process probe not implemented for this backend yet",
-    };
-    out.skip("mem.vmm_overhead", why);
-    // libkrun without a cgroup leaf (always on macOS): helper RSS, under its own metric ids.
-    if let Some(pid) = probe
+    let vmm = probe
         .as_ref()
-        .filter(|p| p.cgroup.is_none())
-        .and_then(|p| p.helper_pid)
-    {
-        helper_rss_iter(ctx, &sb, pid, &mut out).await;
+        .and_then(|p| p.vmm_pid.map(|pid| (pid, p.guest_mem_bytes)));
+    if vmm.is_none() {
+        let why = match b.id {
+            BackendId::Docker => "docker has no VMM (shared kernel): no guest RAM vs VMM split",
+            _ => "VMM process not found for this sandbox",
+        };
+        out.skip("mem.vmm_overhead", why);
+    }
+    // VMM without a cgroup leaf (Firecracker by default, libkrun always on macOS): sample the
+    // VMM process itself.
+    let no_cgroup = probe.as_ref().is_some_and(|p| p.cgroup.is_none());
+    if let Some((pid, guest)) = vmm.filter(|_| no_cgroup) {
+        vmm_proc_iter(ctx, b.id, &sb, pid, guest, &mut out).await;
         let _ = sb.destroy().await;
         lease.cleanup(b);
         return out;
@@ -1043,6 +1059,9 @@ async fn resources_iter(ctx: &Ctx<'_>, bi: usize, spec: &CellSpec) -> IterOut {
         Ok(v) => out.bytes("mem.host_pss_idle", v),
         Err(e) => out.skip("mem.host_pss_idle", e),
     }
+    if let Some((pid, guest)) = vmm {
+        record_vmm_mem(b.id, pid, guest, MemPhase::Idle, &mut out);
+    }
     match guest_mem_available(&sb).await {
         Ok(v) => out.bytes("mem.guest_available_idle", v),
         Err(e) => out.fail("mem.guest_available_idle", e),
@@ -1073,6 +1092,9 @@ async fn resources_iter(ctx: &Ctx<'_>, bi: usize, spec: &CellSpec) -> IterOut {
         match host_pss(&probe) {
             Ok(v) => out.bytes("mem.host_pss_post", v),
             Err(e) => out.skip("mem.host_pss_post", e),
+        }
+        if let Some((pid, guest)) = vmm {
+            record_vmm_mem(b.id, pid, guest, MemPhase::Post, &mut out);
         }
         if let Ok(s) = sample::read_cgroup(&cg) {
             out.bytes("mem.cgroup_current_post", s.memory_current);
@@ -1113,28 +1135,119 @@ async fn resources_iter(ctx: &Ctx<'_>, bi: usize, spec: &CellSpec) -> IterOut {
     out
 }
 
-/// Resource metrics for a VMM process without a cgroup (libkrun on macOS, or Linux without
-/// `SANDCRAB_BENCH_KRUN_CGROUP`): helper **RSS** idle/post (`mem.helper_rss_*`, labelled RSS,
-/// never PSS: shared pages count fully) plus the guest view. cgroup-only metrics are skipped.
-async fn helper_rss_iter(ctx: &Ctx<'_>, sb: &Sandbox, pid: u32, out: &mut IterOut) {
-    let plan = ctx.plan;
-    let why = "no cgroup on this host (helper RSS recorded instead, see mem.helper_rss_*)";
-    for id in [
-        "mem.host_pss_idle",
-        "mem.host_pss_post",
-        "cpu.idle_60s",
-        "mem.cgroup_current_idle",
-    ] {
-        out.skip(id, why);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MemPhase {
+    Idle,
+    Post,
+}
+
+impl MemPhase {
+    fn suffix(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Post => "post",
+        }
     }
+}
+
+/// RSS metric prefix of a VMM process: libkrun keeps its historical `mem.helper_rss_*` ids.
+fn vmm_rss_prefix(id: BackendId) -> &'static str {
+    match id {
+        BackendId::Libkrun => "mem.helper_rss",
+        _ => "mem.vmm_rss",
+    }
+}
+
+/// VMM process memory from `/proc/<pid>/smaps` (Linux): `<rss prefix>_<phase>` = whole-process
+/// **RSS** (incl. guest RAM; shared pages count fully), `mem.vmm_guest_pss_<phase>` = PSS of the
+/// guest-RAM mapping, `mem.vmm_overhead[_post]` = PSS of every other mapping. Returns the
+/// whole-process PSS (incl. guest RAM). Where smaps is unavailable (macOS) only RSS is kept.
+fn record_vmm_mem(
+    id: BackendId,
+    pid: u32,
+    guest: Option<u64>,
+    phase: MemPhase,
+    out: &mut IterOut,
+) -> Option<u64> {
+    let rss_id = format!("{}_{}", vmm_rss_prefix(id), phase.suffix());
+    let guest_id = format!("mem.vmm_guest_pss_{}", phase.suffix());
+    let over_id = match phase {
+        MemPhase::Idle => "mem.vmm_overhead",
+        MemPhase::Post => "mem.vmm_overhead_post",
+    };
+    match sample::vmm_mem(pid, guest) {
+        Ok(m) => {
+            out.bytes(&rss_id, m.rss);
+            match (m.guest, m.overhead_pss()) {
+                (Some((_, g)), Some(o)) => {
+                    out.bytes(&guest_id, g);
+                    out.bytes(over_id, o);
+                }
+                _ => {
+                    let why = format!(
+                        "guest RAM mapping ({} MiB) not found in /proc/{pid}/smaps",
+                        guest.unwrap_or(0) >> 20
+                    );
+                    out.skip(&guest_id, why.clone());
+                    out.skip(over_id, why);
+                }
+            }
+            Some(m.pss)
+        }
+        Err(e) => {
+            match sample::rss(pid) {
+                Ok(v) => out.bytes(&rss_id, v),
+                Err(e) => out.skip(&rss_id, e),
+            }
+            let why = format!("no smaps on this host ({e})");
+            out.skip(&guest_id, why.clone());
+            out.skip(over_id, why);
+            None
+        }
+    }
+}
+
+/// Resource metrics for a VMM process without a cgroup leaf (Firecracker unless
+/// `SANDCRAB_BENCH_FC_CGROUP`, libkrun without `SANDCRAB_BENCH_KRUN_CGROUP`, always on macOS):
+/// `mem.host_pss_*` = VMM process PSS (Linux; includes touched guest RAM), the smaps split of
+/// [`record_vmm_mem`], and `cpu.idle_60s` from the VMM's `/proc/<pid>/stat` ticks. cgroup-only
+/// metrics are skipped.
+async fn vmm_proc_iter(
+    ctx: &Ctx<'_>,
+    id: BackendId,
+    sb: &Sandbox,
+    pid: u32,
+    guest: Option<u64>,
+    out: &mut IterOut,
+) {
+    let plan = ctx.plan;
+    let no_cg = match id {
+        BackendId::Firecracker => {
+            "no cgroup leaf (set SANDCRAB_BENCH_FC_CGROUP); VMM process sampled instead"
+        }
+        _ => "no cgroup leaf (SANDCRAB_BENCH_KRUN_CGROUP, Linux only); VMM process sampled instead",
+    };
+    out.skip("mem.cgroup_current_idle", no_cg);
     tokio::time::sleep(plan.settle).await;
-    match sample::rss(pid) {
-        Ok(v) => out.bytes("mem.helper_rss_idle", v),
-        Err(e) => out.skip("mem.helper_rss_idle", e),
+    let no_smaps = "no /proc/<pid>/smaps on this host (VMM RSS recorded instead)";
+    match record_vmm_mem(id, pid, guest, MemPhase::Idle, out) {
+        Some(v) => out.bytes("mem.host_pss_idle", v),
+        None => out.skip("mem.host_pss_idle", no_smaps),
     }
     match guest_mem_available(sb).await {
         Ok(v) => out.bytes("mem.guest_available_idle", v),
         Err(e) => out.fail("mem.guest_available_idle", e),
+    }
+    // idle CPU of the VMM process (all threads, clock-tick resolution)
+    match sample::proc_cpu_ticks(pid) {
+        Some(a) => {
+            tokio::time::sleep(plan.idle_window).await;
+            match sample::proc_cpu_ticks(pid) {
+                Some(z) => out.cpu("cpu.idle_60s", sample::ticks_to_s(z.saturating_sub(a))),
+                None => out.skip("cpu.idle_60s", format!("VMM {pid} gone during idle window")),
+            }
+        }
+        None => out.skip("cpu.idle_60s", "no /proc/<pid>/stat on this host"),
     }
     let touch = format!(
         "head -c {}M /dev/urandom > /tmp/bench-touch && cat /tmp/bench-touch > /dev/null",
@@ -1150,9 +1263,9 @@ async fn helper_rss_iter(ctx: &Ctx<'_>, sb: &Sandbox, pid: u32, out: &mut IterOu
         return;
     }
     tokio::time::sleep(plan.settle).await;
-    match sample::rss(pid) {
-        Ok(v) => out.bytes("mem.helper_rss_post", v),
-        Err(e) => out.skip("mem.helper_rss_post", e),
+    match record_vmm_mem(id, pid, guest, MemPhase::Post, out) {
+        Some(v) => out.bytes("mem.host_pss_post", v),
+        None => out.skip("mem.host_pss_post", no_smaps),
     }
     match guest_mem_available(sb).await {
         Ok(v) => out.bytes("mem.guest_available", v),
@@ -1687,6 +1800,17 @@ pub async fn run(plan: &Plan) -> anyhow::Result<(RunResult, PathBuf)> {
             "libkrun: workspaces are live virtio-fs shares (no attach / sync-back cost); without \
              a cgroup leaf (always on macOS) memory is the helper's RSS (mem.helper_rss_*), \
              which counts shared pages fully: not comparable with the Linux PSS columns"
+                .into(),
+        );
+    }
+    if plan.backends.contains(&BackendId::Firecracker) {
+        notes.push(
+            "firecracker: without SANDCRAB_BENCH_FC_CGROUP there is no cgroup, so the VMM \
+             process is sampled: mem.host_pss_* = VMM PSS (smaps, includes the guest RAM \
+             touched so far), mem.vmm_guest_pss_* = PSS of the guest-RAM mapping, \
+             mem.vmm_overhead[_post] = PSS of every other mapping, mem.vmm_rss_* = VMM RSS \
+             (includes guest RAM; shared pages count fully), cpu.* = VMM utime+stime from \
+             /proc/<pid>/stat (clock-tick resolution)"
                 .into(),
         );
     }
