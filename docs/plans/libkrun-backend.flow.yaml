@@ -33,7 +33,7 @@ steps:
     title: Extract OCI→ext4 pipeline into crates/sandcrab-rootfs (lib + sandcrab-rootfs bin), add --arch/--platform, arch in cache key; FC re-exports; build-crabd.sh uses rust-lld on Darwin
     depends_on: [lk-approve]
     artifacts: [crates/sandcrab-rootfs/, crates/sandcrab-backend-firecracker/src/rootfs/, crates/sandcrab-backend-firecracker/src/lib.rs, crates/sandcrab-backend-firecracker/Cargo.toml, Cargo.toml, scripts/build-crabd.sh, scripts/build-rootfs.sh]
-    status: doing
+    status: done
 
   - id: protocol-mounts
     phase: implement
@@ -50,7 +50,7 @@ steps:
     title: New crate sandcrab-backend-libkrun (Cargo, lib.rs, config.rs, helper_proto.rs HelperConfig + validation, entitlements.plist), scripts/sign-krun-helper.sh
     depends_on: [rootfs-crate]
     artifacts: [crates/sandcrab-backend-libkrun/Cargo.toml, crates/sandcrab-backend-libkrun/src/lib.rs, crates/sandcrab-backend-libkrun/src/config.rs, crates/sandcrab-backend-libkrun/src/helper_proto.rs, crates/sandcrab-backend-libkrun/entitlements.plist, scripts/sign-krun-helper.sh, Cargo.toml]
-    status: todo
+    status: doing
 
   - id: guest-virtiofs
     phase: implement
