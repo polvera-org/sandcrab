@@ -6,17 +6,23 @@
 use std::{
     ffi::CString,
     fs, io,
-    os::unix::fs::PermissionsExt,
+    os::{
+        fd::{AsFd, AsRawFd},
+        unix::fs::PermissionsExt,
+    },
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
 use rustix::{
+    io::Errno,
     mount::{MountFlags, MountPropagationFlags, UnmountFlags},
     process::{Pid, Signal},
     system::RebootCommand,
 };
 use tracing::{debug, info, warn};
+
+use super::dirs;
 
 fn ctx(e: impl Into<io::Error>, what: impl std::fmt::Display) -> io::Error {
     let e: io::Error = e.into();
@@ -31,14 +37,66 @@ pub fn mount(
     flags: MountFlags,
     data: &str,
 ) -> io::Result<()> {
-    let data = CString::new(data).map_err(|_| io::Error::other("NUL in mount data"))?;
-    let data = (!data.as_bytes().is_empty()).then_some(data.as_c_str());
-    rustix::mount::mount(source, target, fstype, flags, data).map_err(|e| {
+    raw_mount(source, target, fstype, flags, data)?.map_err(|e| {
         ctx(
             e,
             format!("mount {fstype} {source} on {}", target.display()),
         )
     })
+}
+
+/// `mount(2)`; the outer error is bad input, the inner one the syscall's errno.
+fn raw_mount(
+    source: &str,
+    target: &Path,
+    fstype: &str,
+    flags: MountFlags,
+    data: &str,
+) -> io::Result<Result<(), Errno>> {
+    let data = CString::new(data).map_err(|_| io::Error::other("NUL in mount data"))?;
+    let data = (!data.as_bytes().is_empty()).then_some(data.as_c_str());
+    Ok(rustix::mount::mount(source, target, fstype, flags, data))
+}
+
+/// Outcome of [`mount_unless_busy`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mounted {
+    Now,
+    /// `EBUSY`: something (libkrun's `init.krun`) already mounted it.
+    Already,
+}
+
+/// [`mount`], but `EBUSY` ("already mounted") is success. Used for the pseudo filesystems
+/// that libkrun's `init.krun` mounts before it execs `crabd init` as PID 1.
+pub fn mount_unless_busy(
+    source: &str,
+    target: &Path,
+    fstype: &str,
+    flags: MountFlags,
+    data: &str,
+) -> io::Result<Mounted> {
+    match raw_mount(source, target, fstype, flags, data)? {
+        Ok(()) => Ok(Mounted::Now),
+        Err(Errno::BUSY) => {
+            debug!(target = %target.display(), fstype, "already mounted");
+            Ok(Mounted::Already)
+        }
+        Err(e) => Err(ctx(
+            e,
+            format!("mount {fstype} {source} on {}", target.display()),
+        )),
+    }
+}
+
+/// Whether `p` is a mount point: its device differs from its parent's.
+fn is_mount_point(p: &Path) -> bool {
+    let Some(parent) = p.parent() else {
+        return true;
+    };
+    match (rustix::fs::lstat(p), rustix::fs::stat(parent)) {
+        (Ok(a), Ok(b)) => a.st_dev != b.st_dev,
+        _ => false,
+    }
 }
 
 fn mkdir_p(p: &Path) -> io::Result<()> {
@@ -49,16 +107,18 @@ const NOSUID_NODEV_NOEXEC: MountFlags = MountFlags::NOSUID
     .union(MountFlags::NODEV)
     .union(MountFlags::NOEXEC);
 
-/// Step 1: `/proc`, `/sys`, `/dev` (skipped when already mounted, e.g. devtmpfs automount).
+/// Step 1: `/proc`, `/sys`, `/dev`. Skipped when already mounted: by devtmpfs automount
+/// (Firecracker), or by libkrun's `init.krun`, which mounts `/proc /sys /dev /dev/pts
+/// /dev/shm` before it execs us; `EBUSY` from a race with either counts as mounted.
 pub fn early_mounts() -> io::Result<()> {
     if !Path::new("/proc/self").exists() {
-        mount("proc", Path::new("/proc"), "proc", NOSUID_NODEV_NOEXEC, "")?;
+        mount_unless_busy("proc", Path::new("/proc"), "proc", NOSUID_NODEV_NOEXEC, "")?;
     }
     if !Path::new("/sys/kernel").exists() {
-        mount("sysfs", Path::new("/sys"), "sysfs", NOSUID_NODEV_NOEXEC, "")?;
+        mount_unless_busy("sysfs", Path::new("/sys"), "sysfs", NOSUID_NODEV_NOEXEC, "")?;
     }
     if !Path::new("/dev/null").exists() {
-        mount(
+        mount_unless_busy(
             "devtmpfs",
             Path::new("/dev"),
             "devtmpfs",
@@ -115,31 +175,40 @@ pub fn overlay_root(scratch_dev: &Path) -> io::Result<()> {
 }
 
 /// Step 3: `/dev/pts`, `/dev/shm`, `/run`; `/tmp` stays on the overlay (disk, not RAM).
+/// A target that is already a mount point is left alone: under libkrun `init.krun`
+/// mounted `/dev/pts` and `/dev/shm`, and they moved along with `/dev`.
 pub fn late_mounts() -> io::Result<()> {
-    mkdir_p(Path::new("/dev/pts"))?;
-    mount(
-        "devpts",
-        Path::new("/dev/pts"),
-        "devpts",
-        MountFlags::NOSUID | MountFlags::NOEXEC,
-        "ptmxmode=0666,mode=0620,gid=5",
-    )?;
-    mkdir_p(Path::new("/dev/shm"))?;
-    mount(
-        "tmpfs",
-        Path::new("/dev/shm"),
-        "tmpfs",
-        MountFlags::NOSUID | MountFlags::NODEV,
-        "mode=1777",
-    )?;
-    mkdir_p(Path::new("/run"))?;
-    mount(
-        "tmpfs",
-        Path::new("/run"),
-        "tmpfs",
-        MountFlags::NOSUID | MountFlags::NODEV,
-        "mode=0755,size=5%",
-    )?;
+    for (source, target, fstype, flags, data) in [
+        (
+            "devpts",
+            "/dev/pts",
+            "devpts",
+            MountFlags::NOSUID | MountFlags::NOEXEC,
+            "ptmxmode=0666,mode=0620,gid=5",
+        ),
+        (
+            "tmpfs",
+            "/dev/shm",
+            "tmpfs",
+            MountFlags::NOSUID | MountFlags::NODEV,
+            "mode=1777",
+        ),
+        (
+            "tmpfs",
+            "/run",
+            "tmpfs",
+            MountFlags::NOSUID | MountFlags::NODEV,
+            "mode=0755,size=5%",
+        ),
+    ] {
+        let target = Path::new(target);
+        mkdir_p(target)?;
+        if is_mount_point(target) {
+            debug!(target = %target.display(), "already mounted");
+            continue;
+        }
+        mount_unless_busy(source, target, fstype, flags, data)?;
+    }
     mkdir_p(Path::new("/tmp"))?;
     fs::set_permissions("/tmp", fs::Permissions::from_mode(0o1777))
         .map_err(|e| ctx(e, "chmod /tmp"))?;
@@ -177,14 +246,32 @@ pub fn disable_core_dumps() -> io::Result<()> {
         .map_err(|e| ctx(e, "setrlimit(RLIMIT_CORE)"))
 }
 
-/// Mount a workspace drive (ext4). Read-only adds `MS_RDONLY` and `data` (`noload`).
-pub fn mount_workspace(dev: &Path, target: &Path, read_only: bool, data: &str) -> io::Result<()> {
-    mkdir_p(target)?;
-    let mut flags = MountFlags::NOATIME | MountFlags::NOSUID | MountFlags::NODEV;
-    if read_only {
+/// Mount one planned workspace on `dir`, an fd of its (already created, symlink-checked)
+/// mount point; the mount goes through `/proc/self/fd/N` so the path is not re-resolved.
+/// `source` is the block device path, or the virtio-fs tag.
+///
+/// Flags: `MS_NOSUID | MS_NODEV`, plus `MS_NOATIME` on block drives and `MS_RDONLY` for
+/// read-only mounts (for virtio-fs the host enforces read-only as well).
+pub fn mount_workspace(
+    source: &str,
+    dir: impl AsFd,
+    step: &crate::init::config::MountStep,
+) -> io::Result<()> {
+    let mut flags = MountFlags::NOSUID | MountFlags::NODEV;
+    if step.noatime() {
+        flags |= MountFlags::NOATIME;
+    }
+    if step.read_only {
         flags |= MountFlags::RDONLY;
     }
-    mount(&dev.to_string_lossy(), target, "ext4", flags, data)
+    let via = PathBuf::from(format!("/proc/self/fd/{}", dir.as_fd().as_raw_fd()));
+    let fstype = step.fstype();
+    raw_mount(source, &via, fstype, flags, step.data())?.map_err(|e| {
+        ctx(
+            e,
+            format!("mount {fstype} {source} on {}", step.target.display()),
+        )
+    })
 }
 
 /// Guest uptime in ms from `/proc/uptime`.
@@ -258,12 +345,16 @@ pub fn reboot_now() -> io::Error {
 }
 
 /// Make `dir` (created if missing) owned by `uid:gid` — used only for a `default_cwd` that
-/// `crabd init` itself had to create.
+/// `crabd init` itself had to create. An existing directory is left alone (`crabd serve`
+/// enters it unprivileged, so a symlink there grants nothing); creating one never follows
+/// a symlink, so root cannot be steered into creating and chowning a path elsewhere.
 pub fn create_owned_dir(dir: &Path, uid: u32, gid: u32) -> io::Result<()> {
-    if dir.exists() {
+    if dir.is_dir() {
         return Ok(());
     }
-    mkdir_p(dir)?;
-    std::os::unix::fs::chown(dir, Some(uid), Some(gid))
-        .map_err(|e| ctx(e, format!("chown {}", dir.display())))
+    let d = dirs::ensure_dir_in(Path::new("/"), dir)?;
+    if d.created {
+        dirs::chown_fd(&d.fd, uid, gid).map_err(|e| ctx(e, format!("chown {}", dir.display())))?;
+    }
+    Ok(())
 }

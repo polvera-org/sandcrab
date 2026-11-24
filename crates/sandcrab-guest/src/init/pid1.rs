@@ -26,8 +26,9 @@ use tracing_subscriber::EnvFilter;
 
 use super::{
     command::serve_command,
-    config::{self, MountStep, ValidatedConfig},
+    config::{self, MountStep, StepSource, ValidatedConfig},
     control::{InitOps, serve_control_connection},
+    dirs,
     drives::{self, BlockDevice},
     netlink, sys,
 };
@@ -198,14 +199,23 @@ impl Pid1Ops {
         }
         let mut mounted = Vec::new();
         for step in &v.mounts {
-            let dev = resolve(&self.devices, &step.drive_id, &step.label).ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::NotFound,
-                    format!("no block device for drive `{}`", step.drive_id),
-                )
-            })?;
-            sys::mount_workspace(&dev, &step.target, step.read_only, step.data())?;
-            info!(drive = %step.drive_id, dev = %dev.display(), target = %step.target.display(), ro = step.read_only, "workspace mounted");
+            let source = match &step.source {
+                StepSource::Block { drive_id, label } => resolve(&self.devices, drive_id, label)
+                    .ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::NotFound,
+                            format!("no block device for drive `{drive_id}`"),
+                        )
+                    })?
+                    .to_string_lossy()
+                    .into_owned(),
+                StepSource::VirtioFs { tag } => tag.clone(),
+            };
+            // Never follow a symlink to the mount point: it may sit inside an earlier,
+            // persistent workspace.
+            let dir = dirs::ensure_dir_in(Path::new("/"), &step.target)?;
+            sys::mount_workspace(&source, &dir.fd, step)?;
+            info!(source = %source, fstype = step.fstype(), target = %step.target.display(), ro = step.read_only, "workspace mounted");
             mounted.push(step.clone());
         }
         sys::create_owned_dir(&v.default_cwd, c.user.uid, c.user.gid)?;
@@ -269,7 +279,7 @@ impl InitOps for Pid1Ops {
         let m = c
             .mounts
             .iter()
-            .find(|m| m.drive_id == drive_id)
+            .find(|m| m.drive_id() == Some(drive_id))
             .ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::NotFound,

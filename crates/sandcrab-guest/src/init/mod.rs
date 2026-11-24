@@ -1,7 +1,9 @@
 //! `crabd init`: PID 1 of a Sandcrab microVM (see `docs/design/firecracker-backend.md` §3).
 //!
 //! Pure, portable parts (unit-tested everywhere):
-//! - [`config`] — `InitConfig` re-validation and the workspace mount plan;
+//! - [`config`] — `InitConfig` re-validation and the workspace mount plan (ext4 block
+//!   drives and libkrun virtio-fs shares);
+//! - [`dirs`] — symlink-safe creation of mount points and `default_cwd`;
 //! - [`drives`] — `drive_id` → `/dev/vdX` via sysfs serial, ext4-label fallback;
 //! - [`command`] — the privilege-dropped `crabd serve` child command;
 //! - [`export`] — `pack_tree` / `stream_tree`, the guest side of workspace sync-back;
@@ -15,6 +17,7 @@
 pub mod command;
 pub mod config;
 pub mod control;
+pub mod dirs;
 pub mod drives;
 pub mod export;
 pub mod netlink;
