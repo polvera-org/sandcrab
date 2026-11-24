@@ -10,12 +10,13 @@ authors.workspace = true
 
 
 [[bin]]
-name = "sandcrab-rootfs"
-path = "src/bin/sandcrab-rootfs.rs"
+name = "sandcrab-fc-fetch"
+path = "src/bin/sandcrab-fc-fetch.rs"
 
 [dependencies]
 sandcrab-core.workspace = true
 sandcrab-protocol.workspace = true
+sandcrab-rootfs.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 clap.workspace = true
@@ -26,7 +27,6 @@ sha2.workspace = true
 tar.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-toml.workspace = true
 tracing.workspace = true
 rustix = { workspace = true, features = ["fs", "process"] }
 uuid = { workspace = true, features = ["v5"] }

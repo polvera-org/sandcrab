@@ -11,4 +11,4 @@ repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 case "${1:-}" in -h|--help) sed -n '2,8p' "$0"; exit 0 ;; esac
 
 exec cargo run --quiet --release --manifest-path "$repo/Cargo.toml" \
-  -p sandcrab-backend-firecracker --bin sandcrab-rootfs -- fetch "$@"
+  -p sandcrab-backend-firecracker --bin sandcrab-fc-fetch -- "$@"

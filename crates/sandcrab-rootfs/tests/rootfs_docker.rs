@@ -3,13 +3,13 @@
 //!
 //! ```sh
 //! SANDCRAB_TEST_CRABD=target/x86_64-unknown-linux-musl/release/crabd \
-//!   cargo test -p sandcrab-backend-firecracker -- --ignored
+//!   cargo test -p sandcrab-rootfs -- --ignored
 //! ```
 
 use std::path::PathBuf;
 use std::process::Command;
 
-use sandcrab_backend_firecracker::rootfs::{ROOTFS_LABEL, RootfsBuilder, RootfsRequest};
+use sandcrab_rootfs::{ROOTFS_LABEL, RootfsBuilder, RootfsRequest};
 
 fn debugfs(img: &std::path::Path, req: &str) -> String {
     let out = Command::new("debugfs")

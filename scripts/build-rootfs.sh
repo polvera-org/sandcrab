@@ -3,7 +3,7 @@
 #
 #   scripts/build-rootfs.sh <template> --crabd <path> [--out <cache-root>] [--mkfs native|container|fakeroot] [--verify]
 #
-# Thin wrapper over the `sandcrab-rootfs` binary (crates/sandcrab-backend-firecracker); all logic
+# Thin wrapper over the `sandcrab-rootfs` binary (crates/sandcrab-rootfs); all logic
 # lives in Rust (`rootfs::RootfsBuilder`). Output:
 #   <cache-root>/rootfs/<cache-key>/{rootfs.ext4,manifest.json}   (default cache-root: ~/.sandcrab/cache)
 # Prints the rootfs.ext4 path on stdout.
@@ -18,5 +18,5 @@ esac
 template="$1"; shift
 
 exec cargo run --quiet --release --manifest-path "$repo/Cargo.toml" \
-  -p sandcrab-backend-firecracker --bin sandcrab-rootfs -- \
+  -p sandcrab-rootfs --bin sandcrab-rootfs -- \
   build "$template" --templates-dir "$repo/templates" "$@"

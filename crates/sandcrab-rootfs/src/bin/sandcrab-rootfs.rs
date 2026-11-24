@@ -1,17 +1,19 @@
-//! `sandcrab-rootfs`: operator tool for the Firecracker artifact pipeline.
-//! Wrapped by `scripts/build-rootfs.sh` and `scripts/fetch-artifacts.sh`.
+//! `sandcrab-rootfs`: operator tool for the microVM rootfs pipeline (Firecracker, libkrun).
+//! Wrapped by `scripts/build-rootfs.sh`. Pinned Firecracker kernel/binaries are fetched by
+//! `sandcrab-fc-fetch` (`scripts/fetch-artifacts.sh`).
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use sandcrab_backend_firecracker::rootfs::{self, MkfsStrategy, RootfsBuilder, RootfsRequest};
-use sandcrab_backend_firecracker::{artifacts, default_cache_root};
+use sandcrab_rootfs::{
+    self as rootfs, MkfsStrategy, RootfsBuilder, RootfsRequest, default_cache_root,
+};
 
 #[derive(Parser)]
 #[command(
     name = "sandcrab-rootfs",
-    about = "Build Firecracker rootfs images and fetch pinned artifacts"
+    about = "Build ext4 rootfs images for Sandcrab microVM backends"
 )]
 struct Cli {
     /// Cache root (default: $SANDCRAB_HOME/cache or ~/.sandcrab/cache).
@@ -44,11 +46,6 @@ enum Cmd {
         path: PathBuf,
         #[arg(long, default_value_t = 2048)]
         size_mib: u64,
-    },
-    /// Download + verify the pinned kernel and Firecracker binaries.
-    Fetch {
-        #[arg(long)]
-        no_jailer: bool,
     },
 }
 
@@ -114,15 +111,6 @@ fn run(cli: Cli) -> Result<(), String> {
             let d = rootfs::create_scratch(&path, size_mib).map_err(|e| e.to_string())?;
             eprintln!("scratch {} MiB in {:.2?}", size_mib, d);
             println!("{}", path.display());
-        }
-        Cmd::Fetch { no_jailer } => {
-            let k = artifacts::fetch_kernel(&cache).map_err(|e| e.to_string())?;
-            let fc = artifacts::fetch_firecracker(&cache, !no_jailer).map_err(|e| e.to_string())?;
-            println!("kernel      {}", k.display());
-            println!("firecracker {}", fc.firecracker.display());
-            if let Some(j) = fc.jailer {
-                println!("jailer      {}", j.display());
-            }
         }
     }
     Ok(())

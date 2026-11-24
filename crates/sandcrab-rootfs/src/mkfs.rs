@@ -100,7 +100,8 @@ impl MkfsParams {
     }
 }
 
-pub(crate) fn run(cmd: &mut Command) -> Result<String> {
+/// Run `cmd` with stdin closed and return its stdout; a non-zero exit is [`Error::Command`].
+pub fn run(cmd: &mut Command) -> Result<String> {
     let out = cmd
         .stdin(Stdio::null())
         .output()

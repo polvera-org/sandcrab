@@ -1,4 +1,4 @@
-//! OCI image → Firecracker ext4 rootfs pipeline (design doc §2).
+//! Rootfs build + content-addressed cache (Firecracker design doc §2, libkrun design doc §5).
 //!
 //! ```text
 //! sandcrab/<tpl>:0.1.0 ─docker create+export─▶ tar ─augment─▶ rootfs.tar ─mke2fs -d─▶ rootfs.ext4 (ro, shared)
@@ -10,9 +10,6 @@
 //! image. Per-sandbox writable state goes on a sparse scratch drive ([`create_scratch`]) that guest
 //! init overlays on top of the read-only base.
 
-pub mod augment;
-pub mod mkfs;
-
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -22,9 +19,10 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::augment;
 use crate::error::{Error, IoCtx, Result};
 use crate::hash::{sha256_bytes, sha256_file};
-pub use mkfs::MkfsStrategy;
+use crate::mkfs::{self, MkfsStrategy};
 
 /// Bump whenever the produced image changes for the same inputs (augmentation, mkfs flags, layout).
 pub const PIPELINE_VERSION: u32 = 1;

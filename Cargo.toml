@@ -5,6 +5,7 @@ members = [
     "crates/sandcrab-core",
     "crates/sandcrab-guest",
     "crates/sandcrab-backend-docker",
+    "crates/sandcrab-rootfs",
     "crates/sandcrab-backend-firecracker",
     "crates/sandcrab-sdk",
     "crates/sandcrab-cli",
@@ -25,6 +26,7 @@ authors = ["Polvera Org"]
 sandcrab-protocol = { path = "crates/sandcrab-protocol" }
 sandcrab-core = { path = "crates/sandcrab-core" }
 sandcrab-backend-docker = { path = "crates/sandcrab-backend-docker" }
+sandcrab-rootfs = { path = "crates/sandcrab-rootfs" }
 sandcrab-backend-firecracker = { path = "crates/sandcrab-backend-firecracker" }
 sandcrab-sdk = { path = "crates/sandcrab-sdk" }
 

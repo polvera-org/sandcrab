@@ -12,7 +12,8 @@
 //! - [`workspace`]: host dir → ext4 drive (rw per spawn, ro cached per generation),
 //!   sync-back via a hostile-archive-safe unpack into staging + commit.
 //! - [`net`]: user-owned tap pool for `unrestricted` networking (`scripts/fc-net-setup.sh`).
-//! - [`rootfs`]: OCI image → read-only ext4 rootfs pipeline and per-sandbox scratch drives.
+//! - [`rootfs`]: OCI image → read-only ext4 rootfs pipeline and per-sandbox scratch drives
+//!   (re-export of the shared `sandcrab-rootfs` crate).
 //! - [`artifacts`]: pinned guest kernel and Firecracker release binaries (SHA-256 verified).
 //! - [`reap`]: orphan reaping of run dirs left by dead sandcrab processes.
 //!
@@ -37,36 +38,25 @@ mod backend;
 mod config;
 pub mod control;
 mod error;
-pub mod hash;
 pub mod net;
 pub mod proc;
 pub mod reap;
-pub mod rootfs;
 pub mod rundir;
 mod vm;
 pub mod vsock;
 pub mod workspace;
+
+/// The OCI → ext4 pipeline, now the shared `sandcrab-rootfs` crate (kept at this path for
+/// compatibility).
+pub use sandcrab_rootfs as rootfs;
+/// SHA-256 helpers (from `sandcrab-rootfs`).
+pub use sandcrab_rootfs::hash;
 
 pub use backend::{FirecrackerBackend, KVM_DEVICE, check_kvm};
 pub use config::{FirecrackerConfig, RootfsSource};
 pub use error::{Error, Result};
 pub use net::{TapPlan, TapPoolConfig};
 pub use reap::ReapReport;
+pub use sandcrab_rootfs::{default_cache_root, sandcrab_home};
 pub use vm::GUEST_CID;
 pub use vsock::{VsockConnector, vsock_connect};
-
-use std::path::PathBuf;
-
-/// Sandcrab state root: `$SANDCRAB_HOME`, else `$HOME/.sandcrab`.
-pub fn sandcrab_home() -> Result<PathBuf> {
-    if let Some(h) = std::env::var_os("SANDCRAB_HOME") {
-        return Ok(PathBuf::from(h));
-    }
-    let home = std::env::var_os("HOME").ok_or(Error::NoHome)?;
-    Ok(PathBuf::from(home).join(".sandcrab"))
-}
-
-/// Default cache root: `<sandcrab_home>/cache`.
-pub fn default_cache_root() -> Result<PathBuf> {
-    Ok(sandcrab_home()?.join("cache"))
-}
