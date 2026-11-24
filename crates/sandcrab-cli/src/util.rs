@@ -77,6 +77,9 @@ pub fn sandcrab(g: &Global) -> anyhow::Result<Sandcrab> {
             args::compiled_backends()
         );
     };
+    if g.libkrun_tsi && !is_libkrun(backend) {
+        bail!("--libkrun-tsi only applies to --backend libkrun");
+    }
     let mut builder = Sandcrab::builder().state_dir(state_root(g)?);
     for d in templates_dirs(g)? {
         builder = builder.templates_dir(d);
@@ -98,8 +101,36 @@ pub fn sandcrab(g: &Global) -> anyhow::Result<Sandcrab> {
             crate::firecracker::preflight(&config)?;
             builder = builder.firecracker(config);
         }
+        #[cfg(all(
+            feature = "libkrun",
+            any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))
+        ))]
+        BackendArg::Libkrun => {
+            // Hardware isolated. Preflight for precise, actionable errors (never a fallback).
+            let config = crate::libkrun::config(g)?;
+            crate::libkrun::preflight(&config)?;
+            if config.allow_tsi_unrestricted {
+                eprintln!(
+                    "warning: --libkrun-tsi: `--network unrestricted` uses TSI; the guest can \
+                     reach services on this host's loopback and LAN"
+                );
+            }
+            builder = builder.libkrun(config);
+        }
     }
     builder.build().context("cannot initialise the backend")
+}
+
+#[allow(clippy::unnecessary_wraps, unreachable_patterns)]
+fn is_libkrun(b: BackendArg) -> bool {
+    match b {
+        #[cfg(all(
+            feature = "libkrun",
+            any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))
+        ))]
+        BackendArg::Libkrun => true,
+        _ => false,
+    }
 }
 
 /// One line per spawn when the backend cannot enforce the template's `disk_mb`.
