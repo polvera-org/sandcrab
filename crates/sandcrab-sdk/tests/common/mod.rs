@@ -134,14 +134,18 @@ impl Harness {
             .tempdir()
             .unwrap();
         let builder = base_builder(tmp.path());
-        let mut run = None;
-        let sc = match backend {
-            E2eBackend::Docker => builder.docker(docker_config()).build().unwrap(),
+        // `(sandcrab, short run dir)`: only libkrun needs the run dir, so it is returned per
+        // arm rather than assigned (a `let mut` would be unused in some feature combos).
+        let (sc, run): (_, Option<tempfile::TempDir>) = match backend {
+            E2eBackend::Docker => (builder.docker(docker_config()).build().unwrap(), None),
             #[cfg(all(feature = "firecracker", target_os = "linux"))]
-            E2eBackend::Firecracker => builder
-                .firecracker(firecracker_config(tmp.path()))
-                .build()
-                .unwrap(),
+            E2eBackend::Firecracker => (
+                builder
+                    .firecracker(firecracker_config(tmp.path()))
+                    .build()
+                    .unwrap(),
+                None,
+            ),
             #[cfg(not(all(feature = "firecracker", target_os = "linux")))]
             E2eBackend::Firecracker => {
                 eprintln!(
@@ -160,8 +164,7 @@ impl Harness {
                     .tempdir_in("/tmp")
                     .unwrap();
                 let sc = builder.libkrun(libkrun_config(r.path())).build().unwrap();
-                run = Some(r);
-                sc
+                (sc, Some(r))
             }
             #[cfg(not(all(
                 feature = "libkrun",
