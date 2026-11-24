@@ -202,8 +202,13 @@ impl LibkrunBackend {
         {
             return Ok(d.clone());
         }
+        // Never build a rootfs from an image this host has not pinned (local integrity).
         if spec.image_sha256.is_none() {
-            tracing::warn!(image = %spec.image, "template image is not pinned (no sha256)");
+            return Err(sandcrab_core::pins::unpinned_error(
+                &spec.template.manifest,
+                sandcrab_core::ImageArch::host(),
+                None,
+            ));
         }
         let req = sandcrab_rootfs::RootfsRequest {
             image: spec.image.clone(),
@@ -225,7 +230,10 @@ impl LibkrunBackend {
                 } => SandboxError::DigestMismatch {
                     image,
                     expected,
-                    actual,
+                    actual: format!(
+                        "{actual} ({})",
+                        sandcrab_core::pins::mismatch_hint(spec.template.name())
+                    ),
                 },
                 other => krun_err("rootfs", other),
             })?;

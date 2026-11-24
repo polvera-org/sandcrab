@@ -86,10 +86,10 @@ pub use workspace::{TemplateClient, WorkspaceClient};
 
 pub use sandcrab_core::{
     BackendCapabilities, BackendKind, FileEntry, FileKind, LifecyclePhase, ManagerConfig,
-    MountMode, NetworkConfig, NetworkPolicy, PinStatus, PortSpec, PublishedPort, ResourceOverrides,
-    Result, RuntimeBackend, SandboxConfig, SandboxError, SandboxId, SandboxInfo, Template,
-    TimingMarks, TimingReport, UserSpec, Workspace, WorkspaceBacking, WorkspaceId, WorkspaceMount,
-    WorkspaceRef,
+    MountMode, NetworkConfig, NetworkPolicy, PinStatus, PinStore, PortSpec, PublishedPort,
+    ResourceOverrides, Result, RuntimeBackend, SandboxConfig, SandboxError, SandboxId, SandboxInfo,
+    Template, TimingMarks, TimingReport, UserSpec, Workspace, WorkspaceBacking, WorkspaceId,
+    WorkspaceMount, WorkspaceRef,
 };
 pub use sandcrab_protocol::{
     BashParams, BashResult, DownloadParams, DownloadResult, FileDeleteParams, FileDeleteResult,
@@ -204,6 +204,7 @@ pub struct SandcrabBuilder {
     backend: Option<BackendConfig>,
     state_dir: Option<PathBuf>,
     templates_dirs: Vec<PathBuf>,
+    template_pins_dir: Option<PathBuf>,
     require_hardware_isolation: bool,
     ready_timeout: Option<Duration>,
     call_timeout: Option<Duration>,
@@ -269,6 +270,14 @@ impl SandcrabBuilder {
     /// Default: `$SANDCRAB_HOME`, else `~/.sandcrab`.
     pub fn state_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.state_dir = Some(dir.into());
+        self
+    }
+
+    /// Host-local template pin store (`sandcrab_core::pins`). Default:
+    /// `$SANDCRAB_TEMPLATE_PINS`, else `<$SANDCRAB_HOME or ~/.sandcrab>/template-pins`; it is
+    /// host-wide (pins describe the host's image store), so [`Self::state_dir`] does not move it.
+    pub fn template_pins_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.template_pins_dir = Some(dir.into());
         self
     }
 
@@ -376,6 +385,7 @@ impl SandcrabBuilder {
             ManagerConfig {
                 ready_timeout: self.ready_timeout.unwrap_or(defaults.ready_timeout),
                 call_timeout: self.call_timeout.unwrap_or(defaults.call_timeout),
+                template_pins: self.template_pins_dir.map(PinStore::open),
                 ..defaults
             },
         )?;
@@ -503,16 +513,25 @@ impl Sandcrab {
         self.libkrun.as_ref()
     }
 
-    /// Check the template's pinned image digest against the image present on the backend
-    /// (Docker only for now).
+    /// Check the template image present on the backend against its host-local pin
+    /// (`sandcrab_core::pins`; local integrity, not provenance). Docker only for now.
     #[cfg(feature = "docker")]
     pub async fn verify_template(&self, name: &str) -> Result<PinStatus> {
         let template = self.manager.templates().get(name)?;
         let docker = self.docker.as_ref().ok_or_else(|| {
             SandboxError::InvalidConfig("template verification needs the docker backend".into())
         })?;
-        sandcrab_core::verify_template_image(&docker.image_verifier(), &template.manifest, false)
-            .await
+        let pin = sandcrab_core::effective_pin(
+            self.manager.pin_store().as_ref(),
+            &template.manifest,
+            sandcrab_core::ImageArch::host(),
+        )?;
+        sandcrab_core::verify_image_pin(
+            &docker.image_verifier(),
+            template.image(),
+            pin.as_ref().map(|p| p.digest.as_str()),
+        )
+        .await
     }
 
     /// Remove Sandcrab-managed Docker containers that this instance does not track

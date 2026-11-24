@@ -101,7 +101,8 @@ impl TemplateManifest {
         self.template.image.as_deref().unwrap_or_default()
     }
 
-    /// Pinned digest for the host architecture ([`TemplateMeta::pinned_sha256`]).
+    /// Legacy in-manifest pin for the host architecture ([`TemplateMeta::pinned_sha256`]).
+    /// Spawns use [`crate::pins::effective_pin`], which prefers the host-local pin.
     #[must_use]
     pub fn pinned_sha256_for_host(&self) -> Option<&str> {
         self.template.pinned_sha256(ImageArch::host())
@@ -117,13 +118,15 @@ pub struct TemplateMeta {
     /// OCI image reference. Required.
     #[serde(default)]
     pub image: Option<String>,
-    /// Expected digest of the built image / rootfs artifact, `sha256:<64 hex>`. Locally built
-    /// image IDs are arch-specific: this is the pin for any arch **not** listed in
-    /// [`Self::sha256_by_arch`] (the single-arch / legacy form).
-    #[serde(default)]
+    /// **Deprecated** legacy in-manifest image pin, `sha256:<64 hex>`. Template images are
+    /// pinned host-locally now ([`crate::pins`]); committed manifests carry no image IDs because
+    /// local image IDs do not reproduce across hosts. Still parsed and honored as a fallback
+    /// when no host-local pin exists for the arch (a match passes, a mismatch is refused).
+    /// This is the pin for any arch not listed in [`Self::sha256_by_arch`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
-    /// Per-arch pins (`[template.sha256_by_arch] amd64 = "sha256:…", arm64 = "sha256:…"`).
-    /// An entry for an arch takes precedence over [`Self::sha256`]; both may be set.
+    /// **Deprecated** legacy per-arch pins (`sha256_by_arch = { amd64 = "…", arm64 = "…" }`);
+    /// see [`Self::sha256`]. An entry for an arch takes precedence over `sha256`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub sha256_by_arch: BTreeMap<ImageArch, String>,
     /// Default guest user, `uid:gid`. `SandboxConfig.user` overrides it.
@@ -132,7 +135,8 @@ pub struct TemplateMeta {
 }
 
 impl TemplateMeta {
-    /// The pin that applies to `arch`: `sha256_by_arch[arch]` if present, else `sha256`.
+    /// The legacy in-manifest pin that applies to `arch`: `sha256_by_arch[arch]` if present,
+    /// else `sha256`.
     /// With `arch = None` (a host arch with no OCI name here) only `sha256` applies.
     #[must_use]
     pub fn pinned_sha256(&self, arch: Option<ImageArch>) -> Option<&str> {
@@ -424,18 +428,18 @@ impl TemplateRegistry {
     }
 }
 
-/// Outcome of checking a template's pinned digest.
+/// Outcome of checking a template image against its pin.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PinStatus {
-    /// The artifact digest equals the manifest's pin for the checked arch.
+    /// The local image digest equals the pin.
     Verified { digest: String },
-    /// The manifest has no pin for the checked arch; `digest` is what is actually present.
+    /// There is no pin; `digest` is what is actually present.
     Unpinned { digest: String },
 }
 
 /// Backend hook resolving the digest of the artifact a template image reference points to
 /// (Docker: image id; Firecracker: rootfs manifest sha). Core has no Docker/VMM deps; each
-/// backend implements this and calls [`verify_template_image`] at spawn.
+/// backend implements this and calls [`verify_image_pin`] at spawn.
 #[async_trait]
 pub trait ImageVerifier: Send + Sync {
     /// Digest (`sha256:<hex>`) of the locally available artifact for `image`.
@@ -459,33 +463,13 @@ pub fn check_digest(image: &str, expected: Option<&str>, actual: &str) -> Result
     }
 }
 
-/// Resolve the template image digest through `verifier` and check it against the pin for
-/// the host arch ([`TemplateManifest::pinned_sha256_for_host`]). With `require_pin`, a
-/// template without such a pin is rejected.
-pub async fn verify_template_image(
+/// Resolve `image`'s local digest through `verifier` and check it against `pin` (usually
+/// [`crate::ResolvedSpec::image_sha256`], i.e. [`crate::pins::effective_pin`]).
+pub async fn verify_image_pin(
     verifier: &dyn ImageVerifier,
-    manifest: &TemplateManifest,
-    require_pin: bool,
+    image: &str,
+    pin: Option<&str>,
 ) -> Result<PinStatus> {
-    verify_template_image_for(verifier, manifest, ImageArch::host(), require_pin).await
-}
-
-/// [`verify_template_image`] for an explicit image arch.
-pub async fn verify_template_image_for(
-    verifier: &dyn ImageVerifier,
-    manifest: &TemplateManifest,
-    arch: Option<ImageArch>,
-    require_pin: bool,
-) -> Result<PinStatus> {
-    let image = manifest.image();
-    let pin = manifest.template.pinned_sha256(arch);
-    if require_pin && pin.is_none() {
-        let arch = arch.map_or("this host".to_owned(), |a| a.to_string());
-        return Err(SandboxError::Template(format!(
-            "template `{}` has no `sha256` pin for {arch} and pinning is required",
-            manifest.template.name
-        )));
-    }
     let actual = verifier.image_digest(image).await?;
     check_digest(image, pin, &actual)
 }
@@ -789,64 +773,20 @@ tiers = ["core", "process"]
         let good = format!("sha256:{}", "a".repeat(64));
         let bad = format!("sha256:{}", "b".repeat(64));
         let good_static: &'static str = Box::leak(good.clone().into_boxed_str());
-        let mut m = TemplateManifest::from_toml_str(BASE).unwrap();
-
+        let v = FixedDigest(good_static);
         assert_eq!(
-            verify_template_image(&FixedDigest(good_static), &m, false)
-                .await
-                .unwrap(),
+            verify_image_pin(&v, "x:1", None).await.unwrap(),
             PinStatus::Unpinned {
                 digest: good.clone()
             }
         );
-        assert!(
-            verify_template_image(&FixedDigest(good_static), &m, true)
-                .await
-                .is_err()
-        );
-        m.template.sha256 = Some(good.clone());
         assert_eq!(
-            verify_template_image(&FixedDigest(good_static), &m, true)
-                .await
-                .unwrap(),
-            PinStatus::Verified {
-                digest: good.clone()
-            }
-        );
-        m.template.sha256 = Some(bad);
-        assert!(matches!(
-            verify_template_image(&FixedDigest(good_static), &m, false).await,
-            Err(SandboxError::DigestMismatch { .. })
-        ));
-
-        // A per-arch pin overrides the (stale) fallback for that arch only.
-        m.template
-            .sha256_by_arch
-            .insert(ImageArch::Arm64, good.clone());
-        let v = FixedDigest(good_static);
-        assert_eq!(
-            verify_template_image_for(&v, &m, Some(ImageArch::Arm64), true)
-                .await
-                .unwrap(),
-            PinStatus::Verified {
-                digest: good.clone()
-            }
+            verify_image_pin(&v, "x:1", Some(&good)).await.unwrap(),
+            PinStatus::Verified { digest: good }
         );
         assert!(matches!(
-            verify_template_image_for(&v, &m, Some(ImageArch::Amd64), true).await,
+            verify_image_pin(&v, "x:1", Some(&bad)).await,
             Err(SandboxError::DigestMismatch { .. })
         ));
-        m.template.sha256 = None;
-        let err = verify_template_image_for(&v, &m, Some(ImageArch::Amd64), true)
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("for amd64"), "{err}");
-        assert_eq!(
-            verify_template_image_for(&v, &m, Some(ImageArch::Amd64), false)
-                .await
-                .unwrap(),
-            PinStatus::Unpinned { digest: good }
-        );
     }
 }

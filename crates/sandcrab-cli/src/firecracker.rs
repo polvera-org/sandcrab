@@ -207,11 +207,22 @@ fn artifact(
     }
 }
 
-/// The template's image id: its host-arch pin, else the local Docker image id.
+/// The template's host-local pin for the host arch (else a deprecated in-manifest pin).
+fn host_pin(t: &Template) -> anyhow::Result<Option<String>> {
+    let store = sandcrab_sdk::core::PinStore::open_default().ok();
+    Ok(sandcrab_sdk::core::effective_pin(
+        store.as_ref(),
+        &t.manifest,
+        sandcrab_sdk::core::ImageArch::host(),
+    )?
+    .map(|p| p.digest))
+}
+
+/// The template's image id: its host-local pin, else the local Docker image id.
 fn image_id(t: &Template) -> Option<String> {
-    t.manifest
-        .pinned_sha256_for_host()
-        .map(str::to_owned)
+    host_pin(t)
+        .ok()
+        .flatten()
         .or_else(|| rootfs::docker_image_id(t.image()).ok())
 }
 
@@ -578,13 +589,13 @@ pub fn rootfs_cmd(g: &Global, cmd: RootfsCmd) -> anyhow::Result<u8> {
             let arch = rootfs::Arch::host()?;
             let mut out = Vec::new();
             for t in &selected {
-                let pin = t.manifest.pinned_sha256_for_host().map(str::to_owned);
+                let pin = host_pin(t)?;
                 if pin.is_none() {
                     eprintln!(
-                        "warning: template `{}` is not pinned; the rootfs is keyed by the \
-                         local image id (`sandcrab template build {}` pins it)",
-                        t.name(),
-                        t.name()
+                        "warning: template `{n}` is not pinned on this host; the rootfs is keyed \
+                         by the local image id, but spawns refuse it until it is pinned \
+                         (`sandcrab template build {n}` or `sandcrab template pin {n}`)",
+                        n = t.name()
                     );
                 }
                 if !g.json {

@@ -14,8 +14,9 @@
 //! microVM backends use. There is no `docker exec` anywhere.
 //!
 //! Requirements / limitations:
-//! - Templates must be pinned (`sha256` in `sandcrab.toml`) unless
-//!   [`DockerConfig::allow_unpinned_images`] is set.
+//! - Template images must be pinned on this host (`templates/build.sh <name>` or
+//!   `sandcrab template pin <name>`; see `sandcrab_core::pins`) unless
+//!   [`DockerConfig::allow_unpinned_images`] is set. The pin is local integrity, not provenance.
 //! - Linux host with a local, rootful Docker daemon (bind mounts use host paths; Unix
 //!   sockets do not cross Docker Desktop's VM file sharing, and rootless Docker remaps
 //!   uids so the socket / workspace ownership model breaks).

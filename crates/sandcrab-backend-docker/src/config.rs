@@ -47,9 +47,9 @@ pub struct DockerConfig {
     /// `<state root>/run` (`$SANDCRAB_HOME/run`, else `~/.sandcrab/run`).
     pub state_dir: PathBuf,
     pub limits: DockerLimits,
-    /// Run template images that have no `sha256` pin in `sandcrab.toml`. **Defaults to
-    /// `false`**: spawning an unpinned template fails with an `UnpinnedImage` error
-    /// (pin with `templates/build.sh --pin <name>`).
+    /// Run template images that have no host-local pin (`sandcrab_core::pins`). **Defaults
+    /// to `false`**: spawning an unpinned template fails with an `UnpinnedImage` error (pin
+    /// with `templates/build.sh <name>` or adopt with `sandcrab template pin <name>`).
     pub allow_unpinned_images: bool,
 }
 

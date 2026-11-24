@@ -14,6 +14,8 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use crate::client::DEFAULT_CALL_TIMEOUT;
+use crate::pins::{PinStore, effective_pin};
+use crate::template::ImageArch;
 use crate::{
     BackendCapabilities, BackendKind, CrabdClient, LifecyclePhase, LifecycleTimings, NetworkPolicy,
     PublishedPort, ResolvedSpec, Result, RuntimeBackend, SandboxConfig, SandboxError,
@@ -33,6 +35,9 @@ pub struct ManagerConfig {
     /// How long [`SandboxManager::shutdown`] waits for all teardowns (including ones
     /// already in flight) before reporting the stragglers as failed.
     pub shutdown_timeout: Duration,
+    /// Host-local template pin store ([`crate::pins`]). `None` = [`PinStore::open_default`]
+    /// (`$SANDCRAB_TEMPLATE_PINS`, else `<$SANDCRAB_HOME or ~/.sandcrab>/template-pins`).
+    pub template_pins: Option<PinStore>,
 }
 
 impl Default for ManagerConfig {
@@ -42,6 +47,7 @@ impl Default for ManagerConfig {
             reaper_interval: Duration::from_secs(1),
             call_timeout: DEFAULT_CALL_TIMEOUT,
             shutdown_timeout: Duration::from_secs(60),
+            template_pins: None,
         }
     }
 }
@@ -129,6 +135,18 @@ impl SandboxManager {
         &self.inner.templates
     }
 
+    /// The host-local template pin store spawns verify against
+    /// ([`ManagerConfig::template_pins`], else [`PinStore::open_default`]; `None` when no
+    /// default location can be determined).
+    #[must_use]
+    pub fn pin_store(&self) -> Option<PinStore> {
+        self.inner
+            .config
+            .template_pins
+            .clone()
+            .or_else(|| PinStore::open_default().ok())
+    }
+
     /// Validate `config`, enforce policy, resolve template + mounts, lease workspaces,
     /// spawn on the backend and wait for `crabd` readiness.
     pub async fn spawn(&self, config: SandboxConfig) -> Result<Sandbox> {
@@ -179,6 +197,10 @@ impl SandboxManager {
             |r| inner.workspaces.get(r),
         )?;
 
+        // Host-local pin (else a legacy in-manifest one). A corrupt pin file fails the spawn;
+        // backends refuse a missing pin (`pins::unpinned_error`) unless explicitly opted out.
+        let pin = effective_pin(self.pin_store().as_ref(), manifest, ImageArch::host())?;
+
         let id = SandboxId::new();
         let mut mounts = resolved.mounts;
         let mut leases = Vec::with_capacity(mounts.len());
@@ -195,7 +217,7 @@ impl SandboxManager {
         let spec = ResolvedSpec {
             id,
             image: template.image().to_owned(),
-            image_sha256: manifest.pinned_sha256_for_host().map(str::to_owned),
+            image_sha256: pin.map(|p| p.digest),
             mounts,
             default_cwd: resolved.default_cwd.clone(),
             env: config.env.clone(),
@@ -753,8 +775,51 @@ mod tests {
         ManagerConfig {
             ready_timeout: Duration::from_secs(2),
             reaper_interval: Duration::from_millis(50),
+            // Hermetic: never read the host's real pin store.
+            template_pins: Some(PinStore::open("/nonexistent/sandcrab-test-pins")),
             ..ManagerConfig::default()
         }
+    }
+
+    #[tokio::test]
+    async fn spawn_passes_the_host_local_pin() {
+        use crate::pins::{PinSource, TemplatePin};
+        let env = env();
+        let backend = FakeBackend::new();
+        // Unpinned: the backend sees `None` (and decides to refuse).
+        let mgr = manager(&env, &backend, quick());
+        mgr.spawn(SandboxConfig::from_template("base"))
+            .await
+            .unwrap();
+        assert_eq!(backend.last_spec().unwrap().image_sha256, None);
+
+        let Some(arch) = ImageArch::host() else {
+            return;
+        };
+        let store = PinStore::open(env._tmp.path().join("pins"));
+        let digest = format!("sha256:{}", "d".repeat(64));
+        let m = &env.templates.get("base").unwrap().manifest;
+        store
+            .record(&TemplatePin::new(
+                m,
+                arch,
+                "sandcrab/base:0.1.0",
+                &digest,
+                PinSource::Build,
+            ))
+            .unwrap();
+        let mgr = manager(
+            &env,
+            &backend,
+            ManagerConfig {
+                template_pins: Some(store),
+                ..quick()
+            },
+        );
+        mgr.spawn(SandboxConfig::from_template("base"))
+            .await
+            .unwrap();
+        assert_eq!(backend.last_spec().unwrap().image_sha256, Some(digest));
     }
 
     #[tokio::test]
