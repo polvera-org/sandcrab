@@ -4,14 +4,16 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Sandcrab: open-source sandboxes for AI agents</title>
-<meta name="description" content="Sandcrab gives every agent turn a fresh, locked-down sandbox in about 250 ms, then throws it away. Workspaces survive every molt. One tiny Rust daemon (crabd), one protocol for every backend: Docker in production today, Firecracker microVMs built. Apache-2.0.">
+<meta name="description" content="Ephemeral environments, persistent work. Sandcrab gives every agent turn a fresh, locked-down sandbox in about 250 ms, then throws it away. Workspaces survive every molt. One tiny Rust daemon (crabd), one protocol for every backend: Docker in production today, Firecracker microVMs built. Apache-2.0.">
 <meta name="color-scheme" content="light dark">
 <meta name="theme-color" content="#FAFAF7" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#111A20" media="(prefers-color-scheme: dark)">
 <meta property="og:title" content="Sandcrab: open-source sandboxes for AI agents">
-<meta property="og:description" content="Ephemeral sandboxes, persistent work. Apache-2.0, self-hostable.">
+<meta property="og:description" content="Ephemeral environments, persistent work. Apache-2.0, self-hostable.">
 <meta property="og:image" content="assets/sandcrab-hero.jpg">
-<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="icon" href="favicon-32.png" type="image/png" sizes="32x32">
+<link rel="apple-touch-icon" href="apple-touch-icon.png" sizes="180x180">
 <script>
   // Apply the saved theme before first paint (no flash). "auto" = follow the system.
   try { var t = localStorage.getItem('sandcrab-theme'); if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t); } catch (e) {}
@@ -21,10 +23,14 @@
 <body>
 <a class="skip" href="#main">Skip to content</a>
 
+<!-- One fixed canvas for the whole page: the crab follows the reader. Decorative; every section
+     carries its own text description of the scene. -->
+<div class="crab-film" id="crab-film" aria-hidden="true"></div>
+
 <header class="bar" id="top">
   <div class="wrap bar-in">
     <a class="brand" href="#top" aria-label="Sandcrab, back to top">
-      <svg class="logo" viewBox="-21 -17 42 31" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M-9 4l-5 5M-5 6l-3 6M9 4l5 5M5 6l3 6"/><path d="M-9 -1l-5 -5M9 -1l5 -5"/><circle class="shell" cx="-16" cy="-8" r="4.2"/><circle class="shell" cx="16" cy="-8" r="4.2"/><path d="M-4 -7l-1 -4M4 -7l1 -4"/><path class="shell" d="M-12 3a12 10 0 0 1 24 0q0 4 -12 4t-12 -4z"/><circle cx="-5" cy="-12" r="1.9" fill="currentColor" stroke="none"/><circle cx="5" cy="-12" r="1.9" fill="currentColor" stroke="none"/></svg>
+      <svg class="logo" viewBox="-21 -17 42 31" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M-9 4l-5 5M-5 6l-3 6M9 4l5 5M5 6l3 6"/><path d="M-9 -1l-5 -5M9 -1l5 -5"/><circle cx="-16" cy="-8" r="4.2" fill="currentColor"/><circle cx="16" cy="-8" r="4.2" fill="currentColor"/><path d="M-4 -7l-1 -4M4 -7l1 -4"/><path d="M-12 3a12 10 0 0 1 24 0q0 4 -12 4t-12 -4z" fill="currentColor"/><g stroke="none"><circle cx="-5" cy="-12" r="2.8" fill="currentColor"/><circle cx="5" cy="-12" r="2.8" fill="currentColor"/><circle class="eye" cx="-5" cy="-12" r="1.15"/><circle class="eye" cx="5" cy="-12" r="1.15"/></g></svg>
       <span class="brand-name">Sandcrab</span>
     </a>
     <nav class="links" aria-label="Sections">
@@ -50,16 +56,17 @@
 
 <main id="main">
 
-<!-- ───────────── HERO ───────────── -->
-<section class="hero" aria-labelledby="hero-h">
+<!-- ───────────── HERO · crab in a glass jar · crab right ───────────── -->
+<section class="hero station" data-station="hero" data-side="right" aria-labelledby="hero-h">
   <div class="wrap">
     <div class="masthead">
-      <h1 id="hero-h"><span>Ephemeral sandboxes,</span> <span>persistent work</span></h1>
+      <h1 id="hero-h"><span>Ephemeral environments,</span> <span>persistent work.</span></h1>
     </div>
-    <div class="hero-body">
-      <div class="hero-copy">
+    <div class="narr">
+      <div class="col hero-copy">
         <p class="tagline"><span>Open-source sandboxing for AI agents.</span> <span>Written in Rust, licensed Apache-2.0.</span></p>
         <p class="hero-lede">Give every agent turn a fresh, locked-down sandbox in about 250&nbsp;ms, then throw it away. The workspace survives every molt. One tiny Rust daemon, <code>crabd</code>, speaks the same protocol on every backend.</p>
+        <p class="sr-only">Scene: a coral crab sits inside a sealed glass jar. The jar is one sandbox.</p>
         <div class="cta-row">
           <a class="pill" href="#start">Quickstart</a>
           <a class="pill pill-quiet" href="https://github.com/polvera-org/sandcrab" target="_blank" rel="noopener">Star on GitHub<span class="sr-only"> (opens in a new tab)</span></a>
@@ -70,57 +77,50 @@
           <div><dt>Spawn</dt><dd>About 250&nbsp;ms</dd></div>
         </dl>
       </div>
-      <div class="stage hero-stage" data-scene="jar" data-eager role="group"
-           aria-label="3D scene: a coral crab inside a transparent glass jar, which stands for one sandbox. The lid screws down to seal it, then lifts again.">
-        <img class="poster" src="assets/crab/isolation.webp" width="1536" height="1030" alt="" fetchpriority="high">
-      </div>
+      <div class="aside" aria-hidden="true"><img class="poster" src="assets/crab/isolation.webp" width="1536" height="1030" alt="" fetchpriority="high"></div>
     </div>
   </div>
 </section>
 
-<!-- ───────────── A TURN ───────────── -->
-<section class="section" id="turn" aria-labelledby="turn-h">
+<!-- ───────────── A TURN · the molt · crab left ───────────── -->
+<section class="section station" id="turn" data-station="turn" data-side="left" aria-labelledby="turn-h">
   <div class="wrap">
-    <div class="two">
-      <div class="head">
+    <div class="narr">
+      <div class="col">
         <h2 id="turn-h">Spawn. Work. Molt.</h2>
-        <p class="kicker">One agent turn</p>
+        <p class="kicker">One agent turn: spawn → work → molt</p>
+        <p class="lede">A sandbox lives for exactly one turn of your agent. It starts from a pinned template, does the work through <code>crabd</code>, and is destroyed. Whatever it wrote to the workspace is still there for the next turn.</p>
+        <p class="sr-only">Scene, scrubbed by scrolling: the jar opens and sinks into the sand, the crab works and leaves a teal cube of output behind, then sheds its shell. The empty shell stays as a pale ghost and crumbles to sand. A fresh crab steps out.</p>
+        <ol class="steps">
+          <li>
+            <h3><span class="n" aria-hidden="true">1</span>Spawn</h3>
+            <p>Ask for a sandbox from a pinned template (<code>python-dev</code>, <code>ts-dev</code>, <code>render</code>), mount your workspace read-write or read-only, and wait for <code>crabd</code> to say hello.</p>
+          </li>
+          <li>
+            <h3><span class="n" aria-hidden="true">2</span>Work</h3>
+            <p>The agent calls tools: <code>bash</code>, <code>file_edit</code>, <code>grep</code>. Each call is a frame on the same wire, answered by <code>crabd</code> inside the sandbox.</p>
+          </li>
+          <li>
+            <h3><span class="n" aria-hidden="true">3</span>Molt</h3>
+            <p>Destroy the sandbox. Processes, scratch files and memory vanish. What was written to the workspace stays, ready for the next turn.</p>
+          </li>
+        </ol>
       </div>
-      <div class="body">
-        <p>A sandbox lives for exactly one turn of your agent. It starts from a pinned template, does the work through <code>crabd</code>, and is destroyed. Whatever it wrote to the workspace is still there for the next turn.</p>
-      </div>
+      <div class="aside" aria-hidden="true"><img class="poster" src="assets/crab/molting.webp" width="1536" height="1030" alt="" loading="lazy"></div>
     </div>
-    <div class="stage molt-stage" data-scene="molt" role="group"
-         aria-label="3D scene: a crab walks out of its discarded shell carrying a teal cube. The shell is the sandbox; the cube is the work that survives.">
-      <img class="poster" src="assets/crab/molting.webp" width="1536" height="1030" alt="" loading="lazy">
-    </div>
-    <ol class="steps">
-      <li>
-        <h3><span class="n" aria-hidden="true">1</span>Spawn</h3>
-        <p>Ask for a sandbox from a pinned template (<code>python-dev</code>, <code>ts-dev</code>, <code>render</code>), mount your workspace read-write or read-only, and wait for <code>crabd</code> to say hello.</p>
-      </li>
-      <li>
-        <h3><span class="n" aria-hidden="true">2</span>Work</h3>
-        <p>The agent calls tools: <code>bash</code>, <code>file_edit</code>, <code>grep</code>. Each call is a frame on the same wire, answered by <code>crabd</code> inside the sandbox.</p>
-      </li>
-      <li>
-        <h3><span class="n" aria-hidden="true">3</span>Molt</h3>
-        <p>Destroy the sandbox. Processes, scratch files and memory vanish. What was written to the workspace stays, ready for the next turn.</p>
-      </li>
-    </ol>
   </div>
 </section>
 
-<!-- ───────────── SDK + STATS ───────────── -->
-<section class="section" id="sdk" aria-labelledby="sdk-h">
+<!-- ───────────── SDK + STATS · stacking blocks · crab right ───────────── -->
+<section class="section station" id="sdk" data-station="sdk" data-side="right" aria-labelledby="sdk-h">
   <div class="wrap">
-    <div class="two two-code">
-      <div class="head">
+    <div class="narr">
+      <div class="col">
         <h2 id="sdk-h">The whole loop, a dozen lines</h2>
         <p class="kicker">Rust SDK</p>
-        <p class="head-note">Name a backend, create a workspace, spawn a sandbox with it mounted, run a command, throw the sandbox away. The file stays.</p>
-      </div>
-      <figure class="code" id="code-sdk">
+        <p class="lede">Name a backend, create a workspace, spawn a sandbox with it mounted, run a command, throw the sandbox away. The file stays.</p>
+        <p class="sr-only">Scene: beside the crab, labelled blocks stack up as the code reads: builder, workspace, spawn, bash. On destroy, the spawn and bash blocks vanish and a file card is left on the workspace block.</p>
+        <figure class="code" id="code-sdk">
         <figcaption><span>main.rs</span><button class="copy" type="button" data-copy-target="#code-sdk pre" aria-label="Copy the Rust example">Copy</button></figcaption>
 <pre><code><span class="k">use</span> sandcrab_sdk::{DockerConfig, MountMode, SandboxConfig, Sandcrab};
 
@@ -143,120 +143,109 @@
     <span class="k">Ok</span>(())
 }</code></pre>
       </figure>
-    </div>
 
-    <div class="measure" aria-labelledby="stats-h">
-      <div class="two">
-        <div class="head">
+        <div class="measure">
           <h2 id="stats-h">Measured, not promised</h2>
           <p class="kicker">Docker backend, 2-vCPU VPS, n=30</p>
-        </div>
-        <div class="body">
-          <p>Every number below comes from one canonical benchmark run, kept in the repo with its raw JSON. Firecracker has no numbers yet: its benchmark waits for a KVM host.</p>
+          <p class="lede">Every number below comes from one canonical benchmark run, kept in the repo with its raw JSON. Firecracker has no numbers yet: its benchmark waits for a KVM host.</p>
           <p><a class="link" href="../bench-report.html">Read the bench report</a></p>
+          <ul class="stats">
+            <li><span class="stat-v">~250<small>ms</small></span><span class="stat-k">Spawn to ready, p50</span><span class="stat-s">227–258 ms across templates</span></li>
+            <li><span class="stat-v">~100<small>ms</small></span><span class="stat-k">Teardown</span><span class="stat-s">until the sandbox is verified gone</span></li>
+            <li><span class="stat-v">~3.7<small>ms</small></span><span class="stat-k">First tool call</span><span class="stat-s">round trip after <code>hello</code></span></li>
+            <li><span class="stat-v">16</span><span class="stat-k">Native tools</span><span class="stat-s">written in Rust, inside <code>crabd</code></span></li>
+          </ul>
         </div>
       </div>
-      <ul class="stats">
-        <li><span class="stat-v">~250<small>ms</small></span><span class="stat-k">Spawn to ready, p50</span><span class="stat-s">227–258 ms across templates</span></li>
-        <li><span class="stat-v">~100<small>ms</small></span><span class="stat-k">Teardown</span><span class="stat-s">until the sandbox is verified gone</span></li>
-        <li><span class="stat-v">~3.7<small>ms</small></span><span class="stat-k">First tool call</span><span class="stat-s">round trip after <code>hello</code></span></li>
-        <li><span class="stat-v">16</span><span class="stat-k">Native tools</span><span class="stat-s">written in Rust, inside <code>crabd</code></span></li>
-      </ul>
+      <div class="aside" aria-hidden="true"><span class="glyph glyph-poster"><!--glyph:tide-clock--></span></div>
     </div>
   </div>
 </section>
 
-<!-- ───────────── WORKSPACES ───────────── -->
-<section class="section" id="workspaces" aria-labelledby="ws-h">
+<!-- ───────────── WORKSPACES · the burrow · crab left ───────────── -->
+<section class="section station" id="workspaces" data-station="workspaces" data-side="left" aria-labelledby="ws-h">
   <div class="wrap">
-    <div class="two">
-      <div class="head">
+    <div class="narr">
+      <div class="col">
         <h2 id="ws-h">The sandbox goes. The files stay.</h2>
         <p class="kicker">Persistent workspaces</p>
-      </div>
-      <div class="body">
-        <p><b>Compute is disposable. Files are not.</b> A workspace is durable storage that lives apart from compute: a directory you already have, or one Sandcrab manages for you. Sandboxes mount it, change it, and disappear. Nothing runs while it waits, so an idle workspace costs nothing.</p>
+        <p class="lede"><b>Compute is disposable. Files are not.</b> A workspace is durable storage that lives apart from compute: a directory you already have, or one Sandcrab manages for you. Sandboxes mount it, change it, and disappear. Nothing runs while it waits, so an idle workspace costs nothing.</p>
+        <p class="sr-only">Scene: the crab stands on a cutaway burrow. Crates and pebbles in the chamber below stay put while pale shells appear on the surface and fade away again.</p>
         <ul class="rows">
           <li><b>The host can reach in between turns.</b> Put, read or delete files while no sandbox is running: drop in an attachment, collect an output.</li>
           <li><b>Read-only window, read-write door.</b> Each mount is <code>ReadOnly</code> or <code>ReadWrite</code>, enforced by the kernel. One writer at a time.</li>
           <li><b>Swap the shell, keep the burrow.</b> Turn one in <code>python-dev</code>, turn two in <code>render</code>, same workspace.</li>
           <li><b>Built for hostile files.</b> Host-side file operations are fd-relative and refuse symlink escapes, because a workspace is attacker-controlled.</li>
         </ul>
+        <div class="cards">
+          <figure class="card">
+            <img src="assets/crab/molting.webp" width="1536" height="1030" loading="lazy" alt="A crab stepping out of its old shell, carrying a teal cube, while the empty shell crumbles to sand.">
+            <figcaption><h3>Molting</h3><p>The shell is the sandbox. The cube is the work you keep.</p></figcaption>
+          </figure>
+          <figure class="card">
+            <img src="assets/crab/window-door.webp" width="1536" height="1030" loading="lazy" alt="A sandcastle with a sealed porthole through which crates are visible but unreachable, and an open door a crab carries a crate through.">
+            <figcaption><h3>Window and door</h3><p>Read-only mounts let you look. Read-write mounts let you change things.</p></figcaption>
+          </figure>
+          <figure class="card">
+            <img src="assets/crab/handoff.webp" width="1536" height="1030" loading="lazy" alt="A hermit crab swapping between a python shell and a rendering shell above the same burrow of crates.">
+            <figcaption><h3>Switch shells, same burrow</h3><p>Templates are swappable. The workspace is the constant.</p></figcaption>
+          </figure>
+        </div>
       </div>
-    </div>
-    <div class="stage burrow-stage" data-scene="burrow" role="group"
-         aria-label="3D scene: sandboxes come and go above ground while the crates in the burrow stay put.">
-      <img class="poster" src="assets/crab/burrow.webp" width="1536" height="1030" alt="" loading="lazy">
-    </div>
-    <div class="cards">
-      <figure class="card">
-        <img src="assets/crab/molting.webp" width="1536" height="1030" loading="lazy" alt="A crab stepping out of its old shell, carrying a teal cube, while the empty shell crumbles to sand.">
-        <figcaption><h3>Molting</h3><p>The shell is the sandbox. The cube is the work you keep.</p></figcaption>
-      </figure>
-      <figure class="card">
-        <img src="assets/crab/window-door.webp" width="1536" height="1030" loading="lazy" alt="A sandcastle with a sealed porthole through which crates are visible but unreachable, and an open door a crab carries a crate through.">
-        <figcaption><h3>Window and door</h3><p>Read-only mounts let you look. Read-write mounts let you change things.</p></figcaption>
-      </figure>
-      <figure class="card">
-        <img src="assets/crab/handoff.webp" width="1536" height="1030" loading="lazy" alt="A hermit crab swapping between a python shell and a rendering shell above the same burrow of crates.">
-        <figcaption><h3>Switch shells, same burrow</h3><p>Templates are swappable. The workspace is the constant.</p></figcaption>
-      </figure>
+      <div class="aside" aria-hidden="true"><img class="poster" src="assets/crab/burrow.webp" width="1536" height="1030" alt="" loading="lazy"></div>
     </div>
   </div>
 </section>
 
-<!-- ───────────── BACKENDS ───────────── -->
-<section class="section" id="backends" aria-labelledby="be-h">
+<!-- ───────────── BACKENDS · open jar vs sealed sphere · crab right ───────────── -->
+<section class="section station" id="backends" data-station="backends" data-side="right" aria-labelledby="be-h">
   <div class="wrap">
-    <div class="two">
-      <div class="head">
+    <div class="narr">
+      <div class="col">
         <h2 id="be-h">Pick your shell: fast container or sealed microVM</h2>
         <p class="kicker">Backends</p>
-      </div>
-      <div class="body">
-        <p>Backends plug in behind one trait and report what they actually isolate. You choose explicitly. Sandcrab never moves you from a jar to a tide pool behind your back.</p>
+        <p class="lede">Backends plug in behind one trait and report what they actually isolate. You choose explicitly. Sandcrab never moves you from a jar to a tide pool behind your back.</p>
+        <p class="sr-only">Scene: the crab stands between two shells. On one side an open glass jar on a shared shore, where two grey crabs already live: the container. On the other a sealed glass sphere with its own teal core: the microVM. The crab looks from one to the other.</p>
         <ul class="chooser" aria-label="Which backend when">
           <li><span>Running your own agents</span><b>Docker</b></li>
           <li><span>Running strangers’ code</span><b>Firecracker</b></li>
         </ul>
-      </div>
-    </div>
 
-    <figure class="card card-wide">
-      <img src="assets/crab/isolation.webp" width="1536" height="1030" loading="lazy" alt="Left: a crab in its own sealed glass jar. Right, behind a caution barrier: several crabs crowded in one shared tide pool.">
-      <figcaption><h3>Sealed jar or tide pool</h3><p>A microVM gives each sandbox its own kernel. A container shares the host’s.</p></figcaption>
-    </figure>
+        <figure class="card card-wide">
+          <img src="assets/crab/isolation.webp" width="1536" height="1030" loading="lazy" alt="Left: a crab in its own sealed glass jar. Right, behind a caution barrier: several crabs crowded in one shared tide pool.">
+          <figcaption><h3>Sealed jar or tide pool</h3><p>A microVM gives each sandbox its own kernel. A container shares the host’s.</p></figcaption>
+        </figure>
 
-    <div class="backends">
-      <article class="be">
-        <p class="be-status be-live">Production</p>
-        <h3>Docker</h3>
-        <p class="be-tag">Shared kernel, for single-tenant and trusted hosts</p>
-        <p>Officially supported and hardened: all capabilities dropped, <code>no-new-privileges</code>, pinned images, loopback-only ports. Spawn to ready in about 230–260&nbsp;ms, teardown in about 100&nbsp;ms. It shares the host kernel, so it is not hardware isolation: use it for your own agents and trusted workloads, not strangers’ code.</p>
-        <ul class="ticks">
-          <li>Explicit selection only: you name the backend, every time</li>
-          <li>All capabilities dropped, <code>no-new-privileges</code>, never privileged</li>
-          <li>Network off by default; PID, memory and CPU limits; no swap</li>
-          <li>Runs as your uid, so workspace files stay editable on the host</li>
-          <li>Template image must match its pinned SHA-256</li>
-        </ul>
-      </article>
-      <article class="be">
-        <p class="be-status">Built, KVM tests pending</p>
-        <h3>Firecracker microVMs</h3>
-        <p class="be-tag">Own kernel behind KVM, hardware isolation</p>
-        <p>Its own kernel per sandbox, for hostile multi-tenant code. Built and tested against a fake VMM; real-KVM end-to-end tests and benchmarks are pending, so no numbers yet.</p>
-        <ul class="ticks">
-          <li>Same <code>crabd</code>, same frames, same tools</li>
-          <li>Workspaces become block drives, synced back at teardown</li>
-          <li>Hostile archives are rejected on the way out</li>
-          <li>Jailer confinement for multi-tenant hosts is still to land</li>
-        </ul>
-      </article>
-    </div>
-    <p class="planned"><b>Planned:</b> Cloud Hypervisor, libkrun.</p>
+        <div class="backends">
+          <article class="be">
+            <p class="be-status be-live">Production</p>
+            <h3>Docker</h3>
+            <p class="be-tag">Shared kernel, for single-tenant and trusted hosts</p>
+            <p>Officially supported and hardened: all capabilities dropped, <code>no-new-privileges</code>, pinned images, loopback-only ports. Spawn to ready in about 230–260&nbsp;ms, teardown in about 100&nbsp;ms. It shares the host kernel, so it is not hardware isolation: use it for your own agents and trusted workloads, not strangers’ code.</p>
+            <ul class="ticks">
+              <li>Explicit selection only: you name the backend, every time</li>
+              <li>All capabilities dropped, <code>no-new-privileges</code>, never privileged</li>
+              <li>Network off by default; PID, memory and CPU limits; no swap</li>
+              <li>Runs as your uid, so workspace files stay editable on the host</li>
+              <li>Template image must match its pinned SHA-256</li>
+            </ul>
+          </article>
+          <article class="be">
+            <p class="be-status">Built, KVM tests pending</p>
+            <h3>Firecracker microVMs</h3>
+            <p class="be-tag">Own kernel behind KVM, hardware isolation</p>
+            <p>Its own kernel per sandbox, for hostile multi-tenant code. Built and tested against a fake VMM; real-KVM end-to-end tests and benchmarks are pending, so no numbers yet.</p>
+            <ul class="ticks">
+              <li>Same <code>crabd</code>, same frames, same tools</li>
+              <li>Workspaces become block drives, synced back at teardown</li>
+              <li>Hostile archives are rejected on the way out</li>
+              <li>Jailer confinement for multi-tenant hosts is still to land</li>
+            </ul>
+          </article>
+        </div>
+        <p class="planned"><b>Planned:</b> Cloud Hypervisor, libkrun.</p>
 
-    <div class="table-wrap" role="region" aria-label="Backend capability comparison" tabindex="0">
+        <div class="table-wrap" role="region" aria-label="Backend capability comparison" tabindex="0">
       <table class="cmp">
         <thead><tr><th scope="col">Capability</th><th scope="col">Docker</th><th scope="col">Firecracker</th></tr></thead>
         <tbody>
@@ -269,99 +258,88 @@
       </table>
     </div>
 
-    <div class="cta-row cta-mid">
-      <a class="pill" href="#start">Quickstart</a>
-      <a class="pill pill-quiet" href="https://github.com/polvera-org/sandcrab" target="_blank" rel="noopener">Star on GitHub<span class="sr-only"> (opens in a new tab)</span></a>
+        <div class="cta-row cta-mid">
+          <a class="pill" href="#start">Quickstart</a>
+          <a class="pill pill-quiet" href="https://github.com/polvera-org/sandcrab" target="_blank" rel="noopener">Star on GitHub<span class="sr-only"> (opens in a new tab)</span></a>
+        </div>
+      </div>
+      <div class="aside" aria-hidden="true"><img class="poster" src="assets/crab/isolation.webp" width="1536" height="1030" alt="" loading="lazy"></div>
     </div>
   </div>
 </section>
 
-<!-- ───────────── TOOLS ───────────── -->
-<section class="section" id="tools" aria-labelledby="tools-h">
+<!-- ───────────── TOOLS · the toolbelt · crab left ───────────── -->
+<section class="section station" id="tools" data-station="tools" data-side="left" aria-labelledby="tools-h">
   <div class="wrap">
-    <div class="two">
-      <div class="head">
+    <div class="narr">
+      <div class="col">
         <h2 id="tools-h">The tools an agent actually needs</h2>
         <p class="kicker">Sixteen native tools</p>
-      </div>
-      <div class="body">
-        <p>All sixteen live inside <code>crabd</code>. File and search tools are native Rust (<code>ignore</code>, <code>globset</code>, <code>grep-searcher</code>), not shell-outs to <code>sed</code> and <code>find</code>. Their schemas are generated from the protocol crate, so they reach your model as they are. Recoverable failures come back as JSON for the model to read; fatal ones stay a Rust error.</p>
-      </div>
-    </div>
+        <p class="lede">All sixteen live inside <code>crabd</code>. File and search tools are native Rust (<code>ignore</code>, <code>globset</code>, <code>grep-searcher</code>), not shell-outs to <code>sed</code> and <code>find</code>. Their schemas are generated from the protocol crate, so they reach your model as they are. Recoverable failures come back as JSON for the model to read; fatal ones stay a Rust error.</p>
+        <p class="sr-only">Scene: the crab buckles on a belt of small tool cards and holds one card up in its claw. As you scroll, the card flips through bash, file_read, file_edit, grep, glob and list_dir.</p>
+        <dl class="toolrows">
+          <div><dt>Shell</dt><dd><code>bash</code></dd></div>
+          <div><dt>Files</dt><dd><code>file_read</code> <code>file_write</code> <code>file_edit</code> <code>file_delete</code> <code>file_move</code> <code>list_dir</code></dd></div>
+          <div><dt>Search</dt><dd><code>glob</code> <code>grep</code></dd></div>
+          <div><dt>Processes</dt><dd><code>process_start</code> <code>process_poll</code> <code>process_stdin</code> <code>process_kill</code> <code>process_list</code></dd></div>
+          <div><dt>Transfer</dt><dd><code>upload</code> <code>download</code></dd></div>
+        </dl>
 
-    <div class="tools">
-      <figure class="card tools-card">
-        <img src="assets/crab/toolbelt.webp" width="1536" height="1030" loading="lazy" alt="A crab wearing a toolbelt holding a terminal, a page, a pencil, a magnifier, a broom, a folder tree and a gear.">
-      </figure>
-      <dl class="toolrows">
-        <div><dt>Shell</dt><dd><code>bash</code></dd></div>
-        <div><dt>Files</dt><dd><code>file_read</code> <code>file_write</code> <code>file_edit</code> <code>file_delete</code> <code>file_move</code> <code>list_dir</code></dd></div>
-        <div><dt>Search</dt><dd><code>glob</code> <code>grep</code></dd></div>
-        <div><dt>Processes</dt><dd><code>process_start</code> <code>process_poll</code> <code>process_stdin</code> <code>process_kill</code> <code>process_list</code></dd></div>
-        <div><dt>Transfer</dt><dd><code>upload</code> <code>download</code></dd></div>
-      </dl>
-    </div>
-
-    <div class="guards">
-      <article class="guard">
-        <span class="glyph"><!--glyph:tide-clock--></span>
-        <h3>Timeouts kill the whole tree</h3>
-        <p>Every <code>bash</code> call has a timeout. When it expires, <code>crabd</code> signals the entire process group, so forked children don’t outlive the call. Sandboxes also carry a TTL.</p>
-      </article>
-      <article class="guard">
-        <span class="glyph"><!--glyph:few-grains--></span>
-        <h3>Output is bounded</h3>
-        <p>A runaway log can’t flood the context window. <code>crabd</code> keeps a capped head and tail (32&nbsp;KiB per stream by default), drops the middle and tells the model it did.</p>
-      </article>
+        <div class="guards">
+          <article class="guard">
+            <span class="glyph"><!--glyph:tide-clock--></span>
+            <h3>Timeouts kill the whole tree</h3>
+            <p>Every <code>bash</code> call has a timeout. When it expires, <code>crabd</code> signals the entire process group, so forked children don’t outlive the call. Sandboxes also carry a TTL.</p>
+          </article>
+          <article class="guard">
+            <span class="glyph"><!--glyph:few-grains--></span>
+            <h3>Output is bounded</h3>
+            <p>A runaway log can’t flood the context window. <code>crabd</code> keeps a capped head and tail (32&nbsp;KiB per stream by default), drops the middle and tells the model it did.</p>
+          </article>
+        </div>
+      </div>
+      <div class="aside" aria-hidden="true"><img class="poster" src="assets/crab/toolbelt.webp" width="1536" height="1030" alt="" loading="lazy"></div>
     </div>
   </div>
 </section>
 
-<!-- ───────────── PROTOCOL ───────────── -->
-<section class="section" id="protocol" aria-labelledby="protocol-h">
+<!-- ───────────── PROTOCOL · one wire · crab right ───────────── -->
+<section class="section station" id="protocol" data-station="protocol" data-side="right" aria-labelledby="protocol-h">
   <div class="wrap">
-    <div class="two">
-      <div class="head">
+    <div class="narr">
+      <div class="col">
         <h2 id="protocol-h">One wire, every backend</h2>
         <p class="kicker">One guest protocol</p>
-      </div>
-      <div class="body">
-        <p>A static, musl-linked daemon called <code>crabd</code> runs inside every sandbox. The host always talks to it the same way: a 4-byte big-endian length, then a JSON-RPC 2.0 message whose <code>method</code> is the tool name.</p>
-        <p>The transport changes with the backend. The bytes don’t. What you test on a laptop is what runs on your servers, and nothing reaches for <code>docker exec</code>.</p>
+        <p class="lede">A static, musl-linked daemon called <code>crabd</code> runs inside every sandbox. The host always talks to it the same way: a 4-byte big-endian length, then a JSON-RPC 2.0 message whose <code>method</code> is the tool name.</p>
+        <p class="lede">The transport changes with the backend. The bytes don’t. What you test on a laptop is what runs on your servers, and nothing reaches for <code>docker exec</code>.</p>
+        <p class="sr-only">Scene: a host server and the crab are joined by a single cable on the sand. Request cards travel out to the crab and teal result cubes travel back.</p>
         <dl class="transports">
           <div><dt>Unix socket</dt><dd>Docker</dd></div>
           <div><dt>vsock</dt><dd>Firecracker</dd></div>
           <div><dt>TCP</dt><dd>Local testing</dd></div>
         </dl>
+        <figure class="frame" aria-label="Anatomy of one frame on the wire">
+          <div class="frame-row">
+            <div class="seg seg-len"><span class="seg-name">Length, u32</span><span class="seg-bytes">00 00 00 42</span></div>
+            <div class="seg seg-body"><span class="seg-name">JSON-RPC 2.0 request, 66 bytes</span><code class="seg-bytes">{"jsonrpc":"2.0","id":7,"method":"bash","params":{"command":"ls"}}</code></div>
+          </div>
+          <figcaption>One frame for <code>bash("ls")</code>, for illustration. Empty frames and frames over 16&nbsp;MiB are rejected before anything is allocated.</figcaption>
+        </figure>
       </div>
-    </div>
-    <div class="wire">
-      <div class="stage wire-stage" data-scene="wire" role="group"
-           aria-label="3D scene: one cable between a host and a sealed jar carries every request and result.">
-        <img class="poster" src="assets/crab/one-wire.webp" width="1536" height="1030" alt="" loading="lazy">
-      </div>
-      <figure class="frame" aria-label="Anatomy of one frame on the wire">
-        <div class="frame-row">
-          <div class="seg seg-len"><span class="seg-name">Length, u32</span><span class="seg-bytes">00 00 00 42</span></div>
-          <div class="seg seg-body"><span class="seg-name">JSON-RPC 2.0 request, 66 bytes</span><code class="seg-bytes">{"jsonrpc":"2.0","id":7,"method":"bash","params":{"command":"ls"}}</code></div>
-        </div>
-        <figcaption>One frame for <code>bash("ls")</code>, for illustration. Empty frames and frames over 16&nbsp;MiB are rejected before anything is allocated.</figcaption>
-      </figure>
+      <div class="aside" aria-hidden="true"><img class="poster" src="assets/crab/one-wire.webp" width="1536" height="1030" alt="" loading="lazy"></div>
     </div>
   </div>
 </section>
 
-<!-- ───────────── CRABAGENT ───────────── -->
-<section class="section" id="crabagent" aria-labelledby="ca-h">
+<!-- ───────────── CRABAGENT · building a sandcastle · crab left ───────────── -->
+<section class="section station" id="crabagent" data-station="crabagent" data-side="left" aria-labelledby="ca-h">
   <div class="wrap">
-    <div class="two two-code">
-      <div class="head">
+    <div class="narr">
+      <div class="col">
         <h2 id="ca-h">The agent that built this page</h2>
         <p class="kicker">crabagent</p>
-        <p class="head-note">It wrote this page from inside a Sandcrab sandbox.</p>
-      </div>
-      <div class="body">
-        <p><code>crabagent</code> is a small coding agent, Claude working inside a sandbox, whose tools are exactly Sandcrab’s tools. Every <code>bash</code>, <code>file_edit</code> and <code>grep</code> it issues runs in the sandbox, never on your machine. The API key stays on the host.</p>
+        <p class="lede">It wrote this page from inside a Sandcrab sandbox. <code>crabagent</code> is a small coding agent, Claude working inside a sandbox, whose tools are exactly Sandcrab’s tools. Every <code>bash</code>, <code>file_edit</code> and <code>grep</code> it issues runs in the sandbox, never on your machine. The API key stays on the host.</p>
+        <p class="sr-only">Scene: the crab builds a small sandcastle block by block, finishing with a paper page on its front and a flag on top.</p>
         <ul class="rows">
           <li>Name a persistent workspace with <code>-w</code>, or mount a host directory with <code>--mount-host</code></li>
           <li>An interactive REPL by default, or one task to completion with <code>-p</code></li>
@@ -382,20 +360,21 @@
           <figcaption>Illustrative session; the real output is more verbose.</figcaption>
         </figure>
       </div>
+      <div class="aside" aria-hidden="true"><img class="poster" src="assets/crab/window-door.webp" width="1536" height="1030" alt="" loading="lazy"></div>
     </div>
   </div>
 </section>
 
-<!-- ───────────── QUICKSTART / OPEN SOURCE ───────────── -->
-<section class="section" id="start" aria-labelledby="start-h">
+<!-- ───────────── QUICKSTART + CLOSING · the open shore · crab right ───────────── -->
+<section class="section station" id="start" data-station="start" data-side="right" aria-labelledby="start-h">
   <div class="wrap">
-    <div class="two two-code">
-      <div class="head">
+    <div class="narr">
+      <div class="col">
         <h2 id="start-h">Your shore, your rules. Apache-2.0.</h2>
         <p class="kicker">Quickstart</p>
-        <p class="head-note">Sandcrab is a Rust workspace you build and host on your own machines. State lives in a directory you own: <code>~/.sandcrab</code>, or <code>$SANDCRAB_HOME</code>. You need Rust with the musl target and Docker.</p>
-      </div>
-      <figure class="code" id="code-start">
+        <p class="lede">Sandcrab is a Rust workspace you build and host on your own machines. State lives in a directory you own: <code>~/.sandcrab</code>, or <code>$SANDCRAB_HOME</code>. You need Rust with the musl target and Docker.</p>
+        <p class="sr-only">Scene: the crab rests on an open shore by the water, waving a claw.</p>
+        <figure class="code" id="code-start">
         <figcaption><span>shell</span><button class="copy" type="button" data-copy-target="#code-start pre" aria-label="Copy the quickstart commands">Copy</button></figcaption>
 <pre><code><span class="c"># get the code and build the CLI</span>
 git clone https://github.com/polvera-org/sandcrab
@@ -420,38 +399,36 @@ echo <span class="s">'print("hello from the host")'</span> | sandcrab workspace 
 <span class="c"># run it in a throwaway sandbox</span>
 sandcrab run -t python-dev -m demo:/workspace -- <span class="s">'python3 hello.py'</span></code></pre>
       </figure>
-    </div>
 
-    <div class="two oss">
-      <dl class="facts">
-        <div><dt>Apache-2.0</dt><dd>Use it, fork it, ship it.</dd></div>
-        <div><dt>Self-hosted</dt><dd>Docker on your hosts today; Firecracker microVMs on your KVM hosts once validated.</dd></div>
-        <div><dt>Pinned templates</dt><dd>A Dockerfile and a manifest, with the image checked against its SHA-256.</dd></div>
-        <div><dt>Open about limits</dt><dd>Known gaps and deferred work are listed in the repo.</dd></div>
-      </dl>
-      <div class="notyet">
-        <h3>Not yet</h3>
-        <ul>
-          <li><b>Egress allowlist.</b> Network is off or unrestricted, nothing in between.</li>
-          <li><b>Snapshots.</b> Every sandbox starts fresh from its template.</li>
-          <li><b>MCP.</b> No MCP server yet; tools come through the SDK and the CLI.</li>
-        </ul>
+        <dl class="facts">
+          <div><dt>Apache-2.0</dt><dd>Use it, fork it, ship it.</dd></div>
+          <div><dt>Self-hosted</dt><dd>Docker on your hosts today; Firecracker microVMs on your KVM hosts once validated.</dd></div>
+          <div><dt>Pinned templates</dt><dd>A Dockerfile and a manifest, with the image checked against its SHA-256.</dd></div>
+          <div><dt>Open about limits</dt><dd>Known gaps and deferred work are listed in the repo.</dd></div>
+        </dl>
+        <div class="notyet">
+          <h3>Not yet</h3>
+          <ul>
+            <li><b>Egress allowlist.</b> Network is off or unrestricted, nothing in between.</li>
+            <li><b>Snapshots.</b> Every sandbox starts fresh from its template.</li>
+            <li><b>MCP.</b> No MCP server yet; tools come through the SDK and the CLI.</li>
+          </ul>
+        </div>
+
+        <section class="closing" aria-labelledby="closing-h">
+          <h2 id="closing-h" class="sr-only">Get started</h2>
+          <div class="cta-row">
+            <a class="pill" href="#start">Spawn your first sandbox</a>
+            <a class="pill pill-quiet" href="https://github.com/polvera-org/sandcrab" target="_blank" rel="noopener">Star on GitHub<span class="sr-only"> (opens in a new tab)</span></a>
+          </div>
+          <p class="closing-note">Docker in production today. Firecracker microVMs built, KVM validation pending.</p>
+          <blockquote class="epigraph">
+            <p>An architect of the impermanent, born of iron and grit, carving safe harbors from the chaotic shoreline.</p>
+          </blockquote>
+        </section>
       </div>
+      <div class="aside" aria-hidden="true"><img class="poster" src="assets/crab/handoff.webp" width="1536" height="1030" alt="" loading="lazy"></div>
     </div>
-  </div>
-</section>
-
-<section class="closing" aria-labelledby="closing-h">
-  <div class="wrap">
-    <h2 id="closing-h" class="sr-only">Get started</h2>
-    <div class="cta-row">
-      <a class="pill" href="#start">Spawn your first sandbox</a>
-      <a class="pill pill-quiet" href="https://github.com/polvera-org/sandcrab" target="_blank" rel="noopener">Star on GitHub<span class="sr-only"> (opens in a new tab)</span></a>
-    </div>
-    <p class="closing-note">Docker in production today. Firecracker microVMs built, KVM validation pending.</p>
-    <blockquote class="epigraph">
-      <p>An architect of the impermanent, born of iron and grit, carving safe harbors from the chaotic shoreline.</p>
-    </blockquote>
   </div>
 </section>
 
@@ -459,17 +436,19 @@ sandcrab run -t python-dev -m demo:/workspace -- <span class="s">'python3 hello.
 
 <footer class="footer">
   <div class="wrap">
-    <svg class="logo logo-foot" viewBox="-21 -17 42 31" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M-9 4l-5 5M-5 6l-3 6M9 4l5 5M5 6l3 6"/><path d="M-9 -1l-5 -5M9 -1l5 -5"/><circle class="shell" cx="-16" cy="-8" r="4.2"/><circle class="shell" cx="16" cy="-8" r="4.2"/><path d="M-4 -7l-1 -4M4 -7l1 -4"/><path class="shell" d="M-12 3a12 10 0 0 1 24 0q0 4 -12 4t-12 -4z"/><circle cx="-5" cy="-12" r="1.9" fill="currentColor" stroke="none"/><circle cx="5" cy="-12" r="1.9" fill="currentColor" stroke="none"/></svg>
-    <nav class="foot-links" aria-label="Footer">
-      <a href="#workspaces">Workspaces</a>
-      <a href="#backends">Backends</a>
-      <a href="#tools">Tools</a>
-      <a href="#protocol">Protocol</a>
-      <a href="https://github.com/polvera-org/sandcrab/tree/main/docs" target="_blank" rel="noopener">Docs<span class="sr-only"> (opens in a new tab)</span></a>
-      <a href="../bench-report.html">Benchmarks</a>
-      <a href="https://github.com/polvera-org/sandcrab" target="_blank" rel="noopener">GitHub<span class="sr-only"> (opens in a new tab)</span></a>
-    </nav>
-    <p class="foot-note">Sandcrab is open-source sandboxing for AI agents, licensed Apache-2.0.</p>
+    <div class="narr"><div class="col foot-col">
+      <svg class="logo logo-foot" viewBox="-21 -17 42 31" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M-9 4l-5 5M-5 6l-3 6M9 4l5 5M5 6l3 6"/><path d="M-9 -1l-5 -5M9 -1l5 -5"/><circle cx="-16" cy="-8" r="4.2" fill="currentColor"/><circle cx="16" cy="-8" r="4.2" fill="currentColor"/><path d="M-4 -7l-1 -4M4 -7l1 -4"/><path d="M-12 3a12 10 0 0 1 24 0q0 4 -12 4t-12 -4z" fill="currentColor"/><g stroke="none"><circle cx="-5" cy="-12" r="2.8" fill="currentColor"/><circle cx="5" cy="-12" r="2.8" fill="currentColor"/><circle class="eye" cx="-5" cy="-12" r="1.15"/><circle class="eye" cx="5" cy="-12" r="1.15"/></g></svg>
+      <nav class="foot-links" aria-label="Footer">
+        <a href="#workspaces">Workspaces</a>
+        <a href="#backends">Backends</a>
+        <a href="#tools">Tools</a>
+        <a href="#protocol">Protocol</a>
+        <a href="https://github.com/polvera-org/sandcrab/tree/main/docs" target="_blank" rel="noopener">Docs<span class="sr-only"> (opens in a new tab)</span></a>
+        <a href="../bench-report.html">Benchmarks</a>
+        <a href="https://github.com/polvera-org/sandcrab" target="_blank" rel="noopener">GitHub<span class="sr-only"> (opens in a new tab)</span></a>
+      </nav>
+      <p class="foot-note">Sandcrab is open-source sandboxing for AI agents, licensed Apache-2.0.</p>
+    </div></div>
   </div>
 </footer>
 </body>

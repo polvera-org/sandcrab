@@ -21,7 +21,7 @@ export const toolbeltMeta = {
   view: { target: [0.25, 0.85, 0], radius: 1.9, yaw: 0.4, pitch: 0.42, fraction: 0.74, sway: 0.06 },
 };
 
-function drawGlyph(ctx, s, tool) {
+export function drawGlyph(ctx, s, tool) {
   const ink = C.ink, teal = C.teal500;
   ctx.fillStyle = C.paper;
   ctx.fillRect(0, 0, s, s);
