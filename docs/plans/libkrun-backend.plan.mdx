@@ -1,0 +1,55 @@
+---
+slug: libkrun-backend
+name: libkrun backend (macOS + Linux microVMs)
+---
+
+import { ExecutionFlowchart, TodoList, PhaseTimeline } from "ministack/components";
+
+# libkrun backend: execution plan
+
+This adds a new backend, `sandcrab-backend-libkrun`. It runs hardware-isolated microVMs on Apple Silicon macOS (Hypervisor.framework) and on Linux KVM. Each sandbox gets one signed `sandcrab-krun` helper process. `crabd` runs as PID 1 and talks to the host over vsock, which libkrun maps to a host UDS. The rootfs is ext4 from the shared OCI pipeline. Workspaces are shared live through virtio-fs. libkrun's default TSI networking stays off.
+
+Full design: [`docs/design/libkrun-backend.md`](../design/libkrun-backend.md).
+
+**Spike, run on an M2 (macOS 26.2, libkrun 1.19.8):**
+- the VM boots in about 125 ms;
+- the real `crabd` answers `hello` over vsock in about 105 ms;
+- read-only virtio-fs is enforced by the host.
+
+The spike also showed that libkrun's default TSI networking exposes the host's loopback and publishes the guest's listening ports on the LAN. That is why it is off by default.
+
+<PhaseTimeline src="./libkrun-backend.flow.yaml" />
+
+## Flow
+
+The work runs in waves:
+1. Extract the rootfs crate and update the protocol mounts, in parallel.
+2. Scaffold the crate, then guest virtio-fs and arm64 templates.
+3. Build the helper, artifacts, backend and vsock tunnel, in parallel.
+4. Fake-helper tests, ports, and SDK/CLI/bench wiring.
+5. Mac e2e, then Linux e2e on the KVM box, then the benchmarks.
+6. Review, then docs.
+
+<ExecutionFlowchart src="./libkrun-backend.flow.yaml" />
+
+## Work
+
+<TodoList src="./libkrun-backend.flow.yaml" />
+
+## Decisions needed at `lk-approve` (§18 of the design)
+
+1. **`unrestricted` network in Phase A.** Ship an explicit TSI opt-in, which lets the guest reach host loopback and is documented as such, or refuse `unrestricted` until passt/gvproxy is in? *Recommended: ship the opt-in.*
+2. **macOS artifact source.** Copy the Homebrew bottles, pinned by SHA-256, or build from pinned tags? *Recommended: bottles.*
+3. **Docker as a build-time requirement on macOS** for `sandcrab rootfs build`. *Recommended: accept it for Phase 2.*
+4. **Case-sensitive APFS sparse images** for managed workspaces. *Recommended: yes, later.*
+5. **Signing.** Ad-hoc signing for local builds, or a Developer ID-signed and notarized helper for releases?
+6. **Default features.** Add `libkrun` to the CLI's default features once e2e is green?
+7. **Apple Containerization.** Keep it as a "maybe later" backend, outside Phase 2?
+
+## Risks
+
+- **Linux side unverified.** The libkrun Linux build and virtio-fs ownership for an unprivileged user can't be checked until the KVM box is up.
+- **TSI regressions.** An e2e test and a unit test guard against TSI being switched back on by accident.
+- **virtio-fs runs unconfined** as the host user, so `multi_tenant_safe=false`.
+- **arm64 template drift.** Templates may behave differently on arm64. The `templates-arm64` step adds per-arch pins.
+- **Homebrew upgrades.** They replace the dylibs. The SHA check turns that into a clear error instead of silent drift.
