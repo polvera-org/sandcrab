@@ -124,7 +124,7 @@ steps:
     title: "SDK feature libkrun + .libkrun(), CLI --backend libkrun (in CLI default features on macOS aarch64 + Linux) / --libkrun-tsi / `libkrun install`, doctor checks (hv_support, entitlement, pins, /dev/kvm, APFS case), bench BackendId::Libkrun + macOS RSS sampler"
     depends_on: [lk-backend, lk-artifacts]
     artifacts: [crates/sandcrab-sdk/, crates/sandcrab-cli/, crates/sandcrab-bench/src/backend.rs, crates/sandcrab-bench/src/sample.rs, crates/sandcrab-bench/Cargo.toml]
-    status: doing
+    status: done
 
   # ---- frontier 5 (real hardware)
   - id: lk-e2e-macos
