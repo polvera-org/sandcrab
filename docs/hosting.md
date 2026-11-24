@@ -219,8 +219,8 @@ sudo nft list table inet sandcrab
 Sandcrab user can edit would be a privilege escalation.
 
 There is no egress allowlist in V1. `egress_restricted` policies are refused at spawn time
-(Phase 3 adds a proxy). Published ports (`--port`) are not implemented on Firecracker in V1
-(`UNIMPLEMENTED`); use Docker for previews.
+(Phase 3 adds a proxy). Published ports (`--port`) work on Firecracker without a NIC: each is a
+`127.0.0.1:<ephemeral>` listener tunnelled over vsock to the guest's loopback (`tunnel.open`).
 
 ### Run
 

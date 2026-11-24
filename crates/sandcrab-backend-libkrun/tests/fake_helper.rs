@@ -1077,20 +1077,153 @@ async fn network_policies() {
     sb.destroy().await.unwrap();
 }
 
-/// PENDING lk-ports: published ports are refused until the `tunnel.open` vsock tunnel lands.
-/// When lk-ports makes them work, replace this with a test that publishes a port.
-async fn ports_refused_until_lk_ports() {
-    let e = env();
-    let err = e
-        .m()
-        .spawn(e.spawn_cfg().port(3000))
+/// Loopback echo server on the test host (the fake guest's "loopback": the fake helper's
+/// `MockCrabd` dials host `127.0.0.1` for `tunnel.open`). Echoes until EOF, then half-closes.
+async fn echo_server() -> u16 {
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = l.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        while let Ok((s, _)) = l.accept().await {
+            tokio::spawn(async move {
+                let (mut r, mut w) = s.into_split();
+                let _ = tokio::io::copy(&mut r, &mut w).await;
+                let _ = w.shutdown().await;
+            });
+        }
+    });
+    port
+}
+
+/// A loopback port nothing listens on.
+async fn closed_port() -> u16 {
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    l.local_addr().unwrap().port()
+}
+
+/// Send `data`, half-close, read the echo to EOF.
+async fn echo_round_trip(addr: std::net::SocketAddr, data: &[u8]) -> Vec<u8> {
+    let s = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let (mut r, mut w) = s.into_split();
+    let data = data.to_vec();
+    let writer = tokio::spawn(async move {
+        w.write_all(&data).await.unwrap();
+        w.shutdown().await.unwrap();
+    });
+    let mut back = Vec::new();
+    tokio::time::timeout(Duration::from_secs(10), r.read_to_end(&mut back))
         .await
-        .unwrap_err()
-        .to_string();
-    assert!(err.contains("tunnel"), "{err}");
-    assert!(e.starts().is_empty(), "no helper launched");
+        .expect("echo within 10 s")
+        .unwrap();
+    writer.await.unwrap();
+    back
+}
+
+/// Wait until `addr` refuses connections (listener closed).
+async fn port_closed(addr: std::net::SocketAddr) -> bool {
+    for _ in 0..300 {
+        if tokio::net::TcpStream::connect(addr).await.is_err() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    false
+}
+
+/// Published ports: one `127.0.0.1` listener per guest port, each connection a `tunnel.open`
+/// over `v.sock`. Works with network `disabled`; a port nothing listens on refuses per
+/// connection, not the spawn; destroy closes the listeners.
+async fn published_ports_forward_over_tunnels() {
+    let e = env();
+    let (open, closed) = (echo_server().await, closed_port().await);
+    let sb = e
+        .m()
+        .spawn(e.spawn_cfg().port(open).port(closed))
+        .await
+        .unwrap();
+    let ports = sb.published_ports().to_vec();
+    assert_eq!(
+        ports.iter().map(|p| p.guest).collect::<Vec<_>>(),
+        [open, closed]
+    );
+    for p in &ports {
+        assert_eq!(p.host.ip(), std::net::Ipv4Addr::LOCALHOST, "{p:?}");
+        assert_ne!(p.host.port(), 0);
+    }
+    assert!(e.config().network == HelperNetwork::Disabled);
+
+    // 1 MiB each way, half-close propagated end to end.
+    let data: Vec<u8> = (0..1024 * 1024u32).map(|i| (i % 251) as u8).collect();
+    assert!(echo_round_trip(ports[0].host, &data).await == data);
+    // Concurrent tunnels.
+    let mut tasks = Vec::new();
+    for i in 0..8u8 {
+        let addr = ports[0].host;
+        tasks.push(tokio::spawn(async move {
+            let msg = vec![i; 4096 + usize::from(i)];
+            assert!(echo_round_trip(addr, &msg).await == msg, "tunnel {i}");
+        }));
+    }
+    for t in tasks {
+        t.await.unwrap();
+    }
+
+    // Nothing listening: the connection is accepted, then closed without data (-32004).
+    let mut s = tokio::net::TcpStream::connect(ports[1].host).await.unwrap();
+    let mut buf = Vec::new();
+    let n = tokio::time::timeout(Duration::from_secs(10), s.read_to_end(&mut buf))
+        .await
+        .unwrap()
+        .unwrap_or(0);
+    assert_eq!(n, 0);
+    // ... and the sandbox is still fine.
+    let r: BashResult = sb.call(bash("still here")).await.unwrap();
+    assert_eq!(r.stdout, "still here");
+
+    sb.destroy().await.unwrap();
+    for p in &ports {
+        assert!(port_closed(p.host).await, "{p:?} open after destroy");
+    }
     assert!(e.run_dirs().is_empty());
     assert!(e.leases_released().await);
+
+    // Invalid lists are refused before anything is launched.
+    let e = env();
+    for cfg in [e.spawn_cfg().port(0), e.spawn_cfg().port(open).port(open)] {
+        let err = e.m().spawn(cfg).await.unwrap_err();
+        assert!(matches!(err, SandboxError::InvalidConfig(_)), "{err}");
+    }
+    assert!(e.starts().is_empty(), "no helper launched");
+    assert!(e.run_dirs().is_empty());
+}
+
+/// The forwards die with the VM: a crash closes them at once, and so does dropping the
+/// backend handle without `destroy`.
+async fn published_ports_close_on_crash_and_drop() {
+    let open = echo_server().await;
+
+    let e = env();
+    e.set_mode("crash_on_signal");
+    let sb = e.m().spawn(e.spawn_cfg().port(open)).await.unwrap();
+    let addr = sb.published_ports()[0].host;
+    assert_eq!(echo_round_trip(addr, b"before").await, b"before");
+    let helper = e.helper();
+    fs::write(e.run_dir().join(sb.id().to_string()).join("crash-now"), "").unwrap();
+    assert!(gone(&helper).await);
+    assert!(
+        port_closed(addr).await,
+        "listener open after the VM crashed"
+    );
+    sb.destroy().await.unwrap();
+    assert!(e.run_dirs().is_empty());
+
+    let e = env();
+    let mut spec = bare_spec();
+    spec.ports = vec![sandcrab_core::PortSpec { guest: open }];
+    let handle = e.backend.spawn(&spec).await.unwrap();
+    let addr = handle.published_ports()[0].host;
+    assert_eq!(echo_round_trip(addr, b"x").await, b"x");
+    drop(handle);
+    assert!(port_closed(addr).await, "listener open after drop");
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1129,8 +1262,11 @@ fn harness() -> ExitCode {
             Box::pin(reaper_kills_dead_owners_helper())
         }),
         ("network_policies", || Box::pin(network_policies())),
-        ("ports_refused_until_lk_ports", || {
-            Box::pin(ports_refused_until_lk_ports())
+        ("published_ports_forward_over_tunnels", || {
+            Box::pin(published_ports_forward_over_tunnels())
+        }),
+        ("published_ports_close_on_crash_and_drop", || {
+            Box::pin(published_ports_close_on_crash_and_drop())
         }),
     ];
     // Linux builds every scratch disk with mke2fs (macOS uses the seeded blank image).

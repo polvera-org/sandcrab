@@ -11,9 +11,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use sandcrab_protocol::{
-    BashParams, BashResult, Call, HEADER_LEN, HelloResult, PROTOCOL_VERSION, PingResult,
-    ProtocolError, Reply, RpcMessage, RpcResponse, TOOL_NAMES, ToolCall, ToolResult, encode_frame,
-    parse_header,
+    BashParams, BashResult, Call, HEADER_LEN, HelloResult, METHOD_TUNNEL_OPEN, PROTOCOL_VERSION,
+    PingResult, ProtocolError, Reply, RpcMessage, RpcRequest, RpcResponse, TOOL_NAMES, ToolCall,
+    ToolResult, TunnelOpenAck, TunnelOpenParams, encode_frame, parse_header,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -52,6 +52,10 @@ fn consume(n: &AtomicU32) -> bool {
 /// - anything else replies immediately with `stdout = command`, exit 0.
 ///
 /// `file_read` always fails with `NotFound`; other tools reply `Unimplemented`.
+///
+/// `tunnel.open` as a connection's first frame dials `127.0.0.1:<port>` **on the test host**
+/// (standing in for guest loopback) and relays raw bytes like the real `crabd`; nothing
+/// listening → `-32004`.
 #[derive(Debug, Clone)]
 pub struct MockCrabd {
     pub protocol_version: String,
@@ -60,6 +64,8 @@ pub struct MockCrabd {
     pub hello_failures: Arc<AtomicU32>,
     /// Tool calls served so far.
     pub tool_calls: Arc<AtomicU32>,
+    /// Tunnels opened (acked) so far.
+    pub tunnels: Arc<AtomicU32>,
 }
 
 impl Default for MockCrabd {
@@ -69,6 +75,7 @@ impl Default for MockCrabd {
             default_cwd: "/workspace".to_owned(),
             hello_failures: Arc::new(AtomicU32::new(0)),
             tool_calls: Arc::new(AtomicU32::new(0)),
+            tunnels: Arc::new(AtomicU32::new(0)),
         }
     }
 }
@@ -81,6 +88,7 @@ impl MockCrabd {
     {
         let (mut reader, writer) = tokio::io::split(stream);
         let writer = Arc::new(tokio::sync::Mutex::new(writer));
+        let mut first = true;
         loop {
             let mut header = [0u8; HEADER_LEN];
             if reader.read_exact(&mut header).await.is_err() {
@@ -96,6 +104,15 @@ impl MockCrabd {
             let Ok(RpcMessage::Request(req)) = RpcMessage::from_slice(&payload) else {
                 return;
             };
+            if std::mem::take(&mut first) && req.method == METHOD_TUNNEL_OPEN {
+                // Nothing else holds the writer before the first request is dispatched.
+                let Ok(writer) = Arc::try_unwrap(writer) else {
+                    return;
+                };
+                self.serve_tunnel(reader.unsplit(writer.into_inner()), req)
+                    .await;
+                return;
+            }
             let call = Call::from_request(&req);
             if matches!(&call, Ok(Call::Tool(ToolCall::Bash(p))) if p.command == "hangup") {
                 let _ = writer.lock().await.shutdown().await;
@@ -115,6 +132,47 @@ impl MockCrabd {
                 let _ = w.flush().await;
             });
         }
+    }
+
+    /// `tunnel.open` as the first frame: dial **this host's** `127.0.0.1:<port>` (the mock's
+    /// "guest loopback"), ack, then relay raw bytes with half-close until both sides are done.
+    /// Nothing listening → `-32004`, like the real `crabd`.
+    async fn serve_tunnel<S>(&self, mut stream: S, req: RpcRequest)
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        async fn reply<S: AsyncWrite + Unpin>(stream: &mut S, resp: RpcResponse) {
+            let frame = encode_frame(&resp).expect("encode");
+            let _ = stream.write_all(&frame).await;
+            let _ = stream.flush().await;
+        }
+        let params = match TunnelOpenParams::from_request(&req) {
+            Ok(p) => p,
+            Err(e) => {
+                let resp = RpcResponse::failure(Some(req.id), &e);
+                return reply(&mut stream, resp).await;
+            }
+        };
+        let mut target =
+            match tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, params.port)).await {
+                Ok(t) => t,
+                Err(e) => {
+                    let e = if e.kind() == io::ErrorKind::ConnectionRefused {
+                        ProtocolError::NotFound(format!(
+                            "nothing is listening on guest port {}",
+                            params.port
+                        ))
+                    } else {
+                        ProtocolError::ExecutionFailed(e.to_string())
+                    };
+                    let resp = RpcResponse::failure(Some(req.id), &e);
+                    return reply(&mut stream, resp).await;
+                }
+            };
+        let ack = RpcResponse::success(req.id, TunnelOpenAck { port: params.port }.to_value());
+        reply(&mut stream, ack).await;
+        self.tunnels.fetch_add(1, Ordering::SeqCst);
+        let _ = tokio::io::copy_bidirectional(&mut stream, &mut target).await;
     }
 
     fn respond(

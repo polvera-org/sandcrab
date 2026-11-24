@@ -355,8 +355,9 @@ The spike proved that **TSI is unsafe as a default**. It gives the guest the **h
 **Ports (`SandboxConfig.ports`):** a backend-side tokio listener on **`127.0.0.1:<ephemeral>`**. Each accepted connection opens a
 new `v.sock` connection → `tunnel.open{port}` → raw splice to the guest `127.0.0.1:<port>`. This is the FC design §6 primitive.
 It works with no NIC, needs no privileges, and is identical across FC and libkrun. **TSI port maps are never used**
-(they bind the wildcard address and only work with TSI). Until `tunnel.open` lands (step `vsock-tunnel`), a non-empty
-`ports` is `InvalidConfig("ports need tunnel support")` on libkrun. It is never silently ignored.
+(they bind the wildcard address and only work with TSI). Implemented in `ports.rs` (step `lk-ports`) on core's
+`PortForwards`: one forwarder per port, reported by `published_ports()`, closed on destroy, on drop and when the helper exits.
+Port 0, duplicates and more than 64 ports are `InvalidConfig` before anything starts.
 
 ## 10. Resources, timeouts, teardown
 

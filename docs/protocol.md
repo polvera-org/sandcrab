@@ -401,7 +401,28 @@ It is a connection-level verb, not a tool: it is not in `TOOL_NAMES` and not in 
 
 Host API (`sandcrab-core`): `open_tunnel(&dyn Connector, port, timeout) -> BoxedStream`
 for a single stream, and `PortForwarder::bind(connector, guest_port, host_port, config)`
-for a listener. Backends wire `SandboxConfig.ports` onto the forwarder.
+for a listener. Backends wire `SandboxConfig.ports` onto `PortForwards::bind` (one forwarder
+per port, `127.0.0.1:<ephemeral>`, reported by `SandboxHandle::published_ports`, closed on
+destroy, drop and VMM exit). Docker keeps its own port mapping.
+
+**Half-close over Firecracker vsock (measured on KVM).** Firecracker's vsock bridge does not
+preserve half-close in either direction:
+
+- a host-side `SHUT_WR` on the vsock UDS becomes a **full close** (the guest's reply is lost);
+- a guest-side `SHUT_WR` is **never forwarded** to the host (the host keeps receiving and
+  sending, but sees no EOF while the tunnel is open).
+
+So the Firecracker backend sets `ForwarderConfig::forward_half_close = false`: a client's
+`SHUT_WR` is not sent into the tunnel, and the tunnel ends when the guest side closes, the
+client closes, or the guest is silent for 30 s after the client's EOF. What works: HTTP/1.1
+(keep-alive or `Connection: close`) and any protocol framed by length; HTTP/1.0 clients that
+half-close after the request get the full response. What does not: a client that waits for the
+server's EOF to know the response is complete (`Connection: close` without `Content-Length`,
+HTTP/1.0 read-to-close) sees the bytes but not the EOF until the tunnel ends, and protocols that
+need the guest to see the client's EOF (upload-then-EOF). The guest-side fix is for `crabd` to
+close a vsock tunnel when its loopback target reaches EOF. Unix-socket transports (Docker) and
+the libkrun `v.sock` mapping are unaffected by this setting (libkrun's half-close is not yet
+measured on a real VM).
 
 ## `init.*` control contract (microVMs)
 

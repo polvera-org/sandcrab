@@ -292,3 +292,54 @@ async fn crabd_shutdown_closes_tunnels() {
     assert_eq!(n, 0, "tunnel closed when the guest goes away");
     fwd.shutdown().await;
 }
+
+/// `forward_half_close: false` (Firecracker vsock mode): the client's `SHUT_WR` is not sent
+/// into the tunnel, so the guest server never sees EOF, yet a request/response exchange still
+/// completes and the guest's close still reaches the client.
+#[tokio::test]
+async fn request_response_without_forwarding_half_close() {
+    // "Guest" server: read one request line, reply, note whether EOF followed, close.
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = l.local_addr().unwrap().port();
+    let (saw_eof_tx, saw_eof_rx) = oneshot::channel::<bool>();
+    tokio::spawn(async move {
+        let (mut s, _) = l.accept().await.unwrap();
+        let mut req = Vec::new();
+        let mut b = [0u8; 1];
+        while !req.ends_with(b"\n") {
+            s.read_exact(&mut b).await.unwrap();
+            req.push(b[0]);
+        }
+        s.write_all(b"reply to ").await.unwrap();
+        s.write_all(&req).await.unwrap();
+        let eof = tokio::time::timeout(Duration::from_millis(300), s.read(&mut b))
+            .await
+            .is_ok_and(|r| r.is_ok_and(|n| n == 0));
+        let _ = saw_eof_tx.send(eof);
+        // Dropping `s` closes the guest side.
+    });
+
+    let crabd = Crabd::start().await;
+    let cfg = ForwarderConfig {
+        forward_half_close: false,
+        ..ForwarderConfig::default()
+    };
+    let fwd = PortForwarder::bind(crabd.connector(), port, 0, cfg)
+        .await
+        .unwrap();
+    let mut s = TcpStream::connect(fwd.local_addr()).await.unwrap();
+    s.write_all(b"GET /\n").await.unwrap();
+    s.shutdown().await.unwrap();
+    let mut back = Vec::new();
+    tokio::time::timeout(TIMEOUT, s.read_to_end(&mut back))
+        .await
+        .expect("guest close reaches the client")
+        .unwrap();
+    assert_eq!(back, b"reply to GET /\n");
+    assert!(
+        !saw_eof_rx.await.unwrap(),
+        "the client's half-close must not reach the guest"
+    );
+    fwd.shutdown().await;
+    crabd.stop().await;
+}

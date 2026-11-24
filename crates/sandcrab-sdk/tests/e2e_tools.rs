@@ -9,8 +9,7 @@ use std::time::{Duration, Instant};
 
 use common::{bash_t, run, sh, wait_for};
 use sandcrab_sdk::{
-    KillSignal, MountMode, NetworkPolicy, SandboxConfig, SandboxError, ToolError, is_tool_error,
-    tool_definitions,
+    KillSignal, MountMode, NetworkPolicy, SandboxConfig, ToolError, is_tool_error, tool_definitions,
 };
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -103,15 +102,39 @@ async fn http_get(addr: std::net::SocketAddr, path: &str) -> Option<String> {
         .await
         .ok()?
         .ok()?;
-    let req = format!("GET {path} HTTP/1.0\r\nHost: localhost\r\n\r\n");
+    // HTTP/1.1 framed by Content-Length, like browsers and curl: the response is complete
+    // without waiting for the server's close (on Firecracker the guest's FIN does not reach the
+    // host while the tunnel is open; docs/protocol.md).
+    let req = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n");
     s.write_all(req.as_bytes()).await.ok()?;
     let mut buf = Vec::new();
-    tokio::time::timeout(Duration::from_secs(3), s.read_to_end(&mut buf))
-        .await
-        .ok()?
-        .ok()?;
-    let text = String::from_utf8_lossy(&buf).into_owned();
-    text.starts_with("HTTP/1.").then_some(text)
+    let mut chunk = [0u8; 4096];
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let text = String::from_utf8_lossy(&buf).into_owned();
+        if let Some(end) = text.find("\r\n\r\n") {
+            let len = text[..end]
+                .lines()
+                .find_map(|l| {
+                    l.to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                        .map(|v| v.trim().to_owned())
+                })
+                .and_then(|v| v.parse::<usize>().ok())?;
+            if buf.len() >= end + 4 + len {
+                return text.starts_with("HTTP/1.").then_some(text);
+            }
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        let n = tokio::time::timeout(left, s.read(&mut chunk))
+            .await
+            .ok()?
+            .ok()?;
+        if n == 0 {
+            return None;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -120,17 +143,13 @@ async fn dev_server_via_process_tools_and_published_port() {
     run("dev-server", |h| async move {
         let ws = h.name("site");
         h.ws().create(&ws).unwrap();
+        // Docker publishes through its own port mapping (needs a NIC, hence `unrestricted`);
+        // the microVM backends forward over `tunnel.open`, so the same scenario runs there.
         let config = SandboxConfig::from_template("ts-dev")
             .mount(ws.as_str(), "/workspace", MountMode::ReadWrite)
             .default_cwd("/workspace")
             .network(NetworkPolicy::Unrestricted)
             .port(8080);
-        if !h.is_docker() {
-            // Firecracker V1 has no published ports (docs/hosting.md): refused, never ignored.
-            let err = h.sc.spawn(config).await.unwrap_err();
-            assert!(matches!(err, SandboxError::Unimplemented(_)), "{err}");
-            return;
-        }
         let sb = h.sc.spawn(config).await.unwrap();
         let addr = sb.host_addr(8080).expect("port 8080 published");
         assert!(addr.ip().is_loopback(), "published on {addr}");

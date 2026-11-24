@@ -26,7 +26,10 @@ use sandcrab_core::{
     ManagerConfig, MountMode, NetworkConfig, RuntimeBackend, Sandbox, SandboxConfig, SandboxError,
     SandboxManager, TemplateRegistry, WorkspaceRegistry, WorkspaceState,
 };
-use sandcrab_protocol::{BashParams, BashResult, FileWriteParams, FileWriteResult};
+use sandcrab_protocol::{
+    BashParams, BashResult, FileWriteParams, FileWriteResult, ProcessPollParams, ProcessPollResult,
+    ProcessStartParams, ProcessStartResult,
+};
 
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -339,10 +342,234 @@ async fn policy_rejections_leave_nothing_behind() {
     assert!(matches!(err, SandboxError::PolicyUnenforceable(_)), "{err}");
     let err = env
         .manager
-        .spawn(SandboxConfig::from_template("base").port(8080))
+        .spawn(SandboxConfig::from_template("base").port(8080).port(8080))
         .await
         .unwrap_err();
-    assert!(matches!(err, SandboxError::Unimplemented(_)), "{err}");
+    assert!(matches!(err, SandboxError::InvalidConfig(_)), "{err}");
+    assert!(leftovers(&env).is_empty());
+    assert!(no_firecracker_left(&env));
+}
+
+/// Guest servers for the port test (node, from the `ts-dev` template):
+/// - 8080: HTTP (keep-alive, `Connection: close`, HTTP/1.0);
+/// - 7001: reads a `<len>\n` header, counts `len` body bytes, replies `got <n>` (upload);
+/// - 7002: sends `hello`, half-closes its write side, then records what the client sends
+///   afterwards in `/tmp/7002.txt` (guest → host half-close).
+const PORT_SERVERS_JS: &str = r"
+const net = require('net'), http = require('http'), fs = require('fs');
+http.createServer((q, s) => s.end('hello from fc ' + q.url)).listen(8080, '127.0.0.1');
+net.createServer({ allowHalfOpen: true }, s => {
+  let head = '', want = -1, n = 0;
+  s.on('data', d => {
+    if (want < 0) {
+      head += d.toString('latin1');
+      const i = head.indexOf('\n');
+      if (i < 0) return;
+      want = parseInt(head.slice(0, i), 10);
+      n = Buffer.byteLength(head.slice(i + 1), 'latin1');
+    } else n += d.length;
+    if (n >= want) s.end('got ' + n);
+  });
+  s.on('error', () => {});
+}).listen(7001, '127.0.0.1');
+net.createServer({ allowHalfOpen: true }, s => {
+  let got = '';
+  s.on('data', d => { got += d; fs.writeFileSync('/tmp/7002.txt', got); });
+  s.on('error', () => {});
+  s.end('hello');
+}).listen(7002, '127.0.0.1', () => console.log('LISTENING'));
+";
+
+/// Read until `needle` shows up, EOF, or `wait` passes. Returns the bytes and whether EOF was
+/// seen.
+async fn read_until(
+    r: &mut tokio::net::tcp::OwnedReadHalf,
+    needle: &str,
+    wait: Duration,
+) -> (String, bool) {
+    use tokio::io::AsyncReadExt;
+    let mut got = Vec::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    let deadline = Instant::now() + wait;
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return (String::from_utf8_lossy(&got).into_owned(), false);
+        }
+        match tokio::time::timeout(left, r.read(&mut buf)).await {
+            Ok(Ok(0)) | Ok(Err(_)) => return (String::from_utf8_lossy(&got).into_owned(), true),
+            Ok(Ok(n)) => {
+                got.extend_from_slice(&buf[..n]);
+                if !needle.is_empty() && String::from_utf8_lossy(&got).contains(needle) {
+                    return (String::from_utf8_lossy(&got).into_owned(), false);
+                }
+            }
+            Err(_) => return (String::from_utf8_lossy(&got).into_owned(), false),
+        }
+    }
+}
+
+/// Published ports over vsock `CONNECT` + `tunnel.open` on real Firecracker, with network
+/// `disabled` (no NIC).
+///
+/// Must work: HTTP keep-alive, `Connection: close` and HTTP/1.0-with-`SHUT_WR` responses, a
+/// 4 MiB upload, data after a guest half-close, a refused port, listeners closing on destroy.
+///
+/// Known limitation (printed as `PROBE`, asserted so a fix is noticed): Firecracker's vsock
+/// bridge does not forward a guest-side `SHUT_WR`, so the host client gets the guest's bytes
+/// but not its EOF while the tunnel is open (needs `crabd` to close the vsock stream on target
+/// EOF). The host does not forward the client's `SHUT_WR` either (Firecracker would turn it
+/// into a full close and drop the reply).
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires /dev/kvm, pinned artifacts, a pinned sandcrab/ts-dev:0.1.0 and a static crabd"]
+async fn published_ports_over_vsock_tunnels() {
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpStream;
+
+    let env = env();
+    let sb = env
+        .manager
+        .spawn(
+            SandboxConfig::from_template("ts-dev")
+                .port(8080)
+                .port(7001)
+                .port(7002)
+                .port(7003),
+        )
+        .await
+        .unwrap();
+    let ports = sb.published_ports().to_vec();
+    let host = |guest: u16| {
+        ports
+            .iter()
+            .find(|p| p.guest == guest)
+            .expect("published")
+            .host
+    };
+    for p in &ports {
+        assert_eq!(p.host.ip(), std::net::Ipv4Addr::LOCALHOST, "{p:?}");
+    }
+    assert_eq!(
+        bash(&sb, "ls /sys/class/net").await.stdout.trim(),
+        "lo",
+        "no NIC"
+    );
+
+    // Nothing listens yet: refused per connection (closed without data), the sandbox is fine.
+    let (mut r, _w) = TcpStream::connect(host(7003)).await.unwrap().into_split();
+    assert_eq!(
+        read_until(&mut r, "", Duration::from_secs(10)).await,
+        (String::new(), true)
+    );
+
+    // `bash` reaps its process group when the call returns: start the servers as a managed
+    // background process instead.
+    bash(
+        &sb,
+        &format!("cat > /tmp/s.js <<'EOF'\n{PORT_SERVERS_JS}\nEOF"),
+    )
+    .await;
+    let proc = sb
+        .call::<ProcessStartResult>(ProcessStartParams {
+            command: "node /tmp/s.js".into(),
+            cwd: None,
+            env: Default::default(),
+            pty: false,
+        })
+        .await
+        .unwrap();
+    let mut out = String::new();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !out.contains("LISTENING") {
+        assert!(Instant::now() < deadline, "servers never listened: {out}");
+        let p = sb
+            .call::<ProcessPollResult>(ProcessPollParams {
+                process_id: proc.process_id.clone(),
+            })
+            .await
+            .unwrap();
+        out.push_str(&p.stdout);
+        out.push_str(&p.stderr);
+        assert!(p.running, "servers exited: {p:?} ({out})");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let wait = Duration::from_secs(10);
+
+    // HTTP/1.1 keep-alive: the client reads by Content-Length.
+    let (mut r, mut w) = TcpStream::connect(host(8080)).await.unwrap().into_split();
+    w.write_all(b"GET /ka HTTP/1.1\r\nHost: x\r\n\r\n")
+        .await
+        .unwrap();
+    let (got, _) = read_until(&mut r, "hello from fc /ka", wait).await;
+    assert!(got.contains("hello from fc /ka"), "{got:?}");
+    // Second request on the same connection.
+    w.write_all(b"GET /ka2 HTTP/1.1\r\nHost: x\r\n\r\n")
+        .await
+        .unwrap();
+    let (got, _) = read_until(&mut r, "hello from fc /ka2", wait).await;
+    assert!(got.contains("hello from fc /ka2"), "{got:?}");
+    drop((r, w));
+
+    // `Connection: close`: the full response arrives; the server's FIN does not (limitation).
+    let (mut r, w) = TcpStream::connect(host(8080)).await.unwrap().into_split();
+    let mut w = w;
+    w.write_all(b"GET /close HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let (got, _) = read_until(&mut r, "hello from fc /close", wait).await;
+    assert!(got.contains("hello from fc /close"), "{got:?}");
+    let (_, eof) = read_until(&mut r, "", Duration::from_secs(2)).await;
+    println!("PROBE guest FIN reaches host (Connection: close): {eof}");
+    let guest_fin_forwarded = eof;
+    drop((r, w));
+
+    // HTTP/1.0 with the client half-closing after its request: the reply still arrives
+    // (the host does not forward the SHUT_WR, which Firecracker would make a full close).
+    let (mut r, mut w) = TcpStream::connect(host(8080)).await.unwrap().into_split();
+    w.write_all(b"GET /half HTTP/1.0\r\n\r\n").await.unwrap();
+    w.shutdown().await.unwrap();
+    let (got, _) = read_until(&mut r, "hello from fc /half", wait).await;
+    assert!(got.contains("hello from fc /half"), "{got:?}");
+    drop(r);
+
+    // 4 MiB upload, reply when complete.
+    let (mut r, mut w) = TcpStream::connect(host(7001)).await.unwrap().into_split();
+    let len = 4 * 1024 * 1024;
+    w.write_all(format!("{len}\n").as_bytes()).await.unwrap();
+    w.write_all(&vec![7u8; len]).await.unwrap();
+    let want = format!("got {len}");
+    let (got, _) = read_until(&mut r, &want, Duration::from_secs(30)).await;
+    assert_eq!(got, want);
+    drop((r, w));
+
+    // Guest half-closes after `hello`: the host can still send afterwards.
+    let (mut r, mut w) = TcpStream::connect(host(7002)).await.unwrap().into_split();
+    let (got, eof) = read_until(&mut r, "hello", wait).await;
+    assert_eq!(got, "hello");
+    w.write_all(b"after-guest-fin").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let seen = bash(&sb, "cat /tmp/7002.txt 2>&1").await.stdout;
+    let (_, eof_later) = read_until(&mut r, "", Duration::from_secs(1)).await;
+    println!(
+        "PROBE guest half-close: eof_seen={} guest got {seen:?}",
+        eof || eof_later
+    );
+    assert_eq!(seen, "after-guest-fin");
+    drop((r, w));
+
+    // Documented limitation: flip this when crabd closes vsock tunnels on target EOF.
+    assert!(
+        !guest_fin_forwarded,
+        "the guest's FIN now reaches the host: update docs/protocol.md and this test"
+    );
+
+    sb.destroy().await.unwrap();
+    for p in &ports {
+        assert!(
+            TcpStream::connect(p.host).await.is_err(),
+            "{p:?} open after destroy"
+        );
+    }
     assert!(leftovers(&env).is_empty());
     assert!(no_firecracker_left(&env));
 }
