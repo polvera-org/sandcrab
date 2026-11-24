@@ -13,9 +13,9 @@ AI coding and computer-use agents need to run untrusted commands, edit files, in
 - **Ephemeral Compute, Durable Workspaces**: Spin up fresh sandboxes per turn, mount one or more persistent workspaces (`rw` or `ro`) with a chosen `default_cwd`, tear down immediately, and mutate workspace files from the host between turns (e.g., adding user attachments or handing output from `python-dev` to `render`).
 - **Built-In Computer-Use Tools**: Native Rust guest daemon (`crabd`) providing `bash`, `file_read`, `file_write`, `file_edit`, `file_delete`, `file_move`, `list_dir`, `glob`, `grep`, and managed background `process_*` — all with auto-generated JSON Schemas for LLM tool-calling and MCP.
 - **Curated OCI Templates**: Standard `Dockerfile` + `sandcrab.toml` templates (`base`, `python-dev`, `ts-dev`, `render`) with SHA-256 artifact pinning, ready for a future template marketplace.
-- **Explicit Isolation Backends**: Pluggable `RuntimeBackend` supporting Docker (dev/CI only), `libkrun` (macOS Apple Silicon & Linux microVMs), Cloud Hypervisor (`virtio-fs` Linux microVMs), and Firecracker (high-density Linux KVM microVMs with sub-50ms snapshot restores). Never silently falls back to weaker isolation.
+- **Explicit Isolation Backends**: Pluggable `RuntimeBackend` supporting hardened Docker containers (shared kernel, for trusted single-tenant workloads), `libkrun` (macOS Apple Silicon & Linux microVMs), Cloud Hypervisor (`virtio-fs` Linux microVMs), and Firecracker (high-density Linux KVM microVMs with sub-50ms snapshot restores). Never silently falls back to weaker isolation.
 
-> V1 ships the DockerDev and Firecracker backends. libkrun, Cloud Hypervisor and snapshots
+> V1 ships the Docker and Firecracker backends. libkrun, Cloud Hypervisor and snapshots
 > are on the roadmap. See [Status](#status).
 
 ## What it is
@@ -24,16 +24,16 @@ A Rust library, CLI and guest daemon that give an AI agent a fresh, disposable L
 sandbox per task, with the files it works on kept in **persistent workspaces** outside the
 sandbox. Every backend runs the same static guest daemon, `crabd`, and speaks the same
 length-prefixed JSON-RPC protocol, so a tool call behaves identically on a laptop
-(DockerDev) and on a KVM server (Firecracker).
+(Docker) and on a KVM server (Firecracker).
 
 ## Status
 
-V1 (Phase 1, branch `feat/phase-1`): review passed, live agent run passed, DockerDev
+V1 (Phase 1, branch `feat/phase-1`): review passed, live agent run passed, Docker
 benchmarked.
 
 | Backend | Isolation | State |
 | --- | --- | --- |
-| **DockerDev** | Shared host kernel, **not a security boundary** | **Working.** Dev / CI only; requires `--allow-insecure`. End-to-end tests, live crabagent run and benchmark done |
+| **Docker** | Shared host kernel, hardened (not hardware isolation) | **Officially supported.** For single-tenant and trusted-host workloads. End-to-end tests, live crabagent run and benchmark done |
 | **Firecracker** | Hardware (KVM microVM) | **Built, KVM tests pending.** Backend, rootfs pipeline, vsock transport, block-volume workspaces, tap networking and CLI wiring are implemented and tested against a fake VMM. Real-KVM e2e tests and the benchmark wait for a KVM host. Reports `multi_tenant_safe = false` until `jailer` lands. No published ports yet |
 | Cloud Hypervisor | Hardware | Phase 2 |
 | libkrun | Hardware (macOS + Linux) | Phase 2 |
@@ -47,8 +47,19 @@ benchmarked.
 | Egress allowlist (`egress_restricted`), secret injection | **Not enforced:** refused at spawn time (Phase 3 proxy) |
 | Snapshots / fork, browser tools, server, MCP, other-language SDKs | Phase 2+ |
 
-Benchmark (DockerDev, 2-vCPU VPS): spawn→ready p50 227–258 ms, teardown about 100 ms,
+Benchmark (Docker, 2-vCPU VPS): spawn→ready p50 227–258 ms, teardown about 100 ms,
 first tool call about 3.7 ms. Full report: [docs/site/bench-report.html](docs/site/bench-report.html).
+
+## Choosing a backend
+
+The backend is always chosen explicitly (`--backend`, `SANDCRAB_BACKEND`, or the SDK
+builder); Sandcrab never falls back from one to another.
+
+| Workload | Backend |
+| --- | --- |
+| Your own agents, trusted code, single-tenant hosts | **Docker**: hardened containers, shared host kernel |
+| Code from strangers, multi-tenant hosts | **Firecracker**: KVM microVMs (built; real-KVM validation pending) |
+| Planned (Phase 2) | Cloud Hypervisor, libkrun |
 
 ## Quickstart (Linux + Docker)
 
@@ -71,8 +82,8 @@ sandcrab doctor                        # crabd, Docker, template pins, KVM prere
 Run commands from the repo root: `./templates` and the default `crabd` path are relative.
 
 ```sh
-# DockerDev shares the host kernel: you must say so, every time.
-export SANDCRAB_BACKEND=docker SANDCRAB_ALLOW_INSECURE=1
+# The backend is always explicit: no default, no fallback.
+export SANDCRAB_BACKEND=docker
 
 sandcrab workspace create demo
 echo 'print("hello from the host")' | sandcrab workspace put demo hello.py -
@@ -85,19 +96,20 @@ sandcrab workspace cat demo hello.py
 ```
 
 Each `run` / `tool` spawns a fresh sandbox, mounts the workspace, and destroys the sandbox
-on exit. The workspace persists. The flags can also be given per command:
-`sandcrab --backend docker --allow-insecure run ...`. Full reference: [docs/cli.md](docs/cli.md).
+on exit. The workspace persists. The backend can also be given per command:
+`sandcrab --backend docker run ...`. Full reference: [docs/cli.md](docs/cli.md).
 
 ## Rust SDK
 
 ```rust
-use sandcrab_sdk::{DockerDevConfig, MountMode, SandboxConfig, Sandcrab};
+use sandcrab_sdk::{DockerConfig, MountMode, SandboxConfig, Sandcrab};
 
 #[tokio::main]
 async fn main() -> sandcrab_sdk::Result<()> {
-    // No default backend, no fallback. DockerDev shares the host kernel: explicit opt-in.
+    // No default backend, no fallback: pick one explicitly. Docker shares the host kernel;
+    // add `.require_hardware_isolation(true)` to refuse any backend that is not a microVM.
     let sandcrab = Sandcrab::builder()
-        .docker(DockerDevConfig::allow_insecure())
+        .docker(DockerConfig::default())
         .templates_dir("templates")
         .build()?;
 
@@ -146,10 +158,10 @@ A minimal Claude coding agent whose only tools are Sandcrab's, used as the V1 te
 ```sh
 cargo build --release -p sandcrab-agent
 echo 'ANTHROPIC_API_KEY=sk-ant-...' >> .env          # never commit .env
-target/release/crabagent -w myproj --backend docker --allow-insecure          # REPL
-target/release/crabagent -w myproj --backend docker --allow-insecure -p "write a CLI that ..."
+target/release/crabagent -w myproj --backend docker          # REPL
+target/release/crabagent -w myproj --backend docker -p "write a CLI that ..."
 target/release/crabagent -w site -t render --port 5173 --network unrestricted \
-  --backend docker --allow-insecure -p "build and preview the site" --keep-alive 600
+  --backend docker -p "build and preview the site" --keep-alive 600
 ```
 
 Guide: [docs/crabagent.md](docs/crabagent.md).
@@ -159,7 +171,7 @@ Guide: [docs/crabagent.md](docs/crabagent.md).
 ```mermaid
 flowchart TB
     Callers["sandcrab-sdk / sandcrab CLI / crabagent / sandcrab-bench"] --> Core["sandcrab-core (SandboxManager, WorkspaceRegistry, TemplateRegistry)"]
-    Core --> Backends["RuntimeBackend: DockerDev | Firecracker"]
+    Core --> Backends["RuntimeBackend: Docker | Firecracker"]
     Backends -- "u32-framed JSON-RPC 2.0 over UDS / vsock" --> Guest["crabd (static Rust guest daemon)"]
     Guest --> Tools["bash, process_*, file_*, list_dir, glob, grep, upload, download"]
     Core -. "bind mount (Docker) / ext4 block volume (Firecracker), rw or ro" .-> WS["Persistent workspaces"]
@@ -171,7 +183,7 @@ flowchart TB
 | [`sandcrab-protocol`](crates/sandcrab-protocol/) | Framing, JSON-RPC envelope, typed tool params / results, JSON Schemas |
 | [`sandcrab-guest`](crates/sandcrab-guest/) (`crabd`) | Guest daemon: the tools, `--unix` / `--tcp` / `--vsock`, PID 1 mode for microVMs |
 | [`sandcrab-core`](crates/sandcrab-core/) | `RuntimeBackend`, `SandboxManager`, `WorkspaceRegistry`, `TemplateRegistry`, crabd client |
-| [`sandcrab-backend-docker`](crates/sandcrab-backend-docker/) | DockerDev backend (dev / CI only) |
+| [`sandcrab-backend-docker`](crates/sandcrab-backend-docker/) | Docker backend (hardened containers, shared kernel) |
 | [`sandcrab-backend-firecracker`](crates/sandcrab-backend-firecracker/) | Firecracker backend, rootfs pipeline, pinned artifacts |
 | [`sandcrab-sdk`](crates/sandcrab-sdk/) | Public Rust SDK (`Sandcrab`, `Sandbox`, `WorkspaceClient`) |
 | [`sandcrab-cli`](crates/sandcrab-cli/) (`sandcrab`) | Operator CLI |
@@ -189,20 +201,21 @@ ffmpeg + ImageMagick + Typst).
   symlink escapes.
 - **No silent downgrades.** There is no default backend and no fallback. Each backend
   reports `BackendCapabilities` (`hardware_isolated`, `multi_tenant_safe`,
-  `supports_snapshots`, `supports_host_dir_mounts`). A backend that is not hardware
-  isolated is refused unless you opt in (`--allow-insecure`, `SANDCRAB_ALLOW_INSECURE=1`,
-  `DockerDevConfig::allow_insecure()`).
-- **DockerDev is not a security boundary.** It shares the host kernel. It is hardened
-  (`cap_drop ALL`, `no-new-privileges`, PID / memory / CPU limits, `noexec` `/tmp`, no core
-  dumps, host uid:gid, network `none` by default, ports on `127.0.0.1` only), but use it
-  only for code you would run on the host yourself, and remember that `docker` group
-  membership is root-equivalent.
+  `supports_snapshots`, `supports_host_dir_mounts`). To refuse any backend without
+  hardware isolation, set `require_hardware_isolation` (SDK builder or `SandboxConfig`);
+  spawning then fails with `HardwareIsolationRequired`.
+- **Docker is hardened, but shares the host kernel.** All capabilities dropped,
+  `no-new-privileges`, pinned images, PID / memory / CPU limits, `noexec` `/tmp`, no core
+  dumps, host uid:gid, network `none` by default, published ports on `127.0.0.1` only. It
+  reports `hardware_isolated = false` and `multi_tenant_safe = false`: use it for your own
+  agents and trusted code, not for hostile multi-tenant code. `docker` group membership is
+  root-equivalent.
 - **Firecracker** is hardware isolated, but V1 reports `multi_tenant_safe = false` until
   the `jailer` (chroot, cgroups, seccomp) is wired in, and it has not yet run on real KVM.
 - **Unenforceable policies fail.** `egress_restricted` network policies and `secrets` are
   refused at spawn time rather than ignored. The egress proxy is Phase 3.
 - **Pinned inputs.** Template images must match their `sha256` pin (`--allow-unpinned`
-  overrides on DockerDev); the Firecracker kernel and binaries are SHA-256 verified on
+  overrides on Docker); the Firecracker kernel and binaries are SHA-256 verified on
   download and on every use.
 - Known open items (Phase 2, MEDIUM): two registries with different `SANDCRAB_HOME` can
   still nest workspace roots, and the Docker / Firecracker pack paths resolve the bind
@@ -215,7 +228,7 @@ ffmpeg + ImageMagick + Typst).
 | [docs/protocol.md](docs/protocol.md) | Wire protocol, error codes, every tool's params, results and limits |
 | [docs/cli.md](docs/cli.md) | `sandcrab` commands, flags, env vars, exit codes |
 | [docs/crabagent.md](docs/crabagent.md) | crabagent setup, flags, mounts, ports, caches, images |
-| [docs/hosting.md](docs/hosting.md) | Dev host (Docker hardening) and KVM host (Firecracker) setup |
+| [docs/hosting.md](docs/hosting.md) | Docker host (hardening) and KVM host (Firecracker) setup |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Phases, V1 status, what is pending |
 | [docs/design/firecracker-backend.md](docs/design/firecracker-backend.md) | Firecracker backend design |
 | [docs/decisions/0001-phase-1-decisions.md](docs/decisions/0001-phase-1-decisions.md) | V1 decisions (ADR) |

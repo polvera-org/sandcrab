@@ -6,7 +6,7 @@ This document captures the detailed technical blueprint for executing Sandcrab a
 
 ## V1 status
 
-Phase 1 was extended into **V1**: DockerDev plus a Firecracker backend, benchmarked
+Phase 1 was extended into **V1**: the Docker backend plus a Firecracker backend, benchmarked
 (decisions: [ADR 0001](decisions/0001-phase-1-decisions.md); execution flow:
 [`plans/phase-1-mvp.flow.yaml`](plans/phase-1-mvp.flow.yaml)). State on branch `feat/phase-1`:
 
@@ -19,7 +19,9 @@ Phase 1 was extended into **V1**: DockerDev plus a Firecracker backend, benchmar
 - `sandcrab-core`: `WorkspaceRegistry` (managed and host-dir workspaces, cross-process
   leases, traversal/symlink guards, overlap refusal), `TemplateRegistry` with pins,
   `SandboxManager` with TTL reaper and lifecycle timings.
-- `sandcrab-backend-docker`: hardened DockerDev backend (explicit `--allow-insecure`).
+- `sandcrab-backend-docker`: hardened Docker backend, officially supported for
+  single-tenant / trusted-host workloads (selected explicitly with `--backend docker`; never a
+  fallback; reports `hardware_isolated = false`, `multi_tenant_safe = false`).
 - `sandcrab-backend-firecracker`: owned API client, rootfs pipeline (OCI → ext4 with
   `crabd` as init), pinned kernel/binary, vsock, block-volume workspaces with sync-back,
   tap pool + nftables networking. Tested against a fake VMM.
@@ -29,7 +31,7 @@ Phase 1 was extended into **V1**: DockerDev plus a Firecracker backend, benchmar
 - Verification: QA + security review (3 rounds, PASS), live crabagent run
   ([bench/live-check.md](bench/live-check.md)) and its fixes (core dumps off, `/tmp noexec`
   documented, image blocks, `--keep-alive`, workspace caches, lock files moved to
-  `<state root>/locks/`), DockerDev benchmark ([site/bench-report.html](site/bench-report.html)).
+  `<state root>/locks/`), Docker benchmark ([site/bench-report.html](site/bench-report.html)).
 
 **Pending (blocked on a KVM host)**
 
@@ -37,13 +39,13 @@ Phase 1 was extended into **V1**: DockerDev plus a Firecracker backend, benchmar
   nested virtualization and `cpu: host`, or a bare-metal host. See [hosting.md](hosting.md#2-kvm-host-firecracker).
 - Firecracker end-to-end tests on real KVM (`firecracker_kvm.rs`, currently ignored) and
   fixes for any gaps they find.
-- Firecracker benchmark columns, run on the same host as DockerDev.
+- Firecracker benchmark columns, run on the same host as Docker.
 
 **Deferred to Phase 2**
 
 - MEDIUM (review): two registries with different `SANDCRAB_HOME` can nest workspace roots;
   the overlap check is per registry.
-- MEDIUM (review): the DockerDev bind and the Firecracker pack resolve the workspace path
+- MEDIUM (review): the Docker bind and the Firecracker pack resolve the workspace path
   after verification (a narrow race, 4 wins in 80 attempts). Fix: pack/commit through the
   verified root fd, and a `crabd` dev/ino check after start.
 - Firecracker `jailer` confinement (until then `multi_tenant_safe = false`), snapshots,
@@ -90,7 +92,7 @@ Every tool exports a JSON Schema via `schemars` so LLM tool-calling (Anthropic, 
 
 ## Phase 1 — Foundation & Working Local MVP
 
-**Goal**: End-to-end working Rust SDK, CLI, guest daemon (`crabd`), persistent Workspaces, and curated templates running locally via `DockerDevBackend` (with the exact same `crabd` wire protocol used by future microVM backends).
+**Goal**: End-to-end working Rust SDK, CLI, guest daemon (`crabd`), persistent Workspaces, and curated templates running locally via `DockerBackend` (with the exact same `crabd` wire protocol used by future microVM backends).
 
 ### Deliverables
 1. **`sandcrab-protocol`**:
