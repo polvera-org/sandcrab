@@ -5,7 +5,7 @@ Sandcrab's 16 tools, running inside one ephemeral sandbox per session, on persis
 workspaces that survive across sessions. It is the V1 test harness. It drives the SDK the
 way a real agent product would. Crate: [`crates/sandcrab-agent`](../crates/sandcrab-agent/README.md).
 
-Backends: **DockerDev only** in V1 (`--backend docker --allow-insecure`). `firecracker`,
+Backends: **Docker only** in V1 (`--backend docker`; `docker-dev` is accepted as an alias). `firecracker`,
 `cloud-hypervisor` and `libkrun` are rejected with "not available in crabagent yet".
 
 ## Setup
@@ -35,19 +35,19 @@ in the environment or `.env` overrides the API endpoint.
 
 ```sh
 # Interactive REPL on a persistent workspace
-crabagent -w myproj --backend docker --allow-insecure
+crabagent -w myproj --backend docker
 
 # One-shot task (exit 0 = done, 1 = not done, 130 = Ctrl-C)
-crabagent -w myproj --backend docker --allow-insecure -p "add a footer with a GitHub link"
-echo "run the tests and fix failures" | crabagent -w myproj --backend docker --allow-insecure -p -
+crabagent -w myproj --backend docker -p "add a footer with a GitHub link"
+echo "run the tests and fix failures" | crabagent -w myproj --backend docker -p -
 
 # The live-check run: Vite site, read-only kit from the repo, a published dev port
 crabagent --workspace landing --template ts-dev \
   --mount-host docs/site:/kit:ro --network unrestricted --port 5173 \
-  --backend docker --allow-insecure
+  --backend docker
 ```
 
-`SANDCRAB_BACKEND=docker` and `SANDCRAB_ALLOW_INSECURE=1` can replace the two flags.
+`SANDCRAB_BACKEND=docker` can replace the flag.
 
 ### REPL vs `-p`
 
@@ -70,7 +70,7 @@ told the sandbox stays up and to leave its server running. Default `0` (destroy 
 The hold is skipped when the run was interrupted or the sandbox was lost.
 
 ```sh
-crabagent -w landing --port 5173 --network unrestricted --backend docker --allow-insecure \
+crabagent -w landing --port 5173 --network unrestricted --backend docker \
   -p "start the dev server on 5173" --keep-alive 600
 ```
 
@@ -87,7 +87,7 @@ crabagent -w landing --port 5173 --network unrestricted --backend docker --allow
 | `--port <n>` | none | Publish a guest port on host `127.0.0.1:<random>`. Repeatable |
 | `-e, --env KEY=VALUE` | none | Sandbox environment variable. Repeatable |
 | `--backend docker` | none (required) | Also `SANDCRAB_BACKEND` |
-| `--allow-insecure` | off | Required for docker. Also `SANDCRAB_ALLOW_INSECURE=1` |
+| `--allow-insecure` | off | **Deprecated no-op**, hidden from `--help`: prints a warning, no other effect. Same for `SANDCRAB_ALLOW_INSECURE` |
 | `--state-dir <dir>` | `$SANDCRAB_HOME`, else `~/.sandcrab` | State root |
 | `--templates-dir <dir>` | `./templates`, then `<state root>/templates` | Repeatable, first wins |
 | `--crabd <path>` | `$SANDCRAB_CRABD`, else `target/<arch>-unknown-linux-musl/release/crabd` | Static `crabd` |
@@ -152,9 +152,9 @@ told to keep `.cache` out of git and out of build output.
 
 Other sandbox facts the system prompt states:
 
-- `/tmp` may be `noexec` (it is on DockerDev): binaries and shared libraries cannot run
+- `/tmp` may be `noexec` (it is on Docker): binaries and shared libraries cannot run
   from it. Use `$HOME` or the workspace (e.g. `export TMPDIR=$HOME/.tmp`).
-- Core dumps are disabled on DockerDev (`ulimit -c` is 0), so crashing processes do not
+- Core dumps are disabled on Docker (`ulimit -c` is 0), so crashing processes do not
   leave `core.*` files in the workspace.
 
 ## Images
@@ -211,7 +211,7 @@ treat them as sensitive and scan before sharing.
 
 ## What the live check found
 
-From [bench/live-check.md](bench/live-check.md) (DockerDev on a 2-vCPU VPS, model
+From [bench/live-check.md](bench/live-check.md) (Docker on a 2-vCPU VPS, model
 `claude-sonnet-5-5`, three one-shot sessions building [the landing page](site/landing/index.html)):
 
 - **Cost and time:** 36m36s, 170 model calls, 188 tool calls, **$4.51** total. Prompt
@@ -233,5 +233,5 @@ From [bench/live-check.md](bench/live-check.md) (DockerDev on a 2-vCPU VPS, mode
 
 ```sh
 cargo test -p sandcrab-agent                                  # unit tests + fake LLM on core's fake backend
-cargo test -p sandcrab-agent --test docker_e2e -- --ignored   # fake LLM against a real DockerDev sandbox
+cargo test -p sandcrab-agent --test docker_e2e -- --ignored   # fake LLM against a real Docker sandbox
 ```

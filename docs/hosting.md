@@ -1,9 +1,11 @@
-# Host setup: Docker dev host and KVM host
+# Host setup: Docker host and KVM host
 
 Two kinds of Linux host run Sandcrab V1:
 
-1. A **dev host** for the DockerDev backend: any Linux machine or VPS with Docker. Not a
-   security boundary: dev / CI only.
+1. A **Docker host** for the Docker backend: any Linux machine or VPS with Docker.
+   Officially supported and hardened, but containers share the host kernel
+   (`hardware_isolated = false`, `multi_tenant_safe = false`): use it for your own agents
+   and trusted code. For hostile multi-tenant code, use Firecracker.
 2. A **KVM host** for the Firecracker backend: bare metal, or a VM with nested
    virtualization, with a usable `/dev/kvm`.
 
@@ -14,7 +16,7 @@ account that runs Sandcrab, `<host>` the machine.
 > first. V1 moved the workspace lease lock files to `<state root>/locks/`, so a process
 > running the old build and one running the new build would not see each other's leases.
 
-## 1. Dev host (DockerDev)
+## 1. Docker host
 
 ### Packages
 
@@ -33,8 +35,8 @@ On a small host, `CARGO_BUILD_JOBS=2` keeps builds from starving everything else
 ### The `docker` group is root-equivalent
 
 Any member of the `docker` group can start a privileged container that mounts `/`, so it
-is root on the host. Sandcrab's DockerDev backend needs that access. Only give it to
-accounts you would give `sudo`, and don't use a shared multi-user box as a DockerDev host
+is root on the host. Sandcrab's Docker backend needs that access. Only give it to
+accounts you would give `sudo`, and don't use a shared multi-user box as a Docker host
 for untrusted users. Rootless Docker is not tested with Sandcrab.
 
 ### Docker daemon hardening
@@ -92,12 +94,13 @@ cargo build --release -p sandcrab-cli
 target/release/sandcrab doctor
 ```
 
-What DockerDev does per sandbox: `cap_drop ALL`, `no-new-privileges`, private IPC, docker
+What the Docker backend does per sandbox: `cap_drop ALL`, `no-new-privileges`, private IPC, docker
 init as PID 1, PID / memory (no swap) / CPU limits, a size-limited
 `nosuid,nodev,noexec` tmpfs at `/tmp`, core dumps disabled, the host user's uid:gid,
 network `none` unless `unrestricted`, ports on `127.0.0.1` only, and `crabd` bind-mounted
 read-only. Template `disk_mb` is **not** enforced (overlay2 would need xfs with pquota).
-It still shares the host kernel.
+Images must match their `sha256` pin. It still shares the host kernel, so it is not
+hardware isolation.
 
 ## 2. KVM host (Firecracker)
 
@@ -217,7 +220,7 @@ Sandcrab user can edit would be a privilege escalation.
 
 There is no egress allowlist in V1. `egress_restricted` policies are refused at spawn time
 (Phase 3 adds a proxy). Published ports (`--port`) are not implemented on Firecracker in V1
-(`UNIMPLEMENTED`); use DockerDev for previews.
+(`UNIMPLEMENTED`); use Docker for previews.
 
 ### Run
 

@@ -2,7 +2,7 @@
 
 Protocol version **`0.1`** (`sandcrab_protocol::PROTOCOL_VERSION`). This page describes the
 wire contract between a host (`sandcrab-core`, the SDK, the CLI) and `crabd`, the guest
-daemon inside every sandbox. Every backend speaks it, so DockerDev and Firecracker behave
+daemon inside every sandbox. Every backend speaks it, so Docker and Firecracker behave
 the same way.
 
 Source of truth: [`crates/sandcrab-protocol/src/`](../crates/sandcrab-protocol/src/) for
@@ -336,7 +336,7 @@ The same frames run over every transport.
 
 | Transport | Used by | Details |
 | --- | --- | --- |
-| Unix socket | DockerDev | `crabd serve --unix /run/sandcrab/crabd.sock`. The directory is a per-sandbox host directory bind-mounted into the container; the socket is chmod 0660 and `crabd` runs as the host user's uid. A stale socket is replaced on start. |
+| Unix socket | Docker | `crabd serve --unix /run/sandcrab/crabd.sock`. The directory is a per-sandbox host directory bind-mounted into the container; the socket is chmod 0660 and `crabd` runs as the host user's uid. A stale socket is replaced on start. |
 | TCP | local testing | `crabd serve --tcp 127.0.0.1:5000`. **Unauthenticated:** bind to loopback or a private network only. |
 | vsock | Firecracker | `crabd serve --vsock 1024` (any CID). The host side uses Firecracker's vsock-over-UDS: connect to the VM's vsock Unix socket, write `CONNECT <port>\n`, read one line `OK <host_port>\n`; after that the stream carries frames. Any other reply, or EOF (no guest listener yet), means retry. |
 

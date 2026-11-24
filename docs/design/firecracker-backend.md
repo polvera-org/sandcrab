@@ -10,7 +10,7 @@ related: [docs/decisions/0001-phase-1-decisions.md, docs/plans/phase-1-mvp.bench
 # Firecracker backend design (V1)
 
 The goal is a hardware-isolated `RuntimeBackend` that runs the **same `crabd` and the same protocol** as
-DockerDev. It must be honest about its capabilities and cheap enough to benchmark fairly against Docker on
+the Docker backend. It must be honest about its capabilities and cheap enough to benchmark fairly against Docker on
 `kvm-homelab`. Upstream references are paths in `firecracker-microvm/firecracker` (`main`, release
 **v1.18.0**, 2026-11-09).
 

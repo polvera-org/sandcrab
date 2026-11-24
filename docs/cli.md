@@ -24,15 +24,17 @@ Accepted by every command.
 | --- | --- | --- |
 | `--state-dir <DIR>` | `$SANDCRAB_HOME`, else `~/.sandcrab` | State root: workspace registry, sandbox sockets, caches |
 | `--templates-dir <DIR>` | `./templates`, then `<state root>/templates` | Repeatable; first match wins |
-| `--backend <docker\|firecracker>` | none (`$SANDCRAB_BACKEND`) | Runtime backend. **Explicit, no fallback.** `firecracker` exists only in Linux builds |
-| `--allow-insecure` | off (`SANDCRAB_ALLOW_INSECURE=1`) | Acknowledge that `docker` shares the host kernel. Required for `--backend docker` |
+| `--backend <docker\|firecracker>` | none (`$SANDCRAB_BACKEND`) | Runtime backend. **Explicit, no fallback.** `firecracker` exists only in Linux builds. The pre-rename name `docker-dev` is still accepted as an alias of `docker` |
 | `--allow-unpinned` | off | `docker` only: run template images that have no `sha256` pin in `sandcrab.toml` (refused by default) |
 | `--crabd <PATH>` | `$SANDCRAB_CRABD`, else `target/<arch>-unknown-linux-musl/release/crabd` | Host path of the static musl `crabd` that gets injected |
 | `--json` | off | Machine-readable JSON output |
 | `-v`, `-vv` | off | Lifecycle timings to stderr (`-vv`: debug logs) |
 | `-h`, `-V` | | Help, version |
 
-`SANDCRAB_ALLOW_INSECURE` accepts `1`, `true`, `yes`, `on` (case-insensitive). A backend
+**Deprecated:** `--allow-insecure` and `SANDCRAB_ALLOW_INSECURE` are no-ops kept for one
+release. They are hidden from `--help`, still accepted, and print a deprecation warning.
+The Docker backend is officially supported and needs no opt-in; it shares the host kernel
+and reports `hardware_isolated = false`, `multi_tenant_safe = false`. A backend
 that cannot start (for example no `/dev/kvm`) is an error. `sandcrab` never falls back to
 another backend.
 
@@ -103,7 +105,7 @@ builds the rootfs on a cache miss.
 ## `run`
 
 ```sh
-sandcrab --backend docker --allow-insecure run [OPTIONS] -- <COMMAND>...
+sandcrab --backend docker run [OPTIONS] -- <COMMAND>...
 ```
 
 Spawn a sandbox, run a command with `bash`, print stdout / stderr, destroy the sandbox. One
@@ -124,16 +126,16 @@ argv (`-- bash -c 'exit 3'`). Exits with the command's exit code.
 Examples:
 
 ```sh
-sandcrab --backend docker --allow-insecure run -t python-dev -- 'python3 --version'
-sandcrab --backend docker --allow-insecure run -t ts-dev -m site:/workspace -p 5173 --keep \
+sandcrab --backend docker run -t python-dev -- 'python3 --version'
+sandcrab --backend docker run -t ts-dev -m site:/workspace -p 5173 --keep \
   --network unrestricted -- 'npm i && npx vite --host 0.0.0.0 --port 5173'
-sandcrab -v --backend docker --allow-insecure run -- true     # prints spawn→ready and teardown timings
+sandcrab -v --backend docker run -- true     # prints spawn→ready and teardown timings
 ```
 
 ## `tool`
 
 ```sh
-sandcrab --backend docker --allow-insecure tool [OPTIONS] <NAME> [PARAMS]
+sandcrab --backend docker tool [OPTIONS] <NAME> [PARAMS]
 ```
 
 Spawn a sandbox, make one tool call, print the JSON result, destroy the sandbox. `PARAMS`
@@ -141,8 +143,8 @@ is a JSON object (`-` reads stdin; default `{}`). Same sandbox options as `run`,
 `--keep`. Exits 1 if the tool returned an error.
 
 ```sh
-sandcrab --backend docker --allow-insecure tool -m site:/workspace grep '{"pattern":"TODO","glob":"*.ts"}'
-echo '{"path":"README.md","limit":20}' | sandcrab --backend docker --allow-insecure tool -m site:/workspace file_read -
+sandcrab --backend docker tool -m site:/workspace grep '{"pattern":"TODO","glob":"*.ts"}'
+echo '{"path":"README.md","limit":20}' | sandcrab --backend docker tool -m site:/workspace file_read -
 ```
 
 ## `tools schema`
@@ -161,7 +163,7 @@ Prints the LLM tool definitions: name, description, input and output JSON Schema
 | --- | --- | --- |
 | `SANDCRAB_HOME` | CLI, SDK, crabagent | State root (default `~/.sandcrab`) |
 | `SANDCRAB_BACKEND` | CLI, crabagent | `docker` or `firecracker` |
-| `SANDCRAB_ALLOW_INSECURE` | CLI, crabagent | `1` acknowledges the DockerDev shared kernel |
+| `SANDCRAB_ALLOW_INSECURE` | CLI, crabagent | **Deprecated no-op**: prints a warning, no other effect |
 | `SANDCRAB_CRABD` | CLI, SDK, crabagent, bench | Path of the static `crabd` |
 | `RUST_LOG` | `crabd` | Log filter (default `info`) |
 | `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, `CRABAGENT_MODEL`, `CRABAGENT_EFFORT`, `CRABAGENT_SSH_HOST` | crabagent | See [crabagent.md](crabagent.md) |
@@ -174,7 +176,7 @@ Prints the LLM tool definitions: name, description, input and output JSON Schema
   workspaces/<id>/data/          # managed workspace contents
   workspaces/<id>/...            # per-workspace backend state (Firecracker image cache, staging)
   locks/<id>.{mount,rw}.lock     # lease flocks: rw exclusive, ro shared
-  run/                           # per-sandbox socket dirs (DockerDev), run/fc/ (Firecracker)
+  run/                           # per-sandbox socket dirs (Docker), run/fc/ (Firecracker)
   cache/                         # kernel/, firecracker/, rootfs/ (Firecracker artifacts)
   recovery/                      # Firecracker drives whose sync-back failed
   transcripts/                   # crabagent transcripts
