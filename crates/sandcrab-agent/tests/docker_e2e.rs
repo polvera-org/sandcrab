@@ -29,13 +29,7 @@ fn crabd_path() -> PathBuf {
     if let Some(p) = std::env::var_os("SANDCRAB_CRABD").filter(|v| !v.is_empty()) {
         return PathBuf::from(p);
     }
-    let target = std::env::var_os("CARGO_TARGET_DIR")
-        .filter(|v| !v.is_empty())
-        .map_or_else(|| repo_root().join("target"), |d| repo_root().join(d));
-    target.join(format!(
-        "{}-unknown-linux-musl/release/crabd",
-        std::env::consts::ARCH
-    ))
+    sandcrab_core::crabd_build_path(&repo_root())
 }
 
 fn sandcrab(state: &std::path::Path) -> Sandcrab {

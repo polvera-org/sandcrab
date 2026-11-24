@@ -51,18 +51,14 @@ pub fn templates(g: &Global) -> anyhow::Result<TemplateClient> {
     Ok(TemplateClient::load(&templates_dirs(g)?)?)
 }
 
-/// `--crabd`, else `$SANDCRAB_CRABD`, else `target/<arch>-unknown-linux-musl/release/crabd`.
+/// `--crabd`, else `$SANDCRAB_CRABD`, else `<target dir>/<arch>-unknown-linux-musl/release/crabd`
+/// (target dir: `$CARGO_TARGET_DIR`, else `target/`).
 pub fn crabd_path(g: &Global) -> PathBuf {
     g.crabd.clone().unwrap_or_else(|| {
         std::env::var_os("SANDCRAB_CRABD")
             .filter(|v| !v.is_empty())
             .map_or_else(
-                || {
-                    PathBuf::from(format!(
-                        "target/{}-unknown-linux-musl/release/crabd",
-                        std::env::consts::ARCH
-                    ))
-                },
+                || sandcrab_sdk::core::crabd_build_path(std::path::Path::new("")),
                 PathBuf::from,
             )
     })

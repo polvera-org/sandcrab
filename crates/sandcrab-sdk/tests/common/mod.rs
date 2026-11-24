@@ -5,7 +5,8 @@
 //!
 //! - `docker` (default): the Docker backend. Needs a Docker daemon,
 //!   the template images pinned on this host (`templates/build.sh`) and a static `crabd` (`$SANDCRAB_CRABD`,
-//!   else `target/<arch>-unknown-linux-musl/release/crabd`, built on first use).
+//!   else `<target dir>/<arch>-unknown-linux-musl/release/crabd` with the target dir
+//!   `$CARGO_TARGET_DIR` or `target/`, built on first use).
 //! - `firecracker`: the Firecracker backend (Linux + KVM). Needs `--features firecracker`
 //!   (otherwise every test prints a SKIP line and passes), a usable `/dev/kvm`, the pinned
 //!   artifacts (fetched on first use into `$SANDCRAB_HOME/cache`, shared with the CLI) and the
@@ -85,10 +86,7 @@ pub fn crabd() -> &'static Path {
         if let Some(p) = std::env::var_os("SANDCRAB_CRABD").filter(|v| !v.is_empty()) {
             return PathBuf::from(p);
         }
-        let default = repo_root().join(format!(
-            "target/{}-unknown-linux-musl/release/crabd",
-            std::env::consts::ARCH
-        ));
+        let default = sandcrab_sdk::core::crabd_build_path(&repo_root());
         if default.is_file() {
             return default;
         }

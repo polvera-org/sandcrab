@@ -2,7 +2,7 @@
 //! image, e2fsprogs (`debugfs`, `e2fsck`) and a crabd binary in `SANDCRAB_TEST_CRABD`.
 //!
 //! ```sh
-//! SANDCRAB_TEST_CRABD=target/x86_64-unknown-linux-musl/release/crabd \
+//! SANDCRAB_TEST_CRABD=${CARGO_TARGET_DIR:-target}/x86_64-unknown-linux-musl/release/crabd \
 //!   cargo test -p sandcrab-rootfs -- --ignored
 //! ```
 

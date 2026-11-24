@@ -26,7 +26,7 @@ Accepted by every command.
 | `--templates-dir <DIR>` | `./templates`, then `<state root>/templates` | Repeatable; first match wins |
 | `--backend <docker\|firecracker>` | none (`$SANDCRAB_BACKEND`) | Runtime backend. **Explicit, no fallback.** `firecracker` exists only in Linux builds. The pre-rename name `docker-dev` is still accepted as an alias of `docker` |
 | `--allow-unpinned` | off | `docker` only: run template images that have no host-local pin (refused by default; see [template-pins.md](template-pins.md)) |
-| `--crabd <PATH>` | `$SANDCRAB_CRABD`, else `target/<arch>-unknown-linux-musl/release/crabd` | Host path of the static musl `crabd` that gets injected |
+| `--crabd <PATH>` | `$SANDCRAB_CRABD`, else `<target dir>/<arch>-unknown-linux-musl/release/crabd` (target dir: `$CARGO_TARGET_DIR`, else `target/`) | Host path of the static musl `crabd` that gets injected |
 | `--json` | off | Machine-readable JSON output |
 | `-v`, `-vv` | off | Lifecycle timings to stderr (`-vv`: debug logs) |
 | `-h`, `-V` | | Help, version |

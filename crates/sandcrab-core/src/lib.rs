@@ -62,3 +62,19 @@ pub use workspace::{
     MountMode, RootIdentity, SafeRelPath, Workspace, WorkspaceBacking, WorkspaceId, WorkspaceMount,
     WorkspaceRef, WorkspaceState, validate_workspace_name,
 };
+
+/// Where `scripts/build-crabd.sh` puts the static `crabd` for the host arch:
+/// `<target dir>/<arch>-unknown-linux-musl/release/crabd`. The target dir is
+/// `$CARGO_TARGET_DIR` when set (a relative value is taken relative to `base`, as cargo takes
+/// it relative to its working directory), else `<base>/target`. Pass `Path::new("")` for a
+/// path relative to the current directory.
+#[must_use]
+pub fn crabd_build_path(base: &std::path::Path) -> std::path::PathBuf {
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .filter(|v| !v.is_empty())
+        .map_or_else(|| base.join("target"), |d| base.join(d));
+    target
+        .join(format!("{}-unknown-linux-musl", std::env::consts::ARCH))
+        .join("release")
+        .join("crabd")
+}

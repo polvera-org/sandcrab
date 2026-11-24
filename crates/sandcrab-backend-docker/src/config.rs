@@ -41,7 +41,7 @@ pub struct DockerConfig {
     pub docker_host: Option<String>,
     /// Host path of the **static** (musl) `crabd` binary, bind-mounted read-only into every
     /// container. Default: `$SANDCRAB_CRABD`, else
-    /// `target/<arch>-unknown-linux-musl/release/crabd` (built by `scripts/build-crabd.sh`).
+    /// `<target dir>/<arch>-unknown-linux-musl/release/crabd` (built by `scripts/build-crabd.sh`).
     pub crabd_path: PathBuf,
     /// Host directory holding one `0700` socket directory per sandbox. Default:
     /// `<state root>/run` (`$SANDCRAB_HOME/run`, else `~/.sandcrab/run`).
@@ -75,18 +75,14 @@ impl DockerConfig {
     }
 }
 
-/// `$SANDCRAB_CRABD`, else `target/<host arch>-unknown-linux-musl/release/crabd`.
+/// `$SANDCRAB_CRABD`, else `<target dir>/<host arch>-unknown-linux-musl/release/crabd` (target
+/// dir: `$CARGO_TARGET_DIR`, else `target/`; see [`sandcrab_core::crabd_build_path`]).
 #[must_use]
 pub fn default_crabd_path() -> PathBuf {
     std::env::var_os(CRABD_ENV)
         .filter(|v| !v.is_empty())
         .map_or_else(
-            || {
-                PathBuf::from(format!(
-                    "target/{}-unknown-linux-musl/release/crabd",
-                    std::env::consts::ARCH
-                ))
-            },
+            || sandcrab_core::crabd_build_path(std::path::Path::new("")),
             PathBuf::from,
         )
 }

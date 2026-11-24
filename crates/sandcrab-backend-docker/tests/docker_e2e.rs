@@ -46,10 +46,7 @@ fn crabd() -> &'static Path {
         if let Some(p) = std::env::var_os(CRABD_ENV).filter(|v| !v.is_empty()) {
             return PathBuf::from(p);
         }
-        let default = root().join(format!(
-            "target/{}-unknown-linux-musl/release/crabd",
-            std::env::consts::ARCH
-        ));
+        let default = sandcrab_core::crabd_build_path(&root());
         if default.is_file() {
             return default;
         }
