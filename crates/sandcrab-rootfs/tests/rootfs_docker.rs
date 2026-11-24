@@ -9,7 +9,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use sandcrab_rootfs::{ROOTFS_LABEL, RootfsBuilder, RootfsRequest};
+use sandcrab_rootfs::{Arch, ROOTFS_LABEL, RootfsBuilder, RootfsRequest};
 
 fn debugfs(img: &std::path::Path, req: &str) -> String {
     let out = Command::new("debugfs")
@@ -33,9 +33,11 @@ fn builds_base_rootfs() {
         expected_image_id: None,
         template: Some("base".into()),
         crabd,
+        arch: Arch::host().unwrap(),
     };
     let built = builder.build(&req).unwrap();
     assert!(!built.cache_hit);
+    assert_eq!(built.manifest.arch, req.arch);
     let img = &built.image_path;
 
     let fsck = Command::new("e2fsck").arg("-fn").arg(img).output().unwrap();

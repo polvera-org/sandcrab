@@ -29,6 +29,12 @@ pub enum Error {
         expected: String,
         actual: String,
     },
+    #[error("{what} is built for {actual}, but the rootfs targets {expected}")]
+    ArchMismatch {
+        what: String,
+        expected: crate::Arch,
+        actual: crate::Arch,
+    },
     #[error("unsupported: {0}")]
     Unsupported(String),
     #[error("no usable mke2fs strategy: {0}")]

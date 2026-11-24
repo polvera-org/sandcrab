@@ -5,7 +5,8 @@
 //! ```
 //!
 //! Output is cached at `<cache>/rootfs/<key>/{rootfs.ext4, manifest.json}` with
-//! `key = sha256(image_id ‖ crabd_sha256 ‖ PIPELINE_VERSION)`. Builds happen in a temp dir next to the
+//! `key = sha256(image_id ‖ arch ‖ crabd_sha256 ‖ PIPELINE_VERSION)`. The arch is explicit because a
+//! multi-arch image has one index digest for every platform. Builds happen in a temp dir next to the
 //! cache entry and are published with an atomic `rename`, so a concurrent reader never sees a partial
 //! image. Per-sandbox writable state goes on a sparse scratch drive ([`create_scratch`]) that guest
 //! init overlays on top of the read-only base.
@@ -19,13 +20,15 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::arch::Arch;
 use crate::augment;
 use crate::error::{Error, IoCtx, Result};
 use crate::hash::{sha256_bytes, sha256_file};
 use crate::mkfs::{self, MkfsStrategy};
 
-/// Bump whenever the produced image changes for the same inputs (augmentation, mkfs flags, layout).
-pub const PIPELINE_VERSION: u32 = 1;
+/// Bump whenever the produced image changes for the same inputs (augmentation, mkfs flags, layout)
+/// or the key derivation changes. 2: arch in the key and the manifest.
+pub const PIPELINE_VERSION: u32 = 2;
 /// ext4 label of the shared read-only base (design doc §2.3).
 pub const ROOTFS_LABEL: &str = "sc-root";
 /// ext4 label of the per-sandbox scratch drive (guest init's fallback drive lookup).
@@ -39,15 +42,15 @@ const MIB: u64 = 1024 * 1024;
 /// Namespace for the deterministic filesystem UUID (uuid5 over the cache key).
 const UUID_NS: uuid::Uuid = uuid::Uuid::from_u128(0x5a1d_c4ab_0f00_4c0d_9e2b_6b5f_1d3a_7c01);
 
-/// `sha256(image_id ‖ crabd_sha256 ‖ pipeline_version)`, NUL-separated, hex.
+/// `sha256(image_id ‖ arch ‖ crabd_sha256 ‖ pipeline_version)`, NUL-separated, hex.
 ///
 /// Digests are normalised (optional `sha256:` prefix stripped, lowercased) so `docker inspect` ids and
 /// bare hex compare equal.
-pub fn cache_key(image_id: &str, crabd_sha256: &str, pipeline_version: u32) -> String {
+pub fn cache_key(image_id: &str, arch: Arch, crabd_sha256: &str, pipeline_version: u32) -> String {
     let norm = |s: &str| s.strip_prefix("sha256:").unwrap_or(s).to_ascii_lowercase();
     sha256_bytes(
         format!(
-            "sandcrab-rootfs\0{}\0{}\0{pipeline_version}",
+            "sandcrab-rootfs\0{}\0{arch}\0{}\0{pipeline_version}",
             norm(image_id),
             norm(crabd_sha256)
         )
@@ -83,6 +86,9 @@ pub struct RootfsManifest {
     pub image: String,
     /// `docker image inspect .Id` (the template's pinned `sha256`).
     pub image_id: String,
+    /// Guest platform. Absent in pipeline-v1 manifests, which were always host-arch builds.
+    #[serde(default = "legacy_arch")]
+    pub arch: Arch,
     pub crabd_sha256: String,
     pub pipeline_version: u32,
     /// Logical size of `rootfs.ext4`.
@@ -98,6 +104,10 @@ pub struct RootfsManifest {
     pub mkfs: MkfsStrategy,
     pub rootfs_sha256: String,
     pub created_at: DateTime<Utc>,
+}
+
+fn legacy_arch() -> Arch {
+    Arch::HOST.unwrap_or(Arch::Amd64)
 }
 
 impl RootfsManifest {
@@ -121,8 +131,10 @@ pub struct RootfsRequest {
     pub expected_image_id: Option<String>,
     /// Template name, recorded in the manifest.
     pub template: Option<String>,
-    /// Static musl crabd binary to inject.
+    /// Static musl crabd binary to inject; must be an ELF for `arch`.
     pub crabd: PathBuf,
+    /// Guest platform (`docker create --platform linux/<arch>`); usually [`Arch::host`].
+    pub arch: Arch,
 }
 
 /// A ready rootfs.
@@ -194,6 +206,14 @@ impl RootfsBuilder {
     /// Build (or reuse) the rootfs for `req`.
     pub fn build(&self, req: &RootfsRequest) -> Result<BuiltRootfs> {
         let t0 = Instant::now();
+        let crabd_arch = Arch::of_elf(&req.crabd)?;
+        if crabd_arch != req.arch {
+            return Err(Error::ArchMismatch {
+                what: format!("crabd {}", req.crabd.display()),
+                expected: req.arch,
+                actual: crabd_arch,
+            });
+        }
         let image_id = docker_image_id(&req.image)?;
         if let Some(exp) = &req.expected_image_id {
             let n = |s: &str| s.strip_prefix("sha256:").unwrap_or(s).to_ascii_lowercase();
@@ -206,7 +226,7 @@ impl RootfsBuilder {
             }
         }
         let crabd_sha = sha256_file(&req.crabd)?;
-        let key = cache_key(&image_id, &crabd_sha, PIPELINE_VERSION);
+        let key = cache_key(&image_id, req.arch, &crabd_sha, PIPELINE_VERSION);
 
         if let Some((dir, manifest)) = self.lookup(&key)? {
             return Ok(BuiltRootfs {
@@ -273,7 +293,7 @@ impl RootfsBuilder {
             let crabd = File::open(&req.crabd).at(&req.crabd)?;
             let crabd_len = crabd.metadata().at(&req.crabd)?.len();
             let out = BufWriter::new(File::create(&tar_path).at(&tar_path)?);
-            let container = ExportContainer::create(&req.image)?;
+            let container = ExportContainer::create(&req.image, req.arch)?;
             let mut child = Command::new("docker")
                 .args(["export", &container.id])
                 .stdin(Stdio::null())
@@ -343,6 +363,7 @@ impl RootfsBuilder {
             template: req.template.clone(),
             image: req.image.clone(),
             image_id: image_id.to_string(),
+            arch: req.arch,
             crabd_sha256: crabd_sha.to_string(),
             pipeline_version: PIPELINE_VERSION,
             size_bytes,
@@ -386,10 +407,14 @@ struct ExportContainer {
 }
 
 impl ExportContainer {
-    fn create(image: &str) -> Result<Self> {
-        // Images carry no CMD (see templates/base); the command is never run.
+    fn create(image: &str, arch: Arch) -> Result<Self> {
+        // Images carry no CMD (see templates/base); the command is never run. `--platform` selects
+        // the arch from a multi-arch image and fails (rather than silently exporting the wrong
+        // arch) when the local image only has another platform.
         let id = mkfs::run(Command::new("docker").args([
             "create",
+            "--platform",
+            arch.platform(),
             "--network",
             "none",
             "--label",
@@ -461,18 +486,45 @@ mod tests {
 
     #[test]
     fn cache_key_is_stable_and_normalised() {
-        let a = cache_key("sha256:ABCDEF", "0123", 1);
-        assert_eq!(a, cache_key("abcdef", "sha256:0123", 1));
+        let x86 = Arch::Amd64;
+        let a = cache_key("sha256:ABCDEF", x86, "0123", 1);
+        assert_eq!(a, cache_key("abcdef", x86, "sha256:0123", 1));
         assert_eq!(a.len(), 64);
-        assert_ne!(a, cache_key("abcdef", "0123", 2));
-        assert_ne!(a, cache_key("abcdef", "0124", 1));
+        assert_ne!(a, cache_key("abcdef", x86, "0123", 2));
+        assert_ne!(a, cache_key("abcdef", x86, "0124", 1));
+        // same (multi-arch index) image id, different arch → different entry
+        assert_ne!(a, cache_key("abcdef", Arch::Arm64, "0123", 1));
         // separator prevents ambiguous concatenations
-        assert_ne!(cache_key("ab", "c", 1), cache_key("a", "bc", 1));
+        assert_ne!(cache_key("ab", x86, "c", 1), cache_key("a", x86, "bc", 1));
         // pinned vector: changing the derivation must be a conscious PIPELINE_VERSION bump
         assert_eq!(
-            cache_key("abcdef", "0123", 1),
-            sha256_bytes(b"sandcrab-rootfs\0abcdef\x000123\x001")
+            cache_key("abcdef", Arch::Arm64, "0123", 2),
+            sha256_bytes(b"sandcrab-rootfs\0abcdef\0arm64\x000123\x002")
         );
+    }
+
+    #[test]
+    fn build_rejects_crabd_of_another_arch() {
+        let dir = tempfile::tempdir().unwrap();
+        let crabd = dir.path().join("crabd");
+        let mut h = vec![0u8; 64];
+        h[..6].copy_from_slice(b"\x7fELF\x02\x01");
+        h[18..20].copy_from_slice(&Arch::Amd64.elf_machine().to_le_bytes());
+        fs::write(&crabd, h).unwrap();
+        let req = RootfsRequest {
+            image: "sandcrab/does-not-exist:0".into(),
+            expected_image_id: None,
+            template: None,
+            crabd,
+            arch: Arch::Arm64,
+        };
+        // Checked before any docker call, so this needs no daemon.
+        match RootfsBuilder::new(dir.path()).build(&req) {
+            Err(Error::ArchMismatch {
+                expected, actual, ..
+            }) => assert_eq!((expected, actual), (Arch::Arm64, Arch::Amd64)),
+            other => panic!("expected ArchMismatch, got {other:?}"),
+        }
     }
 
     #[test]
@@ -500,10 +552,11 @@ mod tests {
     #[test]
     fn manifest_round_trip() {
         let m = RootfsManifest {
-            cache_key: cache_key("a", "b", PIPELINE_VERSION),
+            cache_key: cache_key("a", Arch::Arm64, "b", PIPELINE_VERSION),
             template: Some("base".into()),
             image: "sandcrab/base:0.1.0".into(),
             image_id: "sha256:a".into(),
+            arch: Arch::Arm64,
             crabd_sha256: "b".into(),
             pipeline_version: PIPELINE_VERSION,
             size_bytes: 128 * MIB,
@@ -522,6 +575,7 @@ mod tests {
         fs::write(&p, m.to_json()).unwrap();
         assert_eq!(RootfsManifest::load(&p).unwrap(), m);
         assert!(m.to_json().contains("\"mkfs\": \"native_tar\""));
+        assert!(m.to_json().contains("\"arch\": \"arm64\""));
     }
 
     #[test]
@@ -529,10 +583,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let b = RootfsBuilder::new(dir.path());
         assert!(b.lookup("nope").unwrap().is_none());
-        let key = cache_key("a", "b", 1);
+        let key = cache_key("a", Arch::Amd64, "b", 1);
         let entry = b.rootfs_dir().join(&key);
         fs::create_dir_all(&entry).unwrap();
         fs::write(entry.join(ROOTFS_FILE), b"1234").unwrap();
+        // A pipeline-v1 manifest (no `arch`) still loads, as a host-arch build.
         let mut m: serde_json::Value = serde_json::json!({
             "cache_key": key, "template": null, "image": "i", "image_id": "a",
             "crabd_sha256": "b", "pipeline_version": 1, "size_bytes": 4, "content_bytes": 4,
@@ -541,13 +596,13 @@ mod tests {
             "rootfs_sha256": sha256_bytes(b"1234"), "created_at": "2026-11-23T00:00:00Z"
         });
         fs::write(entry.join(MANIFEST_FILE), m.to_string()).unwrap();
-        assert!(
-            b.clone()
-                .verify_on_hit(true)
-                .lookup(&key)
-                .unwrap()
-                .is_some()
-        );
+        let (_, loaded) = b
+            .clone()
+            .verify_on_hit(true)
+            .lookup(&key)
+            .unwrap()
+            .expect("hit");
+        assert_eq!(loaded.arch, legacy_arch());
         m["size_bytes"] = 5.into();
         fs::write(entry.join(MANIFEST_FILE), m.to_string()).unwrap();
         assert!(b.lookup(&key).is_err());

@@ -20,7 +20,7 @@ use sandcrab_protocol::init::{
 use crate::api::{ApiClient, BootSource, MachineConfig, NetworkInterface};
 use crate::config::{FirecrackerConfig, RootfsSource};
 use crate::net::acquire_tap;
-use crate::rootfs::{MkfsStrategy, RootfsBuilder, RootfsRequest};
+use crate::rootfs::{Arch, MkfsStrategy, RootfsBuilder, RootfsRequest};
 use crate::rundir::{self, CgroupLeaf, RwDriveMeta, SCRATCH_FILE};
 use crate::vm::{
     BACKEND, BootPlan, FirecrackerSandbox, SyncDrive, Vm, configure_and_start, drive, fc_err,
@@ -172,6 +172,8 @@ impl FirecrackerBackend {
             expected_image_id: spec.image_sha256.clone(),
             template: Some(spec.template.name().to_owned()),
             crabd,
+            // Firecracker runs guests of the host arch only.
+            arch: Arch::host().map_err(|e| fc_err("rootfs", e))?,
         };
         let builder = RootfsBuilder::new(&self.config.cache_root);
         let built = tokio::task::spawn_blocking(move || builder.build(&req))

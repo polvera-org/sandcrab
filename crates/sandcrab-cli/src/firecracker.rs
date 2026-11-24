@@ -221,6 +221,11 @@ fn rootfs_cache(r: &mut Report, g: &Global, cache_root: &Path, crabd_sha: Option
         Ok(t) => t.list(),
         Err(e) => return r.add("fc:rootfs", Status::Warn, e.to_string()),
     };
+    // Firecracker guests are host-arch.
+    let arch = match rootfs::Arch::host() {
+        Ok(a) => a,
+        Err(e) => return r.add("fc:rootfs", Status::Warn, e.to_string()),
+    };
     let builder = RootfsBuilder::new(cache_root);
     for t in &templates {
         let name = format!("fc:rootfs:{}", t.name());
@@ -240,7 +245,7 @@ fn rootfs_cache(r: &mut Report, g: &Global, cache_root: &Path, crabd_sha: Option
             );
             continue;
         };
-        let key = rootfs::cache_key(&id, crabd_sha, PIPELINE_VERSION);
+        let key = rootfs::cache_key(&id, arch, crabd_sha, PIPELINE_VERSION);
         match builder.lookup(&key) {
             Ok(Some((dir, m))) => r.add(
                 name,
@@ -570,6 +575,8 @@ pub fn rootfs_cmd(g: &Global, cmd: RootfsCmd) -> anyhow::Result<u8> {
                 bail!("no templates found (pass --templates-dir or run from the repo root)");
             }
             let builder = RootfsBuilder::new(&c.cache_root).verify_on_hit(verify);
+            // Firecracker guests are host-arch.
+            let arch = rootfs::Arch::host()?;
             let mut out = Vec::new();
             for t in &selected {
                 let pin = t.manifest.template.sha256.clone();
@@ -591,6 +598,7 @@ pub fn rootfs_cmd(g: &Global, cmd: RootfsCmd) -> anyhow::Result<u8> {
                         expected_image_id: pin,
                         template: Some(t.name().to_owned()),
                         crabd: crabd.clone(),
+                        arch,
                     })
                     .with_context(|| {
                         format!(
@@ -609,6 +617,7 @@ pub fn rootfs_cmd(g: &Global, cmd: RootfsCmd) -> anyhow::Result<u8> {
                         "cache_hit": built.cache_hit,
                         "cache_key": m.cache_key,
                         "image_id": m.image_id,
+                        "arch": m.arch,
                         "crabd_sha256": m.crabd_sha256,
                         "rootfs_sha256": m.rootfs_sha256,
                         "size_bytes": m.size_bytes,

@@ -9,17 +9,20 @@
 //!
 //! Modules:
 //! - [`cache`] (re-exported at the root): [`RootfsBuilder`], cache keys, manifests, scratch drives.
+//! - [`arch`]: [`Arch`], the guest platform (`linux/amd64` | `linux/arm64`) a rootfs targets.
 //! - [`augment`]: streaming tar rewriter that injects `crabd` and the guest mountpoints.
 //! - [`mkfs`]: rootless `mke2fs` strategies (native tar, helper container, fakeroot).
 //! - [`hash`]: SHA-256 helpers.
 //! - [`error`]: the [`Error`] type, shared with the backends' artifact plumbing.
 
+pub mod arch;
 pub mod augment;
 pub mod cache;
 pub mod error;
 pub mod hash;
 pub mod mkfs;
 
+pub use arch::Arch;
 pub use cache::*;
 pub use error::{Error, IoCtx, Result};
 pub use mkfs::MkfsStrategy;
