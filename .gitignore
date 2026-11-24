@@ -16,3 +16,7 @@
 *.swo
 .env
 .env.*
+
+# local agent worktrees and caches
+.claude/worktrees/
+__pycache__/

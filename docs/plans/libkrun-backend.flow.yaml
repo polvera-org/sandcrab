@@ -41,7 +41,7 @@ steps:
     title: "protocol::init GuestMount → MountSource {Block (serde default), VirtioFs{tag}}; core TemplateManifest sha256_by_arch; update FC control.rs call sites"
     depends_on: [lk-approve]
     artifacts: [crates/sandcrab-protocol/src/init.rs, crates/sandcrab-core/src/template.rs, crates/sandcrab-backend-firecracker/src/control.rs]
-    status: doing
+    status: done
 
   # ---- frontier 2
   - id: lk-scaffold
@@ -58,7 +58,7 @@ steps:
     title: "crabd init: EBUSY-tolerant early mounts under init.krun, virtio-fs mount planning (MS_RDONLY for ro), unit tests"
     depends_on: [protocol-mounts]
     artifacts: [crates/sandcrab-guest/src/init/]
-    status: todo
+    status: doing
 
   - id: templates-arm64
     phase: implement
@@ -66,7 +66,7 @@ steps:
     title: "Templates buildable for linux/arm64: index digests / per-arch shas in Dockerfiles, build.sh --platform, sha256_by_arch pins"
     depends_on: [protocol-mounts]
     artifacts: [templates/]
-    status: todo
+    status: doing
 
   # ---- frontier 3 (parallel, disjoint files in the new crate)
   - id: lk-helper
