@@ -82,7 +82,7 @@ settle, density capped at 3 with 1 rep, and an 8 MiB touch.
 |---|---|---|
 | `lifecycle` (+ `calls`) | `base`: {warm, cold} × {W0, W1, W2}. `ts-dev`: warm × {W0, W2} | `spawn_ready`, `first_call`, `ws_attach`, `ws_sync_back` (W1/W2), `call.bash_echo`, `call.file_rw_1m`, `call.grep` (W1/W2), `teardown`, `cpu.lifecycle_s`, `disk.per_sandbox`, plus `phases` (backend timing marks) |
 | `agent-turn` | per template × cache, W1 | `agent_turn`: spawn → the 10-call script in spec §1.1 → teardown verified |
-| `resources` | per template, warm, W1 | `mem.host_pss_idle`/`_post`, `mem.cgroup_*` (current/anon/file/kernel/peak), `mem.shim_pss`, `mem.guest_available[_idle]`, `cpu.idle_60s`, `disk.per_sandbox`, `disk.shared` |
+| `resources` | per template, warm, W1 | `mem.host_pss_idle`/`_post`, `mem.cgroup_*` (current/anon/file/kernel/peak), `mem.shim_pss`, `mem.guest_available[_idle]`, `cpu.idle_60s`, `disk.per_sandbox`, `disk.shared`; VMM backends add `mem.vmm_guest_pss_*`, `mem.vmm_overhead[_post]` and `mem.vmm_rss_*` (libkrun: `mem.helper_rss_*`) |
 | `density` | per backend × {idle, touched} × reps | `max_n`, `stop_reason` (`budget`/`failure`/`cap`/`floor`), and per step: spawn latency, host `MemAvailable`, ΣPSS, Σcgroup memory |
 | `drift` | `base` warm W0 at start and end | `drift_check` (flagged if the p50 moves by more than 10%) |
 
@@ -139,7 +139,22 @@ first:
   as root to get PSS. `dockerd`/`containerd` RSS is reported once per run under
   `shared_overhead`.
 - **`cpu.lifecycle_s`** = cgroup `usage_usec` + shim ticks + the `dockerd` tick delta, read
-  just before `destroy()`. CPU spent during teardown is not included.
+  just before `destroy()`. CPU spent during teardown is not included. For a VMM without a
+  cgroup leaf it is the VMM process's `utime + stime` (`/proc/<pid>/stat`, all threads).
+- **VMM memory (Firecracker, libkrun on Linux).** The VMM pid comes from the sandbox's
+  `meta.json` in the backend run dir. Without a cgroup leaf (Firecracker unless
+  `SANDCRAB_BENCH_FC_CGROUP` names a delegated cgroup v2 parent; libkrun unless
+  `SANDCRAB_BENCH_KRUN_CGROUP`), the VMM process itself is sampled from `/proc/<pid>/smaps`:
+  - `mem.host_pss_*` = whole VMM **PSS**, including the guest RAM touched so far (the spec's
+    `host_pss_total` for a microVM). Guest pages stay resident once touched (no balloon).
+  - `mem.vmm_guest_pss_*` = PSS of the guest-RAM mapping (the anonymous mapping(s) whose size
+    equals the template's `memory_mb`; if none match exactly the split is `not_measured`).
+  - `mem.vmm_overhead` (idle) / `mem.vmm_overhead_post` = PSS of every other mapping: the
+    VMM's own cost, **excluding** guest RAM.
+  - `mem.vmm_rss_*` (libkrun: `mem.helper_rss_*`) = whole VMM **RSS**, including guest RAM;
+    shared pages (binary, libraries) count fully.
+  - `cpu.idle_60s` = VMM `utime + stime` delta over the idle window (clock-tick resolution).
+  - Docker has no VMM, so `mem.vmm_overhead` is `not_measured` there by design.
 - **`mem.guest_available` on Docker** reads the host's `/proc/meminfo` (there is no lxcfs). It
   is recorded but is not a per-sandbox figure.
 - **`disk.per_sandbox`** is Docker's `SizeRw` (apparent bytes in the writable layer).
@@ -156,8 +171,7 @@ first:
 
 - Run on kvm-homelab: `--backends docker,firecracker`. Firecracker opens through
   `SandcrabBuilder::firecracker` when `/dev/kvm` and the pinned artifacts are present.
-- Fill in the FC probes in `crates/sandcrab-bench/src/backend.rs` (`probe`, `verify_gone`,
-  `disk_rw`): VMM PID RSS/PSS split into guest memory vs `mem.vmm_overhead`, teardown
-  verification (VMM exited; tap, vsock UDS, API socket and overlay removed), and the per-VM
-  rootfs/overlay plus workspace image bytes.
+- FC probes still missing in `crates/sandcrab-bench/src/backend.rs`: `disk_rw` (the per-VM
+  scratch drive plus workspace image bytes). Memory/CPU and teardown verification (VMM
+  exited, run dir with its sockets and drives removed) are done.
 - Record `templates[].rootfs_sha256` from the rootfs pipeline.

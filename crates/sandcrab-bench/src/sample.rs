@@ -79,6 +79,112 @@ pub fn pss(pid: u32) -> Result<u64, String> {
         .ok_or_else(|| format!("{path}: no Pss line"))
 }
 
+/// Memory of a VMM process (Firecracker, the libkrun helper) from `/proc/<pid>/smaps`, split
+/// into the guest-RAM mapping and everything else (bench-spec §2). Linux only.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct VmmMem {
+    /// Whole process RSS (shared pages count fully); includes the guest RAM touched so far.
+    pub rss: u64,
+    /// Whole process PSS; includes the guest RAM touched so far.
+    pub pss: u64,
+    /// RSS / PSS of the guest-RAM mapping(s), when they could be identified.
+    pub guest: Option<(u64, u64)>,
+}
+
+impl VmmMem {
+    /// VMM overhead = PSS of the non-guest mappings.
+    #[must_use]
+    pub fn overhead_pss(&self) -> Option<u64> {
+        self.guest.map(|(_, g)| self.pss.saturating_sub(g))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Mapping {
+    size: u64,
+    rss: u64,
+    pss: u64,
+    /// Anonymous (no backing path, `[anon:…]`) or memfd: where guest RAM lives.
+    anon: bool,
+}
+
+/// `/proc/<pid>/smaps` → per-mapping size/RSS/PSS (bytes).
+fn parse_smaps(text: &str) -> Vec<Mapping> {
+    let kib = |l: &str| -> u64 {
+        l.split_whitespace()
+            .nth(1)
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0)
+            * 1024
+    };
+    let mut out: Vec<Mapping> = Vec::new();
+    for line in text.lines() {
+        let Some(first) = line.split_whitespace().next() else {
+            continue;
+        };
+        if !first.ends_with(':') && first.contains('-') {
+            // header: start-end perms offset dev inode [path]
+            let path = line.split_whitespace().nth(5).unwrap_or("");
+            out.push(Mapping {
+                size: 0,
+                rss: 0,
+                pss: 0,
+                anon: path.is_empty() || path.starts_with("[anon") || path.starts_with("/memfd:"),
+            });
+            continue;
+        }
+        let Some(m) = out.last_mut() else { continue };
+        match first {
+            "Size:" => m.size = kib(line),
+            "Rss:" => m.rss = kib(line),
+            "Pss:" => m.pss = kib(line),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Guest RAM = the largest anonymous mappings whose sizes add up to exactly `guest_bytes` (one
+/// region below 3 GiB on x86, two around the MMIO gap above). `None` if no exact match.
+fn guest_split(maps: &[Mapping], guest_bytes: u64) -> Option<(u64, u64)> {
+    let mut cands: Vec<&Mapping> = maps
+        .iter()
+        .filter(|m| m.anon && m.size >= 2 << 20 && m.size <= guest_bytes)
+        .collect();
+    if let Some(m) = cands.iter().find(|m| m.size == guest_bytes) {
+        return Some((m.rss, m.pss));
+    }
+    cands.sort_by_key(|m| std::cmp::Reverse(m.size));
+    let (mut size, mut rss, mut pss) = (0, 0, 0);
+    for m in cands {
+        if size + m.size > guest_bytes {
+            continue;
+        }
+        size += m.size;
+        rss += m.rss;
+        pss += m.pss;
+        if size == guest_bytes {
+            return Some((rss, pss));
+        }
+    }
+    None
+}
+
+/// Read a VMM's memory split. `guest_bytes` is the configured guest RAM (`memory_mb`).
+pub fn vmm_mem(pid: u32, guest_bytes: Option<u64>) -> Result<VmmMem, String> {
+    let path = format!("/proc/{pid}/smaps");
+    let text = fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?;
+    let maps = parse_smaps(&text);
+    if maps.is_empty() {
+        return Err(format!("{path}: no mappings"));
+    }
+    Ok(VmmMem {
+        rss: maps.iter().map(|m| m.rss).sum(),
+        pss: maps.iter().map(|m| m.pss).sum(),
+        guest: guest_bytes.and_then(|g| guest_split(&maps, g)),
+    })
+}
+
 /// Summed PSS of every process in a cgroup.
 pub fn cgroup_pss(dir: &Path) -> Result<u64, String> {
     let procs = fs::read_to_string(dir.join("cgroup.procs"))
@@ -260,6 +366,69 @@ mod tests {
         let me = std::process::id();
         assert!(rss(me).unwrap() > 0);
         assert!(process_alive(me));
+    }
+
+    const SMAPS: &str = "\
+55d0c0000000-55d0c0100000 r-xp 00000000 08:01 1234 /usr/bin/firecracker
+Size:               1024 kB
+Rss:                 800 kB
+Pss:                 400 kB
+VmFlags: rd ex mr mw me
+7f0000000000-7f0000001000 ---p 00000000 00:00 0
+Size:                  4 kB
+Rss:                   0 kB
+Pss:                   0 kB
+7f0000001000-7f0020001000 rw-p 00000000 00:00 0
+Size:             524288 kB
+Rss:              100000 kB
+Pss:              100000 kB
+VmFlags: rd wr mr mw me ac nr
+7f1000000000-7f1000200000 rw-p 00000000 00:00 0                          [heap]
+Size:               2048 kB
+Rss:                 300 kB
+Pss:                 300 kB
+";
+
+    #[test]
+    fn smaps_guest_split() {
+        let maps = parse_smaps(SMAPS);
+        assert_eq!(maps.len(), 4);
+        assert!(!maps[0].anon && maps[1].anon && maps[2].anon && !maps[3].anon);
+        let guest = guest_split(&maps, 512 << 20).unwrap();
+        assert_eq!(guest, (100_000 * 1024, 100_000 * 1024));
+        let m = VmmMem {
+            rss: maps.iter().map(|m| m.rss).sum(),
+            pss: maps.iter().map(|m| m.pss).sum(),
+            guest: Some(guest),
+        };
+        assert_eq!(m.overhead_pss(), Some(700 * 1024));
+        // no exact match → not identified, never guessed
+        assert_eq!(guest_split(&maps, 1024 << 20), None);
+    }
+
+    #[test]
+    fn smaps_guest_split_two_regions() {
+        let maps = [
+            Mapping {
+                size: 3 << 30,
+                rss: 10,
+                pss: 5,
+                anon: true,
+            },
+            Mapping {
+                size: 1 << 30,
+                rss: 4,
+                pss: 2,
+                anon: true,
+            },
+            Mapping {
+                size: 8 << 20,
+                rss: 1,
+                pss: 1,
+                anon: true,
+            },
+        ];
+        assert_eq!(guest_split(&maps, 4 << 30), Some((14, 7)));
     }
 
     #[test]
