@@ -12,6 +12,15 @@
 //!    directions reach EOF (half-close is propagated), either side errors, or the server
 //!    shuts down.
 //!
+//! **vsock transports** ([`TunnelConfig::close_on_target_eof`], set by the server for vsock
+//! listeners): when the target reaches EOF, its bytes are flushed and the whole tunnel is
+//! closed instead of half-closed. Firecracker's vsock bridge never forwards a guest
+//! `SHUT_WR` to the host, so without this a client that reads until the server closes
+//! (`Connection: close` without `Content-Length`, HTTP/1.0) would never see the end. The
+//! cost: after the target half-closes, later host → guest bytes are dropped (a target that
+//! half-closes first and keeps reading is rare). Unix-socket transports (Docker) keep full
+//! half-close semantics.
+//!
 //! The relay is strictly 1:1: every byte read from one side is written once to the other,
 //! with at most [`RELAY_BUF`] bytes buffered per direction. Nothing is generated or
 //! repeated, so a tunnel cannot amplify traffic.
@@ -47,6 +56,9 @@ pub struct TunnelConfig {
     pub max_tunnels: usize,
     /// Time allowed to connect to the guest loopback target.
     pub connect_timeout: Duration,
+    /// Close the whole tunnel (after flushing) when the target reaches EOF, instead of
+    /// half-closing the host side. For transports that drop half-close (vsock).
+    pub close_on_target_eof: bool,
 }
 
 impl Default for TunnelConfig {
@@ -54,6 +66,7 @@ impl Default for TunnelConfig {
         Self {
             max_tunnels: DEFAULT_MAX_TUNNELS,
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
+            close_on_target_eof: false,
         }
     }
 }
@@ -153,12 +166,20 @@ impl TunnelService {
         }
         info!(%peer, port, "tunnel open");
 
-        let relay = tokio::io::copy_bidirectional_with_sizes(
-            &mut stream,
-            &mut target,
-            RELAY_BUF,
-            RELAY_BUF,
-        );
+        let close_on_target_eof = self.config.close_on_target_eof;
+        let relay = async {
+            if close_on_target_eof {
+                relay_closing_on_target_eof(&mut stream, &mut target).await
+            } else {
+                tokio::io::copy_bidirectional_with_sizes(
+                    &mut stream,
+                    &mut target,
+                    RELAY_BUF,
+                    RELAY_BUF,
+                )
+                .await
+            }
+        };
         tokio::select! {
             biased;
             _ = stop.wait_for(|s| *s) => info!(%peer, port, "tunnel closed: server shutting down"),
@@ -166,6 +187,57 @@ impl TunnelService {
                 Ok((up, down)) => info!(%peer, port, host_to_guest = up, guest_to_host = down, "tunnel closed"),
                 Err(e) => debug!(%peer, port, error = %e, "tunnel ended with error"),
             },
+        }
+    }
+}
+
+/// Relay for transports without half-close: host → guest EOF is still propagated as a
+/// `SHUT_WR` to the target, but the target's EOF ends the tunnel (after its bytes are flushed
+/// to the host), which the host sees as a full close.
+async fn relay_closing_on_target_eof<S>(
+    stream: &mut S,
+    target: &mut TcpStream,
+) -> io::Result<(u64, u64)>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let (mut host_r, mut host_w) = tokio::io::split(stream);
+    let (mut target_r, mut target_w) = target.split();
+    let up = async {
+        let mut buf = vec![0u8; RELAY_BUF];
+        let mut total = 0u64;
+        loop {
+            let n = host_r.read(&mut buf).await?;
+            if n == 0 {
+                target_w.shutdown().await?;
+                return Ok::<_, io::Error>(total);
+            }
+            target_w.write_all(&buf[..n]).await?;
+            total += n as u64;
+        }
+    };
+    let down = async {
+        let mut buf = vec![0u8; RELAY_BUF];
+        let mut total = 0u64;
+        loop {
+            let n = target_r.read(&mut buf).await?;
+            if n == 0 {
+                host_w.flush().await?;
+                return Ok::<_, io::Error>(total);
+            }
+            host_w.write_all(&buf[..n]).await?;
+            total += n as u64;
+        }
+    };
+    tokio::pin!(up, down);
+    let mut up_total = None;
+    loop {
+        tokio::select! {
+            r = &mut up, if up_total.is_none() => up_total = Some(r?),
+            // Returning drops both halves: the caller closes the host stream.
+            r = &mut down => return Ok((up_total.unwrap_or(0), r?)),
         }
     }
 }
