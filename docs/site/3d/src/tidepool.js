@@ -1,5 +1,5 @@
-// Shared tide pool = shared kernel (DockerDev). Several grey crabs jostle in one
-// pool of water; a striped barrier marks it as a deliberate, dev-only choice.
+// Shared tide pool = shared kernel (Docker). Several grey crabs jostle in one
+// pool of water; a striped barrier marks it as a deliberate, explicit choice.
 // One idea: "containers share one pool; entering it is opt-in."
 // Phases (12 s): jostle 12 (continuous; one ripple every 3 s).
 // Motion budget: crabs wander (closed-form, periods divide 12 s), ripple ring, slow sway.

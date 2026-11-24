@@ -27,7 +27,7 @@ height (aspect-ratio or a fixed height), or nothing will show.
 | --- | --- | --- |
 | `crab` | The mascot. Options: `pose: 'idle' \| 'wave' \| 'work'` (default `wave`). | 12 s |
 | `jar` | Hardware isolation: every crab gets its own sealed jar (microVM). | 12 s |
-| `tidepool` | Shared kernel (DockerDev): crabs share one pool, behind a barrier. Option: `count` (2–7). | 12 s |
+| `tidepool` | Shared kernel (Docker): crabs share one pool, behind a barrier. Option: `count` (2–7). | 12 s |
 | `burrow` | Persistent workspace: sandboxes come and go, the crates (files) stay. | 10 s |
 | `molt` | Ephemeral sandbox: the shell is discarded, the output (teal cube) survives. | 12 s |
 | `wire` | One guest protocol: one cable between host and jar carries every request and result. | 12 s |

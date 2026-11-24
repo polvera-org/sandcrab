@@ -1,8 +1,8 @@
 // Bars = the canonical benchmark, in 3D. Rows: spawn → ready, destroy, agent turn
-// (p50, with a p95 whisker). Columns: DockerDev (measured, solid teal) and
+// (p50, with a p95 whisker). Columns: Docker (measured, solid teal) and
 // Firecracker, Cloud Hypervisor, libkrun (not measured: dashed ghost slots that
 // reach the top of the wall, so no height is implied).
-// One idea: "DockerDev is measured; the jars are still TODO."
+// One idea: "Docker is measured; the jars are still TODO."
 // Phases: bars grow once (0.3–2.6 s, staggered), then hold. No loop motion besides sway.
 // Motion budget: growth on entry only, slow sway.
 import { THREE, createKit, PALETTE as C, ease, clamp01, canvasTexture } from '../kit.js';
@@ -11,7 +11,7 @@ import { anchor, label, ghostBox } from './common.js';
 export const barsMeta = {
   title: 'Bars',
   fallback: 'few-grains',
-  alt: '3D bar chart of DockerDev benchmark medians, with dashed placeholder slots for Firecracker, Cloud Hypervisor and libkrun',
+  alt: '3D bar chart of Docker benchmark medians, with dashed placeholder slots for Firecracker, Cloud Hypervisor and libkrun',
   loop: 12,
   still: 6,
   phases: [{ name: 'grow', d: 2.6 }, { name: 'hold', d: 9.4 }],
@@ -29,7 +29,7 @@ export function createBars(opts = {}) {
     ['destroy', b?.base_w0?.teardown ?? { p50_ms: 98.29, p95_ms: 187.9 }],
     ['agent turn', b?.agent_turn_base_w1 ?? { p50_ms: 390.02, p95_ms: 456.25 }],
   ];
-  const cols = ['DockerDev', 'Firecracker', 'Cloud Hypervisor', 'libkrun'];
+  const cols = ['Docker', 'Firecracker', 'Cloud Hypervisor', 'libkrun'];
   const k = createKit();
   const g = new THREE.Group();
   const W = 6.2, D = 3.0;
@@ -88,7 +88,7 @@ export function createBars(opts = {}) {
   const fmt = (v) => `${Math.round(v)} ms`;
   const labels = [
     ...rows.map(([name, st], j) => label(`${name} · ${fmt(st.p50_ms)}`, anchor(g, GX[0] + BX[j], 0.1, Z), { a: 0, cls: 'bar' })),
-    label('DockerDev · measured', anchor(g, GX[0], 0, Z + 0.5), { cls: 'quiet', below: true }),
+    label('Docker · measured', anchor(g, GX[0], 0, Z + 0.5), { cls: 'quiet', below: true }),
     label('Firecracker · TODO, needs KVM', anchor(g, GX[1], 0, Z + 0.5), { cls: 'quiet ghost', below: true }),
     label('Cloud Hypervisor · TODO', anchor(g, GX[2], 0, Z + 0.5), { cls: 'quiet ghost', below: true }),
     label('libkrun · TODO', anchor(g, GX[3], 0, Z + 0.5), { cls: 'quiet ghost', below: true }),

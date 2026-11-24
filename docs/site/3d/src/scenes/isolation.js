@@ -1,5 +1,5 @@
 // Isolation = what isolates what, stated honestly. Left: the kit tide pool
-// (DockerDev, shared host kernel, hardened, dev/CI only). Right: the kit sealed jar
+// (Docker, shared host kernel, hardened, for single-tenant trusted hosts). Right: the kit sealed jar
 // (Firecracker, own kernel behind KVM). In front of each, one flag per declared
 // capability: raised = true, lowered = false — read from the backends' source.
 // One idea: "a jar is not a pool, and each backend says which it is."
@@ -72,7 +72,7 @@ export function createIsolation(opts = {}) {
   const yes = (n, key) => (caps[n]?.[key] ? '✓' : '✗');
   const txt = (n) => CAPS.map(([key, short]) => `${yes(n, key)} ${short}`).join('\n');
   const labels = [
-    label('DockerDev · shared kernel', anchor(g, -2.15, 1.25, -0.25)),
+    label('Docker · shared kernel', anchor(g, -2.15, 1.25, -0.25)),
     label('Firecracker · own kernel', anchor(g, 2.2, 2.05, -0.3)),
     label(txt('docker-dev'), anchor(g, -2.15, 0, 1.85), { cls: 'mono', below: true }),
     label(txt('firecracker'), anchor(g, 2.2, 0, 1.85), { cls: 'mono', below: true }),
