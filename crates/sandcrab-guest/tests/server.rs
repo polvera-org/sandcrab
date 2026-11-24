@@ -352,6 +352,14 @@ async fn socket_is_0660_and_stale_socket_replaced() {
     // A stale socket: bound then dropped, file left behind.
     drop(std::os::unix::net::UnixListener::bind(&sock).unwrap());
     assert!(sock.exists());
+    // A child forked concurrently by another test may still hold the listener fd until its
+    // exec, keeping the socket briefly live (bind would then rightly say AddrInUse).
+    for _ in 0..200 {
+        if std::os::unix::net::UnixStream::connect(&sock).is_err() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
     let (stop, handle) = spawn_server(ListenAddr::Unix(sock.clone()), dir.path()).await;
     let mode = std::fs::metadata(&sock).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o660);
