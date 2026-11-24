@@ -7,6 +7,7 @@ members = [
     "crates/sandcrab-backend-docker",
     "crates/sandcrab-rootfs",
     "crates/sandcrab-backend-firecracker",
+    "crates/sandcrab-backend-libkrun",
     "crates/sandcrab-sdk",
     "crates/sandcrab-cli",
     "crates/sandcrab-agent",
@@ -28,6 +29,7 @@ sandcrab-core = { path = "crates/sandcrab-core" }
 sandcrab-backend-docker = { path = "crates/sandcrab-backend-docker" }
 sandcrab-rootfs = { path = "crates/sandcrab-rootfs" }
 sandcrab-backend-firecracker = { path = "crates/sandcrab-backend-firecracker" }
+sandcrab-backend-libkrun = { path = "crates/sandcrab-backend-libkrun" }
 sandcrab-sdk = { path = "crates/sandcrab-sdk" }
 
 # Async & networking
@@ -61,6 +63,9 @@ base64 = "0.22"
 # Docker backend
 bollard = "0.21"
 rustix = { version = "1", features = ["process"] }
+
+# libkrun backend: runtime dlopen of the pinned libkrun (helper only, no link-time dependency)
+libloading = "0.8"
 
 # Agent harness (crabagent): HTTP + SSE to the Anthropic API (rustls/ring, no OpenSSL), REPL, .env
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2"] }
