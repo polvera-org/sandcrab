@@ -3,10 +3,9 @@ name = "python-dev"
 version = "0.1.0"
 description = "Python 3.15 + uv + ruff + pytest + mypy development sandbox for AI coding agents"
 image = "sandcrab/python-dev:0.1.0"
-# Pins the locally built image ID (docker image inspect --format {{.Id}}); not
-# reproducible across rebuilds yet. Refresh with: templates/build.sh --pin
-sha256 = "sha256:ab22bfc6510533d21a0e75dce2da80fd05a64bb5408fe9bc8dd869a699e92019"
-sha256_by_arch = { amd64 = "sha256:ab22bfc6510533d21a0e75dce2da80fd05a64bb5408fe9bc8dd869a699e92019", arm64 = "sha256:94aa7a7e2229c86153310fc980b8840710f556abd4bf046c2e51465281aea9ab" }
+# The built image ID is pinned per host, not here (local image IDs do not reproduce
+# across hosts): `templates/build.sh python-dev` records it under ~/.sandcrab/template-pins.
+# The Dockerfile FROM base images are digest-pinned.
 
 [resources]
 vcpu = 2

@@ -642,6 +642,15 @@ tiers = ["core", "process"]
         let reg = TemplateRegistry::load(&[repo_templates]).unwrap();
         assert!(reg.get("base").is_ok());
         assert!(reg.len() >= 4);
+        // Committed manifests carry no host image IDs: pins are host-local (`crate::pins`).
+        for t in reg.list() {
+            let m = &t.manifest.template;
+            assert!(
+                m.sha256.is_none() && m.sha256_by_arch.is_empty(),
+                "templates/{}/sandcrab.toml must not pin a local image id",
+                m.name
+            );
+        }
     }
 
     fn digest(c: char) -> String {
