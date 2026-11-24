@@ -32,15 +32,7 @@
   --section:clamp(104px,13vw,208px);
   color-scheme:light;
 }
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    --bg:#111A20; --bg-2:#18232A; --ink:#E9E7E0; --ink-2:#AEB6B8; --ink-3:#8C979B; --line:#2A3740;
-    --rust:#F07B55; --rust-text:#F28B67; --sky:#6F91AD;
-    --code-bg:#0B1216; --code-line:#26333A;
-    --img-filter:brightness(.88) saturate(.92);
-    color-scheme:dark;
-  }
-}
+/* Light is the default whatever the system theme; dark applies only when chosen with the toggle. */
 :root[data-theme="dark"] {
   --bg:#111A20; --bg-2:#18232A; --ink:#E9E7E0; --ink-2:#AEB6B8; --ink-3:#8C979B; --line:#2A3740;
   --rust:#F07B55; --rust-text:#F28B67; --sky:#6F91AD;
@@ -80,7 +72,8 @@ code { font:.84em/1.4 var(--mono); background:var(--bg-2); border-radius:5px; pa
 .cta-row { display:flex; flex-wrap:wrap; gap:12px; }
 
 /* ── Top bar ── */
-.bar { position:sticky; top:0; z-index:50; background:color-mix(in srgb, var(--bg) 94%, transparent); backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px); }
+.bar { position:sticky; top:0; z-index:50; background:var(--bg); box-shadow:0 1px 0 transparent; transition:box-shadow .2s; }
+.bar.scrolled { box-shadow:0 1px 0 var(--line); }
 .bar-in { display:flex; align-items:center; gap:24px; height:72px; }
 .brand { display:inline-flex; align-items:center; gap:12px; color:var(--ink); text-decoration:none; font:800 21px/1 var(--display); font-stretch:88%; letter-spacing:-.02em; }
 /* Logo: one flat rust silhouette; the pupils are cut out in the page colour. */
@@ -94,7 +87,8 @@ code { font:.84em/1.4 var(--mono); background:var(--bg-2); border-radius:5px; pa
 .icon-btn:hover { background:var(--bg-2); }
 .icon-btn svg { width:20px; height:20px; }
 .ico { fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; display:none; }
-.theme-btn[data-mode="auto"] .ico-auto, .theme-btn[data-mode="light"] .ico-light, .theme-btn[data-mode="dark"] .ico-dark { display:block; }
+/* the icon shows the theme you would switch to */
+.theme-btn[data-mode="light"] .ico-dark, .theme-btn[data-mode="dark"] .ico-light { display:block; }
 .bar-actions .pill-sm { margin-left:6px; }
 
 /* ── The film: one fixed canvas behind the whole page. The crab lives in the empty .aside
@@ -102,10 +96,13 @@ code { font:.84em/1.4 var(--mono); background:var(--bg-2); border-radius:5px; pa
 .crab-film { position:fixed; inset:0; z-index:0; pointer-events:none; }
 .crab-film canvas { display:block; width:100%; height:100%; }
 main, .footer { position:relative; z-index:1; }
+/* Treasure-map trail: barely there. Behind the text and the canvas; desktop only. */
+.trail { position:absolute; top:0; left:0; width:100%; z-index:0; pointer-events:none; color:rgba(29,37,41,.1); overflow:visible; }
+:root[data-theme="dark"] .trail { color:rgba(232,213,176,.11); }
 
 /* ── Narrative grid: text column + the crab's column, alternating sides ── */
-.narr { display:grid; gap:var(--gap); align-items:start; grid-template-columns:minmax(0,7fr) minmax(0,5fr); }
-.station[data-side="left"] .narr { grid-template-columns:minmax(0,5fr) minmax(0,7fr); }
+.narr { display:grid; gap:var(--gap); align-items:start; grid-template-columns:minmax(0,6fr) minmax(0,5fr); }
+.station[data-side="left"] .narr { grid-template-columns:minmax(0,5fr) minmax(0,6fr); }
 .station[data-side="left"] .col { grid-column:2; grid-row:1; }
 .station[data-side="left"] .aside { grid-column:1; grid-row:1; }
 .aside { position:relative; align-self:stretch; min-height:1px; }
@@ -135,7 +132,9 @@ html:not(.js) .crab-film, html.no-3d .crab-film { display:none; }
 .status dd { margin:0; font-size:15px; color:var(--ink); }
 
 /* ── Sections. The tall top padding is the crab's crossing lane between two sections. ── */
-.section { padding-top:clamp(200px,36vh,360px); }
+.section { padding-top:clamp(240px,44vh,440px); }
+/* Short stations get enough length for their scene to play while the text keeps flowing. */
+.section.station { min-height:185vh; }
 .col > .lede, .measure > .lede { color:var(--ink-2); font-size:17.5px; line-height:1.65; margin-top:26px; }
 .col > .lede + .lede { margin-top:0; }
 .col > .lede b { color:var(--ink); font-weight:600; }
@@ -147,7 +146,7 @@ html:not(.js) .crab-film, html.no-3d .crab-film { display:none; }
 .rows li b { color:var(--ink); font-weight:600; }
 
 /* numbered steps: the molt is scrubbed while these scroll by */
-.steps { list-style:none; margin:clamp(40px,6vh,72px) 0 0; padding:0 0 clamp(0px,30vh,300px); display:grid; gap:clamp(64px,24vh,240px); }
+.steps { list-style:none; margin:clamp(40px,6vh,72px) 0 0; padding:0 0 clamp(0px,48vh,480px); display:grid; gap:clamp(64px,52vh,520px); }
 .steps h3 { display:flex; align-items:center; gap:12px; font-size:26px; margin-bottom:10px; }
 .n { display:grid; place-items:center; width:26px; height:26px; flex:none; border-radius:50%; background:var(--ink); color:var(--bg); font:500 12px/1 var(--mono); }
 .steps p { margin:0; font-size:16.5px; color:var(--ink-2); line-height:1.6; max-width:34em; }
@@ -277,10 +276,11 @@ html:not(.js) .crab-film, html.no-3d .crab-film { display:none; }
 /* Mobile: one column. The crab drops into a small fixed band at the bottom of the screen,
    over a fade of the page colour, drifting gently left and right. */
 @media (max-width: 860px) {
-  :root { --band:min(23vh,196px); }
+  :root { --band:min(29vh,240px); }
   .narr, .station[data-side="left"] .narr { grid-template-columns:minmax(0,1fr); }
   .station[data-side="left"] .col { grid-column:1; }
   .aside { display:none; }
+  .trail { display:none; }
   html.no-3d .aside, html:not(.js) .aside { display:block; grid-row:1; }
   html.no-3d .aside .poster, html:not(.js) .aside .poster { position:static; max-width:520px; }
   html.no-3d .aside .glyph-poster, html:not(.js) .aside .glyph-poster { position:static; width:120px; margin:0; }
@@ -288,6 +288,7 @@ html:not(.js) .crab-film, html.no-3d .crab-film { display:none; }
     background:linear-gradient(to top, var(--bg) 58%, color-mix(in srgb, var(--bg) 0%, transparent)); }
   body.film-on { padding-bottom:calc(var(--band) - 24px); }
   .section { padding-top:clamp(104px,16vh,160px); }
+  .section.station { min-height:0; }
   .steps { gap:36px; }
   .measure { margin-top:104px; }
   .cards .card { grid-template-columns:minmax(0,1fr); gap:14px; }

@@ -16,7 +16,7 @@ import { createCrab } from './kit3d/src/crab.js';
 import { TOOLS, drawGlyph } from './kit3d/src/toolbelt.js';
 
 const TAU = Math.PI * 2;
-const CS = 0.5; // crab scale, constant for the whole film
+const CS = 0.7; // crab scale, constant for the whole film
 const win = (x, a, b) => ease(clamp01((x - a) / (b - a)));
 const bump = (x, a, b) => Math.sin(Math.PI * clamp01((x - a) / (b - a)));
 const backOut = (x) => { const c = 1.5; const y = x - 1; return 1 + (c + 1) * y * y * y + c * y * y; };
@@ -28,17 +28,13 @@ const THEME = {
   light: { shadow: 0.14, hemi: 1.5, sun: 2.2, sand: '#ECEAE2', sandDeep: '#C9C5B8', rim: C.ink, water: C.teal500 },
   dark: { shadow: 0.36, hemi: 1.25, sun: 2.0, sand: '#CBC5B4', sandDeep: '#9F998A', rim: '#A9CBD2', water: '#2F8FA2' },
 };
-function isDark() {
-  const t = document.documentElement.getAttribute('data-theme');
-  if (t === 'dark') return true;
-  if (t === 'light') return false;
-  return matchMedia('(prefers-color-scheme: dark)').matches;
-}
+// Same rule as the page: light unless the reader switched to dark with the toggle.
+const isDark = () => document.documentElement.getAttribute('data-theme') === 'dark';
 
 /** Reduced-motion rest pose (h) for each station: the most telling still frame. */
 const REST = { hero: 0, turn: 0.72, sdk: 1, workspaces: 0.25, backends: 0.5, tools: 0.35, protocol: 0.5, crabagent: 1, start: 1 };
 
-export function startFilm(host, { onFail } = {}) {
+export function startFilm(host, { onFail, lenis = null } = {}) {
   const stationEls = [...document.querySelectorAll('[data-station]')];
   if (!stationEls.length) return null;
 
@@ -240,7 +236,7 @@ export function startFilm(host, { onFail } = {}) {
   prop('file', file, { rise: 0.25 });
 
   // ── Workspaces: the burrow (cutaway), crates and pebbles that persist ──
-  const BS = 0.68;
+  const BS = 0.85;
   const burrow = new THREE.Group();
   const crateMats = [];
   {
@@ -414,13 +410,13 @@ export function startFilm(host, { onFail } = {}) {
     tower3d.userData.led = ledMat;
   }
   prop('host', tower3d, { rise: 0.9, after(st) { if (st) tower3d.userData.led.emissiveIntensity = 0.2 + 1.2 * (st.flash ?? 0); } });
-  const HOST_X = -1.75, CRAB_PX = 1.25;
+  const HOST_X = -1.55, CRAB_PX = 1.3;
   const curve = new THREE.CatmullRomCurve3([
-    new THREE.Vector3(HOST_X + 0.38, 0.35, 0.1),
-    new THREE.Vector3(HOST_X + 0.75, 0.06, 0.45),
+    new THREE.Vector3(HOST_X + 0.33, 0.3, 0.1),
+    new THREE.Vector3(HOST_X + 0.7, 0.06, 0.45),
     new THREE.Vector3(-0.2, 0.05, 0.7),
     new THREE.Vector3(0.6, 0.05, 0.6),
-    new THREE.Vector3(CRAB_PX - 0.35, 0.08, 0.45),
+    new THREE.Vector3(CRAB_PX - 0.55, 0.08, 0.5),
   ]);
   const cableGeo = k.geo(new THREE.TubeGeometry(curve, 64, 0.045, 6));
   const cable = new THREE.Mesh(cableGeo, k.toon(C.ink));
@@ -459,7 +455,7 @@ export function startFilm(host, { onFail } = {}) {
   });
 
   // ── crabagent: a sandcastle assembled piece by piece, with a page on its front ──
-  const CX = 0.55;
+  const CX = 0.7;
   const castle = {};
   {
     const base = k.mesh(new THREE.BoxGeometry(1.3, 0.5, 0.9).translate(0, 0.25, 0), mDeep, { receive: true });
@@ -542,13 +538,13 @@ export function startFilm(host, { onFail } = {}) {
   // crab(h, clock) → { pos, ry, pose, pose2, pw, walk, tint:[hex, k] }
   // props[name](h, clock) → { pos, s, ry, p, ...extra } ; absent = hidden at this station
   const at = (x, y, z) => [x, y, z];
-  const JS = 1.15; // hero jar scale: holds a crab of scale CS
+  const JS = 2.3 * CS; // hero jar scale: holds a crab of scale CS
   const STATIONS = {
     hero: {
       ground: -0.25,
       crab: (h, c) => ({ pos: at(0.08 * Math.sin(c * TAU / 6), 0.14 * JS, 0), walk: 0.5 * Math.abs(Math.cos(c * TAU / 6)) }),
       props: {
-        disc: () => ({ s: [1.7, 1, 1.7] }),
+        disc: () => ({ s: [2.15, 1, 2.15] }),
         jar: () => ({ s: JS, lid: 0 }),
       },
     },
@@ -560,30 +556,30 @@ export function startFilm(host, { onFail } = {}) {
         const tint = h < 0.5 ? [C.husk, win(h, 0.34, 0.48) * 0.55] : ['#FFB49C', 0.5 * (1 - win(h, 0.62, 0.95))];
         const pose2 = h < 0.7 ? 'work' : 'wave';
         const pw = h < 0.7 ? win(h, 0.24, 0.3) * (1 - win(h, 0.44, 0.5)) : win(h, 0.84, 0.94);
-        return { pos: at(lerp(-0.4, 0.8, out), 0.14 * JS * (1 - sink), 0), walk: bump(h, 0.5, 0.68), tint, pose2, pw };
+        return { pos: at(lerp(-0.55, 1.05, out), 0.14 * JS * (1 - sink), 0), walk: bump(h, 0.5, 0.68), tint, pose2, pw };
       },
       props: {
-        disc: () => ({ pos: at(0.2, 0, 0), s: [2.0, 1, 1.6] }),
-        jar: (h) => ({ pos: at(-0.4, 0, 0), s: JS, lid: win(h, 0.02, 0.14), p: 1 - win(h, 0.12, 0.28) }),
-        cube: (h) => ({ pos: at(0.45, 0, 0.75), ry: 0.3, p: win(h, 0.28, 0.42), glow: bump(h, 0.28, 0.5) }),
+        disc: () => ({ pos: at(0.25, 0, 0), s: [2.35, 1, 1.8] }),
+        jar: (h) => ({ pos: at(-0.55, 0, 0), s: JS, lid: win(h, 0.02, 0.14), p: 1 - win(h, 0.12, 0.28) }),
+        cube: (h) => ({ pos: at(0.6, 0, 1.0), s: 1.3, ry: 0.3, p: win(h, 0.28, 0.42), glow: bump(h, 0.28, 0.5) }),
         husk: (h) => {
           const a = win(h, 0.36, 0.42) * (1 - 0.6 * win(h, 0.62, 0.74)) * (1 - win(h, 0.8, 0.94));
-          return { pos: at(-0.4, -0.15 * win(h, 0.8, 0.96), 0), s: CS * 1.04, p: h > 0.97 ? 0 : a, crack: win(h, 0.44, 0.6) * 0.55 };
+          return { pos: at(-0.55, -0.2 * win(h, 0.8, 0.96), 0), s: CS * 1.04, p: h > 0.97 ? 0 : a, crack: win(h, 0.44, 0.6) * 0.55 };
         },
-        grains: (h) => ({ pos: at(-0.4, 0, 0), p: h > 0.79 && h < 0.995 ? 1 : 0, gp: clamp01((h - 0.79) / 0.2) }),
+        grains: (h) => ({ pos: at(-0.55, 0, 0), s: 1.4, p: h > 0.79 && h < 0.995 ? 1 : 0, gp: clamp01((h - 0.79) / 0.2) }),
       },
     },
     sdk: {
       ground: -0.25,
-      crab: (h) => ({ pos: at(-0.6, 0, 0.15), pose2: 'work', pw: win(h, 0, 0.08) * (1 - win(h, 0.64, 0.72)) }),
+      crab: (h) => ({ pos: at(-0.8, 0, 0.2), pose2: 'work', pw: win(h, 0, 0.08) * (1 - win(h, 0.64, 0.72)) }),
       props: {
-        disc: () => ({ pos: at(0.05, 0, 0), s: [1.75, 1, 1.5] }),
+        disc: () => ({ pos: at(0.05, 0, 0), s: [2.1, 1, 1.75] }),
         ...Object.fromEntries(BLOCKS.map((b, i) => [`block${i}`, (h) => {
           const d = win(h, 0.04 + i * 0.13, 0.14 + i * 0.13);
           const gone = i >= 2 ? win(h, 0.66, 0.76) : 0;
-          return { pos: at(0.62, i * BH + (1 - d) * 1.2, 0.1), ry: -0.12, p: d > 0.001 ? (1 - gone) : 0 };
+          return { pos: at(0.85, i * BH * 1.3 + (1 - d) * 1.6, 0.1), s: 1.3, ry: -0.12, p: d > 0.001 ? (1 - gone) : 0 };
         }])),
-        file: (h) => ({ pos: at(0.62, 2 * BH, 0.2), ry: -0.12, p: win(h, 0.74, 0.84) }),
+        file: (h) => ({ pos: at(0.85, 2 * BH * 1.3, 0.25), s: 1.3, ry: -0.12, p: win(h, 0.74, 0.84) }),
       },
     },
     workspaces: {
@@ -600,19 +596,19 @@ export function startFilm(host, { onFail } = {}) {
     },
     backends: {
       ground: -0.25,
-      crab: (h) => ({ pos: at(0, 0, 0.6), ry: lerp(-0.55, 0.55, win(h, 0.1, 0.5)) * (1 - win(h, 0.7, 0.95) * 0.7) }),
+      crab: (h) => ({ pos: at(0, 0, 0.75), ry: lerp(-0.55, 0.55, win(h, 0.1, 0.5)) * (1 - win(h, 0.7, 0.95) * 0.7) }),
       props: {
-        disc: () => ({ s: [2.55, 1, 1.75] }),
-        jar: () => ({ pos: at(-1.45, 0, -0.15), s: 0.62, lidOff: true }),
-        greys: (h, c) => ({ pos: at(-1.45, 0.14 * 0.62, -0.15), clock: c }),
-        sphere: (h, c) => ({ pos: at(1.45, 0, -0.15), clock: c }),
+        disc: () => ({ s: [2.65, 1, 1.95] }),
+        jar: () => ({ pos: at(-1.55, 0, -0.2), s: 0.78, lidOff: true }),
+        greys: (h, c) => ({ pos: at(-1.55, 0.14 * 0.78, -0.2), s: 1.25, clock: c }),
+        sphere: (h, c) => ({ pos: at(1.55, 0, -0.2), s: 1.2, clock: c }),
       },
     },
     tools: {
       ground: -0.25,
       crab: () => ({ pos: at(0, 0, 0), ry: -0.1, pose2: 'hold', pw: 1 }),
       props: {
-        disc: () => ({ s: [1.55, 1, 1.55] }),
+        disc: () => ({ s: [1.9, 1, 1.9] }),
         belt: () => ({ pos: at(0, -0.06, 0) }),
         card: (h) => ({ h }),
       },
@@ -621,17 +617,17 @@ export function startFilm(host, { onFail } = {}) {
       ground: -0.25,
       crab: () => ({ pos: at(CRAB_PX, 0, 0.3), ry: -0.35, pose2: 'work', pw: 1 }),
       props: {
-        disc: () => ({ pos: at(-0.2, 0, 0.1), s: [2.75, 1, 1.45] }),
-        host: (h, c) => ({ pos: at(HOST_X, 0, -0.15), flash: Math.exp(-((((c * 0.28 + h * 0.8) % 1) + 1) % 1) * 12) }),
-        cable: () => ({}),
-        packets: (h, c) => ({ h, clock: c }),
+        disc: () => ({ pos: at(-0.1, 0, 0.15), s: [2.7, 1, 1.6] }),
+        host: (h, c) => ({ pos: at(HOST_X, 0, -0.15), s: 0.85, p: win(h, 0, 0.12), flash: Math.exp(-((((c * 0.28 + h * 0.8) % 1) + 1) % 1) * 12) }),
+        cable: (h) => ({ p: win(h, 0.08, 0.4) }),       // the cable draws itself in, scrubbed
+        packets: (h, c) => ({ h, clock: c, p: win(h, 0.38, 0.48) }),
       },
     },
     crabagent: {
       ground: -0.25,
-      crab: (h) => ({ pos: at(-0.8, 0, 0.4), ry: 0.55, pose2: 'work', pw: 1 - win(h, 0.9, 1) }),
+      crab: (h) => ({ pos: at(-1.0, 0, 0.45), ry: 0.55, pose2: 'work', pw: 1 - win(h, 0.9, 1) }),
       props: {
-        disc: () => ({ pos: at(0.15, 0, 0), s: [1.95, 1, 1.55] }),
+        disc: () => ({ pos: at(0.1, 0, 0), s: [2.25, 1, 1.75] }),
         castle_base: (h) => ({ pos: at(CX, 0, -0.1), p: win(h, 0.02, 0.16) }),
         castle_towerL: (h) => ({ pos: at(CX - 0.62, 0, -0.1), p: win(h, 0.14, 0.3) }),
         castle_towerR: (h) => ({ pos: at(CX + 0.62, 0, -0.1), p: win(h, 0.22, 0.38) }),
@@ -644,7 +640,7 @@ export function startFilm(host, { onFail } = {}) {
     },
     start: {
       ground: -0.25,
-      crab: (h) => ({ pos: at(0, 0, 0.35), pose2: 'wave', pw: win(h, 0, 0.12) }),
+      crab: (h) => ({ pos: at(0, 0, 0.45), pose2: 'wave', pw: win(h, 0, 0.12) }),
       props: {
         disc: () => ({ s: [2.5, 1, 2.0] }),
         water: (h, c) => ({ clock: c }),
@@ -756,19 +752,20 @@ export function startFilm(host, { onFail } = {}) {
   }
 
   // ── measure each station's footprint in camera space (once) ──
-  const _v = new THREE.Vector3(), _bb = new THREE.Box3();
+  const _v = new THREE.Vector3();
   function measure(st) {
     let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
-    const samples = st.id === 'turn' ? [0, 0.3, 0.6, 1] : [0, 0.5, 1];
+    const samples = st.id === 'turn' ? [0, 0.15, 0.3, 0.6, 1] : [0, 0.5, 1]; // 0.15: lid fully lifted
     for (const h of samples) {
       apply(st, st, 0, h, h, 1.2, 0);
       world.updateMatrixWorld(true);
       world.traverseVisible((o) => {
         if (!o.isMesh || o.userData.isOutline || o === grains) return;
-        if (!o.geometry.boundingBox) o.geometry.computeBoundingBox();
-        _bb.copy(o.geometry.boundingBox);
-        for (let i = 0; i < 8; i++) {
-          _v.set(i & 1 ? _bb.max.x : _bb.min.x, i & 2 ? _bb.max.y : _bb.min.y, i & 4 ? _bb.max.z : _bb.min.z).applyMatrix4(o.matrixWorld);
+        // project the real vertices (an AABB of a round disc overstates its width by ~30%)
+        const pos = o.geometry.getAttribute('position');
+        const step = Math.max(1, Math.floor(pos.count / 600));
+        for (let i = 0; i < pos.count; i += step) {
+          _v.fromBufferAttribute(pos, i).applyMatrix4(o.matrixWorld);
           if (_v.y < st.def.ground - 0.02) _v.y = st.def.ground; // ignore things sunk into the sand
           _v.applyMatrix4(camera.matrixWorldInverse);
           x0 = Math.min(x0, _v.x); x1 = Math.max(x1, _v.x); y0 = Math.min(y0, _v.y); y1 = Math.max(y1, _v.y);
@@ -799,18 +796,28 @@ export function startFilm(host, { onFail } = {}) {
     stations.forEach((st, i) => {
       let r;
       if (mobile) {
-        const drift = st.side === 'right' ? 0.12 : -0.12;
-        r = { cx: W * (0.5 + drift), cy: H * 0.58, w: W * 0.6, h: H * 0.8 };
+        const drift = st.side === 'right' ? 0.1 : -0.1;
+        r = { cx: W * (0.5 + drift), cy: H * 0.56, w: W * 0.8, h: H * 0.94 };
       } else {
+        // the crab's column: from the text column's edge out to the viewport edge (it may bleed
+        // past the content width, never back over the text)
+        const col = st.el.querySelector('.col').getBoundingClientRect();
         const a = st.el.querySelector('.aside').getBoundingClientRect();
         let L, Rr;
-        if (st.side === 'right') { L = a.left + 8; Rr = Math.min(vw - 48, a.right + 150); } else { L = Math.max(48, a.left - 150); Rr = a.right - 8; }
-        let top = barH + 28, bottom = vh - 28;
-        if (i === 0) top = Math.max(top, a.top + sy + 8); // hero: below the masthead at scroll 0
+        if (st.side === 'right') { L = col.right + 32; Rr = vw - 24; } else { L = 24; Rr = col.left - 32; }
+        let top = barH + 20, bottom = vh - 20;
+        if (i === 0) {
+          // hero: the dominant visual of the first screen, below the masthead, right of the copy;
+          // it may bleed toward the edge and bottom, then shrinks to station size on the way down
+          top = Math.max(top, a.top + sy + 4);
+          bottom = vh + Math.round(vh * 0.04);
+          Rr = vw - 8;
+        }
         r = { cx: (L + Rr) / 2, cy: (top + bottom) / 2, w: Rr - L, h: bottom - top };
       }
-      const maxPpu = mobile ? H * 0.42 : Math.min(200, vh * 0.23);
-      r.ppu = Math.min(r.w * 0.9 / st.box.w, r.h * 0.82 / st.box.h, maxPpu);
+      const hero = i === 0 && !mobile;
+      const maxPpu = mobile ? H * 0.6 : hero ? 400 : Math.min(340, vh * 0.38);
+      r.ppu = Math.min(r.w * (hero ? 1 : 0.94) / st.box.w, r.h * (hero ? 0.98 : 0.86) / st.box.h, maxPpu);
       st.region = r;
     });
     // keyframes on the scroll axis
@@ -823,9 +830,9 @@ export function startFilm(host, { onFail } = {}) {
       const B = docTop(next);
       const pad = parseFloat(getComputedStyle(next).paddingTop) || 0;
       let mid, half;
-      if (mobile) { mid = B - vh * 0.5; half = vh * 0.2; } else {
+      if (mobile) { mid = B - vh * 0.5; half = vh * 0.32; } else {
         const cyMid = (stations[i].region.cy + stations[i + 1].region.cy) / 2;
-        mid = B + pad / 2 - cyMid; half = vh * 0.3;
+        mid = B + pad / 2 - cyMid; half = vh * 0.45;
       }
       const s0 = Math.max(prevEnd, mid - half);
       const s1 = Math.max(s0 + 1, mid + half);
@@ -853,12 +860,94 @@ export function startFilm(host, { onFail } = {}) {
     return { a: 0, b: 0, t: 0, ha: 0, hb: 0 };
   }
 
+  // ── treasure-map trail: a faint dashed route on the page, from the crab to the next station ──
+  // One SVG behind the text and the canvas. The path is sampled from the crab's own ground point
+  // over the whole scroll range, so it is exactly the route the crab walks. Everything above the
+  // crab's current document y is masked away (dashes stay put; only the mask moves).
+  const trail = (() => {
+    const NS = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(NS, 'svg');
+    svg.setAttribute('class', 'trail');
+    svg.setAttribute('aria-hidden', 'true');
+    svg.innerHTML = `<defs>
+        <linearGradient id="trail-fade" gradientUnits="userSpaceOnUse" x1="0" x2="0" y1="0" y2="1">
+          <stop offset="0" stop-color="#fff" stop-opacity="0"/><stop offset="1" stop-color="#fff" stop-opacity="1"/></linearGradient>
+        <mask id="trail-mask" maskUnits="userSpaceOnUse"><rect id="trail-mask-rect" x="0" y="0" width="100%" height="100%" fill="url(#trail-fade)"/></mask>
+      </defs>
+      <g mask="url(#trail-mask)" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+        <path class="trail-path" stroke-width="1.3" stroke-dasharray="5 9"/>
+        <g class="trail-marks" stroke-width="1.3"></g>
+      </g>`;
+    document.body.insertBefore(svg, document.body.firstChild);
+    const path = svg.querySelector('.trail-path');
+    const marks = svg.querySelector('.trail-marks');
+    const grad = svg.querySelector('#trail-fade');
+    let lastY = NaN;
+    const R = rng(23);
+    const wob = Array.from({ length: 4 }, () => R() * TAU);
+    return {
+      build() {
+        const docH = document.documentElement.scrollHeight;
+        svg.setAttribute('height', docH);
+        svg.setAttribute('viewBox', `0 0 ${W} ${docH}`);
+        svg.style.height = `${docH}px`;
+        if (mobile) { path.setAttribute('d', ''); marks.innerHTML = ''; return; }
+        const maxScroll = Math.max(1, docH - H);
+        const pts = [];
+        const crabAt = (y) => {
+          const v = view(y);
+          const A = crabState(v.sa, v.ha, 0).pos, B = crabState(v.sb, v.hb, 0).pos;
+          const p = lerp3(A, B, v.e);
+          const [x, sy] = toScreen(v, p[0], 0, p[2]);
+          return [x, y + sy];
+        };
+        for (let y = 0; y <= maxScroll + 1; y += 36) {
+          const [x, dy] = crabAt(Math.min(y, maxScroll));
+          // hand-drawn wobble: two slow sines, a few px
+          pts.push([x + 4 * Math.sin(dy / 190 + wob[0]) + 2.2 * Math.sin(dy / 61 + wob[1]), dy + 1.5 * Math.sin(dy / 47 + wob[2])]);
+        }
+        // Catmull-Rom → cubic Béziers through every third sample: gentle curves, no straight runs
+        const P = pts.filter((_, i) => i % 3 === 0 || i === pts.length - 1);
+        let d = `M${P[0][0].toFixed(1)} ${P[0][1].toFixed(1)}`;
+        for (let i = 0; i < P.length - 1; i++) {
+          const p0 = P[i - 1] || P[i], p1 = P[i], p2 = P[i + 1], p3 = P[i + 2] || p2;
+          const c1 = [p1[0] + (p2[0] - p0[0]) / 6, p1[1] + (p2[1] - p0[1]) / 6];
+          const c2 = [p2[0] - (p3[0] - p1[0]) / 6, p2[1] - (p3[1] - p1[1]) / 6];
+          d += ` C${c1[0].toFixed(1)} ${c1[1].toFixed(1)} ${c2[0].toFixed(1)} ${c2[1].toFixed(1)} ${p2[0].toFixed(1)} ${p2[1].toFixed(1)}`;
+        }
+        path.setAttribute('d', d);
+        // a small x beside the route at each station, a dotted circle at the final shore
+        let m = '';
+        keys.forEach((kk, i) => {
+          if (i === 0) return;
+          const [x, y] = crabAt(kk.holdStart);
+          const ox = x + (stations[i].side === 'right' ? 26 : -26), oy = y + 18;
+          if (i === keys.length - 1) m += `<circle cx="${ox.toFixed(1)}" cy="${oy.toFixed(1)}" r="11" stroke-dasharray="2 4"/>`;
+          m += `<path d="M${ox - 5} ${oy - 5} l10 10 M${ox + 5} ${oy - 5} l-10 10"/>`;
+        });
+        marks.innerHTML = m;
+        lastY = NaN;
+      },
+      /** hide everything above the crab's document y (with a short soft edge just ahead of it) */
+      follow(docY, still) {
+        if (still) docY = -200; // reduced motion: the whole route, static
+        if (Math.abs(docY - lastY) < 0.5) return;
+        lastY = docY;
+        grad.setAttribute('y1', (docY + 8).toFixed(1));
+        grad.setAttribute('y2', (docY + 160).toFixed(1));
+      },
+    };
+  })();
+
   // ── render ──
   let clock = 0;
-  function render() {
-    const y = window.scrollY;
+  const scrollY = () => (lenis ? lenis.animatedScroll : window.scrollY);
+  /** scroll → film state + camera framing (ax, ay: screen anchor px; ppu; cx, cy: camera-space centre) */
+  function view(y, still = false) {
     let { a, b, t, ha, hb } = locate(y);
-    const still = reduce.matches;
+    // reduced motion: no scene while the text of two sections shares the screen (a clean cut,
+    // not a fade), so a full-size still never sits over the incoming heading
+    const gap = still && t > 0.2 && t < 0.8;
     if (still) {
       // reduced motion: snap to the nearest station's static pose; no scrub, no idle loop
       const i = t < 0.5 ? a : b;
@@ -866,21 +955,40 @@ export function startFilm(host, { onFail } = {}) {
       ha = hb = REST[stations[i].id] ?? 0.5;
     }
     const sa = stations[a], sb = stations[b];
+    const e = ease(t);
+    const ra = sa.region, rb = sb.region;
+    const dip = mobile ? 1 - 0.15 * Math.sin(Math.PI * t) : 1 - 0.5 * Math.sin(Math.PI * t);
+    return {
+      a, b, t, e, ha, hb, sa, sb, gap,
+      ax: lerp(ra.cx, rb.cx, e), ay: lerp(ra.cy, rb.cy, e),
+      ppu: Math.exp(lerp(Math.log(ra.ppu), Math.log(rb.ppu), e)) * dip,
+      cx: lerp(sa.box.cx, sb.box.cx, e), cy: lerp(sa.box.cy, sb.box.cy, e),
+    };
+  }
+  const _p = new THREE.Vector3();
+  /** a world point → screen px under a given view */
+  function toScreen(v, x, y, z) {
+    _p.set(x, y, z).applyMatrix4(camera.matrixWorldInverse);
+    return [v.ax + (_p.x - v.cx) * v.ppu, v.ay - (_p.y - v.cy) * v.ppu];
+  }
+
+  function render() {
+    const y = scrollY();
+    const still = reduce.matches;
+    const v = view(y, still);
+    const { a, t, ha, hb, sa, sb, ax, ay, ppu, cx, cy } = v;
     const travel = still ? 0 : (a + t) * 2.0 + y * 0.0015;
     const c = still ? 1.2 : clock;
     apply(sa, sb, t, ha, hb, c, travel);
+    const cp = crab.object3d.position;
+    trail.follow(y + toScreen(v, cp.x, 0, cp.z)[1], still);
 
     // camera: shift + zoom the ortho frustum so the station box lands in its region
-    const e = ease(t);
-    const ra = sa.region, rb = sb.region;
-    const ax = lerp(ra.cx, rb.cx, e), ay = lerp(ra.cy, rb.cy, e);
-    const dip = mobile ? 1 - 0.15 * Math.sin(Math.PI * t) : 1 - 0.4 * Math.sin(Math.PI * t);
-    const ppu = Math.exp(lerp(Math.log(ra.ppu), Math.log(rb.ppu), e)) * dip;
-    const cx = lerp(sa.box.cx, sb.box.cx, e), cy = lerp(sa.box.cy, sb.box.cy, e);
     camera.left = cx - ax / ppu; camera.right = cx + (W - ax) / ppu;
     camera.top = cy + ay / ppu; camera.bottom = cy - (H - ay) / ppu;
     camera.updateProjectionMatrix();
     setOutlineWidth(mobile ? 1.2 : 1.6);
+    scene.visible = !v.gap;
     renderer.render(scene, camera);
   }
 
@@ -891,7 +999,8 @@ export function startFilm(host, { onFail } = {}) {
     const dt = Math.min(0.05, Math.max(0, (now - prev) / 1000));
     prev = now;
     clock += dt;
-    const scrolling = now - lastScroll < 300;
+    lenis?.raf(now); // smooth scroll steps on this same tick, then the film renders from it
+    const scrolling = lenis?.isScrolling || now - lastScroll < 300;
     if (!scrolling && now - lastFrame < 1000 / 30 - 2) return;
     lastFrame = now;
     render();
@@ -904,7 +1013,7 @@ export function startFilm(host, { onFail } = {}) {
   }
   window.addEventListener('scroll', () => { lastScroll = performance.now(); if (!raf) render(); }, { passive: true });
   let relayout = 0;
-  const onResize = () => { cancelAnimationFrame(relayout); relayout = requestAnimationFrame(() => { layout(); render(); }); };
+  const onResize = () => { cancelAnimationFrame(relayout); relayout = requestAnimationFrame(() => { layout(); trail.build(); render(); }); };
   window.addEventListener('resize', onResize);
   new ResizeObserver(onResize).observe(document.querySelector('main'));
   mqMobile.addEventListener('change', onResize);
@@ -912,17 +1021,17 @@ export function startFilm(host, { onFail } = {}) {
   document.addEventListener('visibilitychange', sync);
   reduce.addEventListener('change', sync);
   const onTheme = () => { applyTheme(); render(); };
-  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', onTheme);
   new MutationObserver(onTheme).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
 
   applyTheme();
   layout();
+  trail.build();
   render();
   sync();
   host.classList.add('live');
   const api = {
     render, layout,
-    info: () => ({ calls: renderer.info.render.calls, triangles: renderer.info.render.triangles, keys, stations: stations.map((s) => ({ id: s.id, box: s.box, region: s.region })), at: locate(window.scrollY) }),
+    info: () => ({ calls: renderer.info.render.calls, triangles: renderer.info.render.triangles, keys, stations: stations.map((s) => ({ id: s.id, box: s.box, region: s.region })), at: locate(scrollY()) }),
   };
   host.sandcrabFilm = api; // for debugging from the console
   return api;
