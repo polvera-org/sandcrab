@@ -207,12 +207,11 @@ fn artifact(
     }
 }
 
-/// The template's image id: its `sha256` pin, else the local Docker image id.
+/// The template's image id: its host-arch pin, else the local Docker image id.
 fn image_id(t: &Template) -> Option<String> {
     t.manifest
-        .template
-        .sha256
-        .clone()
+        .pinned_sha256_for_host()
+        .map(str::to_owned)
         .or_else(|| rootfs::docker_image_id(t.image()).ok())
 }
 
@@ -579,7 +578,7 @@ pub fn rootfs_cmd(g: &Global, cmd: RootfsCmd) -> anyhow::Result<u8> {
             let arch = rootfs::Arch::host()?;
             let mut out = Vec::new();
             for t in &selected {
-                let pin = t.manifest.template.sha256.clone();
+                let pin = t.manifest.pinned_sha256_for_host().map(str::to_owned);
                 if pin.is_none() {
                     eprintln!(
                         "warning: template `{}` is not pinned; the rootfs is keyed by the \
