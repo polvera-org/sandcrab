@@ -1407,7 +1407,11 @@ pub async fn run(plan: &Plan) -> anyhow::Result<(RunResult, PathBuf)> {
                 name: t.clone(),
                 image,
                 oci_digest: oci,
-                pinned_digest: tpl.manifest.template.sha256.clone().unwrap_or_default(),
+                pinned_digest: tpl
+                    .manifest
+                    .pinned_sha256_for_host()
+                    .unwrap_or_default()
+                    .to_owned(),
                 rootfs_sha256: String::new(),
                 vcpu: tpl.manifest.resources.vcpu,
                 memory_mb: tpl.manifest.resources.memory_mb,
