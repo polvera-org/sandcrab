@@ -76,6 +76,29 @@ impl CgroupLeaf {
         fs::write(&p, value).map_err(|e| io_at(&p, e))
     }
 
+    /// Drop path (the helper may still be dying): `cgroup.kill` the leaf, then retry the
+    /// `rmdir` until it is empty or `timeout` passes. A plain [`Self::remove`] right after a
+    /// SIGKILL fails with `EBUSY`, and the run dir that would let the reaper retry is gone by
+    /// then, so the leaf would leak.
+    pub fn kill_and_remove(&self, timeout: std::time::Duration) {
+        let _ = fs::write(self.path.join("cgroup.kill"), "1");
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            match fs::remove_dir(&self.path) {
+                Ok(()) => return,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => return,
+                Err(e) if std::time::Instant::now() >= deadline => {
+                    tracing::warn!(
+                        cgroup = %self.path.display(), error = %e,
+                        "cannot remove cgroup leaf"
+                    );
+                    return;
+                }
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
+            }
+        }
+    }
+
     /// Best-effort `rmdir` (the leaf must be empty: call after the helper was reaped).
     pub fn remove(&self) {
         if let Err(e) = fs::remove_dir(&self.path)
