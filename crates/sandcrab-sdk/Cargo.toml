@@ -15,6 +15,11 @@ docker = ["dep:sandcrab-backend-docker"]
 # Firecracker microVM backend (hardware isolated; Linux x86_64 + /dev/kvm). Off by default.
 # The dependency only exists on Linux: elsewhere the feature compiles to nothing.
 firecracker = ["dep:sandcrab-backend-firecracker"]
+# libkrun microVM backend (hardware isolated; Apple Silicon macOS Hypervisor.framework and Linux
+# KVM). Off by default. libkrun is dlopened at runtime by the signed helper, so enabling it adds
+# no link-time dependency. The dependency only exists on macOS aarch64 and Linux: elsewhere the
+# feature compiles to nothing (`--backend libkrun` is then a "not compiled in" error).
+libkrun = ["dep:sandcrab-backend-libkrun"]
 
 [dependencies]
 sandcrab-core.workspace = true
@@ -29,6 +34,9 @@ tracing.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 sandcrab-backend-firecracker = { workspace = true, optional = true }
+
+[target.'cfg(any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64")))'.dependencies]
+sandcrab-backend-libkrun = { workspace = true, optional = true }
 
 [dev-dependencies]
 sandcrab-core = { workspace = true, features = ["test-util"] }
