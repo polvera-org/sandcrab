@@ -17,6 +17,7 @@ use crate::sample;
 pub enum BackendId {
     Docker,
     Firecracker,
+    Libkrun,
 }
 
 impl BackendId {
@@ -24,8 +25,9 @@ impl BackendId {
         match s.trim() {
             "docker" | "docker-dev" => Ok(Self::Docker),
             "firecracker" | "fc" => Ok(Self::Firecracker),
+            "libkrun" | "krun" => Ok(Self::Libkrun),
             other => Err(format!(
-                "unknown backend `{other}` (expected docker | firecracker)"
+                "unknown backend `{other}` (expected docker | firecracker | libkrun)"
             )),
         }
     }
@@ -35,6 +37,7 @@ impl BackendId {
         match self {
             Self::Docker => "docker",
             Self::Firecracker => "firecracker",
+            Self::Libkrun => "libkrun",
         }
     }
 }
@@ -56,6 +59,9 @@ pub struct Probe {
     /// `containerd-shim` (outside the container cgroup).
     pub shim_pid: Option<u32>,
     pub cgroup: Option<PathBuf>,
+    /// libkrun: the `sandcrab-krun` helper (the VMM process) and the sandbox run dir.
+    pub helper_pid: Option<u32>,
+    pub run_dir: Option<PathBuf>,
 }
 
 /// One opened backend.
@@ -108,6 +114,7 @@ pub async fn open(id: BackendId, opts: &OpenOpts) -> Result<LiveBackend, String>
     match id {
         BackendId::Docker => open_docker(builder, opts).await,
         BackendId::Firecracker => open_firecracker(builder, opts),
+        BackendId::Libkrun => open_libkrun(builder, opts),
     }
 }
 
@@ -197,6 +204,67 @@ fn open_firecracker(
     Err("firecracker backend not compiled in (needs Linux and the `firecracker` feature)".into())
 }
 
+/// libkrun with the operator's install (`sandcrab libkrun install`: helper + pinned libraries
+/// under `$SANDCRAB_HOME` / `~/.sandcrab`, shared rootfs cache there) but this run's own run dir.
+/// Linux: `SANDCRAB_BENCH_KRUN_CGROUP` names a delegated cgroup v2 parent for per-helper leaves
+/// (PSS + cgroup metrics); without it memory is sampled as helper RSS, as on macOS.
+#[cfg(all(
+    feature = "libkrun",
+    any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))
+))]
+fn open_libkrun(
+    builder: sandcrab_sdk::SandcrabBuilder,
+    opts: &OpenOpts,
+) -> Result<LiveBackend, String> {
+    let mut config = sandcrab_sdk::LibkrunConfig::from_env(opts.crabd.clone())
+        .map_err(|e| format!("libkrun config: {e}"))?;
+    config.run_dir = opts.state_dir.join("run").join("krun");
+    if config.validate().is_err() {
+        // Socket path budget (104 bytes on macOS): fall back to a short private dir.
+        config.run_dir = std::env::temp_dir()
+            .join(format!("sandcrab-bench-{}", std::process::id()))
+            .join("krun");
+        if config.validate().is_err() {
+            config.run_dir = PathBuf::from(format!("/tmp/scb-{}/krun", std::process::id()));
+        }
+    }
+    if let Some(cg) = std::env::var_os("SANDCRAB_BENCH_KRUN_CGROUP").filter(|v| !v.is_empty()) {
+        config.cgroup_parent = Some(PathBuf::from(cg));
+    }
+    if let sandcrab_sdk::libkrun::RootfsSource::Template { crabd } = &config.rootfs
+        && !crabd.is_file()
+    {
+        return Err(format!(
+            "static crabd not found at {} (build it with scripts/build-crabd.sh or pass --crabd)",
+            crabd.display()
+        ));
+    }
+    let sc = builder.libkrun(config).build().map_err(|e| {
+        format!("cannot initialise libkrun: {e} (`sandcrab doctor --backend libkrun`)")
+    })?;
+    Ok(LiveBackend {
+        id: BackendId::Libkrun,
+        caps: caps(&sc),
+        sc,
+        #[cfg(feature = "docker")]
+        docker: None,
+    })
+}
+
+#[cfg(not(all(
+    feature = "libkrun",
+    any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))
+)))]
+fn open_libkrun(
+    _builder: sandcrab_sdk::SandcrabBuilder,
+    _opts: &OpenOpts,
+) -> Result<LiveBackend, String> {
+    Err(
+        "libkrun backend not compiled in (needs macOS aarch64 or Linux and the `libkrun` feature)"
+            .into(),
+    )
+}
+
 #[cfg(feature = "docker")]
 fn status_code(e: &bollard::errors::Error) -> Option<u16> {
     match e {
@@ -227,6 +295,22 @@ impl LiveBackend {
                 shim_pid: init_pid.and_then(sample::proc_ppid),
                 name,
                 container_id,
+                ..Probe::default()
+            });
+        }
+        #[cfg(all(
+            feature = "libkrun",
+            any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))
+        ))]
+        if let Some(k) = self.sc.libkrun_backend() {
+            let dir = k.config().sandbox_run_dir(&sb.id().to_string());
+            let meta = sandcrab_sdk::libkrun::reap::RunMeta::load(&dir).ok()?;
+            return Some(Probe {
+                name: sb.id().to_string(),
+                helper_pid: meta.helper.map(|h| h.pid),
+                cgroup: meta.cgroup.filter(|p| p.join("memory.current").exists()),
+                run_dir: Some(dir),
+                ..Probe::default()
             });
         }
         // TODO(fc-bench): VMM pid + run dir from the Firecracker backend for RSS/PSS.
@@ -311,6 +395,14 @@ impl LiveBackend {
 
     async fn resources_gone(&self, probe: &Probe) -> Result<bool, String> {
         let cgroup_gone = probe.cgroup.as_deref().is_none_or(|p| !p.exists());
+        // libkrun: `destroy` removes the run dir only after the helper has exited.
+        let run_dir_gone = probe.run_dir.as_deref().is_none_or(|p| !p.exists());
+        let helper_gone = probe
+            .helper_pid
+            .is_none_or(|pid| !sample::process_alive(pid));
+        if probe.helper_pid.is_some() || probe.run_dir.is_some() {
+            return Ok(cgroup_gone && run_dir_gone && helper_gone);
+        }
         #[cfg(feature = "docker")]
         if let Some(docker) = &self.docker {
             let container_gone = match docker.inspect_container(&probe.name, None).await {
@@ -347,5 +439,8 @@ mod tests {
         assert_eq!(BackendId::parse("fc").unwrap(), BackendId::Firecracker);
         assert!(BackendId::parse("kata").is_err());
         assert_eq!(BackendId::Firecracker.label(), "firecracker");
+        assert_eq!(BackendId::parse("libkrun").unwrap(), BackendId::Libkrun);
+        assert_eq!(BackendId::parse("krun").unwrap(), BackendId::Libkrun);
+        assert_eq!(BackendId::Libkrun.label(), "libkrun");
     }
 }

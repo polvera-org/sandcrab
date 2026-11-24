@@ -122,6 +122,49 @@ pub fn proc_ppid(pid: u32) -> Option<u32> {
         .ok()
 }
 
+/// Resident set size (bytes) of one process, on any host: `VmRSS` on Linux, `ps -o rss=` on
+/// macOS (no cgroups, no PSS there). **RSS, not PSS**: shared pages (the libkrun/libkrunfw
+/// dylibs, the guest RAM's resident part) count fully, so it is reported under its own
+/// `*_rss*` metric ids and never mixed with the Linux PSS columns (design §13).
+pub fn rss(pid: u32) -> Result<u64, String> {
+    #[cfg(target_os = "linux")]
+    {
+        proc_rss(pid).ok_or_else(|| format!("/proc/{pid}/status: no VmRSS"))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let out = cmd("ps", &["-o", "rss=", "-p", &pid.to_string()])
+            .ok_or_else(|| format!("ps -o rss= -p {pid} failed (process gone?)"))?;
+        parse_ps_rss_kib(&out).ok_or_else(|| format!("ps -o rss=: unexpected output {out:?}"))
+    }
+}
+
+/// `ps -o rss=` prints KiB.
+#[cfg_attr(target_os = "linux", allow(dead_code))]
+fn parse_ps_rss_kib(out: &str) -> Option<u64> {
+    out.trim().parse::<u64>().ok().map(|kib| kib * 1024)
+}
+
+/// Is `pid` still running (and not a zombie)?
+#[must_use]
+pub fn process_alive(pid: u32) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|s| {
+                s.rsplit_once(')')
+                    .map(|(_, rest)| rest.trim_start().to_owned())
+            })
+            .is_some_and(|rest| !rest.starts_with('Z'))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        cmd("ps", &["-o", "stat=", "-p", &pid.to_string()])
+            .is_some_and(|s| !s.trim().is_empty() && !s.trim_start().starts_with('Z'))
+    }
+}
+
 /// `VmRSS` (bytes) from `/proc/<pid>/status` (world-readable, unlike smaps).
 #[must_use]
 pub fn proc_rss(pid: u32) -> Option<u64> {
@@ -204,6 +247,19 @@ mod tests {
     fn stat_ticks_with_spaces_in_comm() {
         let stat = "1234 (my (odd) proc) S 1 1234 1234 0 -1 4194560 100 0 0 0 7 5 0 0 20 0 1 0";
         assert_eq!(parse_stat_ticks(stat), Some(12));
+    }
+
+    #[test]
+    fn ps_rss_is_kib() {
+        assert_eq!(parse_ps_rss_kib("  2048\n"), Some(2 * 1024 * 1024));
+        assert_eq!(parse_ps_rss_kib(""), None);
+    }
+
+    #[test]
+    fn rss_of_self() {
+        let me = std::process::id();
+        assert!(rss(me).unwrap() > 0);
+        assert!(process_alive(me));
     }
 
     #[test]
