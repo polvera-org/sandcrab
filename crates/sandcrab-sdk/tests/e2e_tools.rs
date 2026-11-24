@@ -9,8 +9,7 @@ use std::time::{Duration, Instant};
 
 use common::{bash_t, run, sh, wait_for};
 use sandcrab_sdk::{
-    KillSignal, MountMode, NetworkPolicy, SandboxConfig, SandboxError, ToolError, is_tool_error,
-    tool_definitions,
+    KillSignal, MountMode, NetworkPolicy, SandboxConfig, ToolError, is_tool_error, tool_definitions,
 };
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -120,17 +119,13 @@ async fn dev_server_via_process_tools_and_published_port() {
     run("dev-server", |h| async move {
         let ws = h.name("site");
         h.ws().create(&ws).unwrap();
+        // Docker publishes through its own port mapping (needs a NIC, hence `unrestricted`);
+        // the microVM backends forward over `tunnel.open`, so the same scenario runs there.
         let config = SandboxConfig::from_template("ts-dev")
             .mount(ws.as_str(), "/workspace", MountMode::ReadWrite)
             .default_cwd("/workspace")
             .network(NetworkPolicy::Unrestricted)
             .port(8080);
-        if !h.is_docker() {
-            // Firecracker V1 has no published ports (docs/hosting.md): refused, never ignored.
-            let err = h.sc.spawn(config).await.unwrap_err();
-            assert!(matches!(err, SandboxError::Unimplemented(_)), "{err}");
-            return;
-        }
         let sb = h.sc.spawn(config).await.unwrap();
         let addr = sb.host_addr(8080).expect("port 8080 published");
         assert!(addr.ip().is_loopback(), "published on {addr}");
