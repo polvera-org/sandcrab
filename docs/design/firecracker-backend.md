@@ -111,7 +111,13 @@ The same binary has two roles. Role selection: `getpid()==1` → **init**. Other
 2. Find drives by **virtio-blk ID** (`/sys/block/vd*/serial` = FC `drive_id`). The fallback is the ext4 superblock label at offset 1024+120.
    Mount the scratch drive at `/mnt/scratch`, then overlay (`lowerdir=/`, `upperdir=/mnt/scratch/upper`, `workdir=/mnt/scratch/work`) at `/mnt/newroot`.
    Move `/proc /sys /dev` into it, `pivot_root`, and lazy-unmount the old root.
-3. Mount `devpts` (`/dev/pts`, `ptmxmode=0666`), `tmpfs` at `/dev/shm` and `/run` (small, `size=` 5% of RAM). `/tmp` stays on the overlay (disk), not RAM.
+3. Mount `devpts` (`/dev/pts`, `ptmxmode=0666`), `tmpfs` at `/dev/shm` and `/run` (small, `size=` 5% of RAM), and at `/tmp`
+   the Docker backend's tmpfs: `nosuid,nodev,noexec`, `size=256m`, `mode=1777` (`SANDBOX_TMP_SIZE_MB`). Then the fork-bomb cap:
+   mount cgroup v2 at `/sys/fs/cgroup` (libkrun's `init.krun` already did), enable `pids`, and create `/sandbox` with
+   `pids.max` = 1024 (`SANDBOX_PIDS_MAX`, Docker's `pids_limit`). Without a `pids` controller the fallback is `RLIMIT_NPROC`,
+   which the kernel never applies to uid 0.
+   `crabd serve` is forked on a thread whose capability bounding set was emptied first (as Docker's `cap_drop: ALL`), while
+   PID 1 is briefly in `/sandbox`, so the child is born capped. Then the cgroupfs is remounted read-only.
 4. Bring `lo` up with a single `RTM_NEWLINK` via `netlink-packet-route` + `netlink-sys` (safe APIs, guest-only deps). `eth0` was already configured by the kernel `ip=`.
 5. Listen on **vsock port 1 (control)**. This takes framed JSON-RPC, as below.
 6. Install `SIGCHLD` handling. A reaper loop runs `waitpid(-1, WNOHANG)`. Zombie handling is **split**: `crabd serve` reaps its own

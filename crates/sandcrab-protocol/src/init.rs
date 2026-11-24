@@ -41,6 +41,14 @@ pub const MAX_EXT4_LABEL_LEN: usize = 16;
 /// Default grace period of `init.shutdown`.
 pub const DEFAULT_SHUTDOWN_GRACE_MS: u64 = 500;
 
+/// Max tasks (processes + threads) of a sandbox: the fork-bomb cap. The Docker backend's
+/// default `pids_limit`; `crabd init` sets it as `pids.max` of the guest cgroup holding
+/// `crabd serve` and every tool process.
+pub const SANDBOX_PIDS_MAX: u32 = 1024;
+/// Size of the `nosuid,nodev,noexec` tmpfs at `/tmp`, in MiB. The Docker backend's default
+/// `tmp_size_mb`; `crabd init` mounts the same tmpfs in microVM guests.
+pub const SANDBOX_TMP_SIZE_MB: u64 = 256;
+
 /// `init.configure` params: everything the guest needs that is not baked into the rootfs.
 ///
 /// Delivered over vsock (not the kernel cmdline or MMDS): `env` may carry secrets, and the

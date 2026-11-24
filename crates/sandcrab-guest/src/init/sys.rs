@@ -6,10 +6,7 @@
 use std::{
     ffi::CString,
     fs, io,
-    os::{
-        fd::{AsFd, AsRawFd},
-        unix::fs::PermissionsExt,
-    },
+    os::fd::{AsFd, AsRawFd},
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -174,7 +171,7 @@ pub fn overlay_root(scratch_dev: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Step 3: `/dev/pts`, `/dev/shm`, `/run`; `/tmp` stays on the overlay (disk, not RAM).
+/// Step 3: `/dev/pts`, `/dev/shm`, `/run`, then `/tmp` (see [`mount_tmp`]).
 /// A target that is already a mount point is left alone: under libkrun `init.krun`
 /// mounted `/dev/pts` and `/dev/shm`, and they moved along with `/dev`.
 pub fn late_mounts() -> io::Result<()> {
@@ -209,10 +206,106 @@ pub fn late_mounts() -> io::Result<()> {
         }
         mount_unless_busy(source, target, fstype, flags, data)?;
     }
-    mkdir_p(Path::new("/tmp"))?;
-    fs::set_permissions("/tmp", fs::Permissions::from_mode(0o1777))
-        .map_err(|e| ctx(e, "chmod /tmp"))?;
-    Ok(())
+    mount_tmp()
+}
+
+/// `/tmp` mount flags: the Docker backend's `nosuid,nodev,noexec` tmpfs.
+pub const TMP_FLAGS: MountFlags = NOSUID_NODEV_NOEXEC;
+
+/// `/tmp` tmpfs data: `mode=1777` and the Docker backend's size cap.
+#[must_use]
+pub fn tmp_mount_data(size_mb: u64) -> String {
+    format!("mode=1777,size={size_mb}m")
+}
+
+/// A fresh size-limited tmpfs on `/tmp`, `nosuid,nodev,noexec`, like the Docker backend's
+/// (`HostConfig.tmpfs`): nothing under `/tmp` can be executed or `mmap`ed `PROT_EXEC`, and
+/// filling it cannot exhaust the scratch drive. It counts against guest RAM, as Docker's
+/// counts against the container's memory limit. Always mounted (stacked over whatever the
+/// image had in `/tmp`, which Docker hides the same way).
+fn mount_tmp() -> io::Result<()> {
+    let tmp = Path::new("/tmp");
+    mkdir_p(tmp)?;
+    mount(
+        "tmpfs",
+        tmp,
+        "tmpfs",
+        TMP_FLAGS,
+        &tmp_mount_data(sandcrab_protocol::init::SANDBOX_TMP_SIZE_MB),
+    )
+}
+
+/// cgroup v2 mount point.
+pub const CGROUP_ROOT: &str = "/sys/fs/cgroup";
+/// The cgroup holding `crabd serve` and every tool process.
+pub const SANDBOX_CGROUP: &str = "/sys/fs/cgroup/sandbox";
+
+/// Whether a `cgroup.controllers` text lists `name`.
+#[must_use]
+pub fn has_controller(controllers: &str, name: &str) -> bool {
+    controllers.split_whitespace().any(|c| c == name)
+}
+
+/// The fork-bomb cap: mount cgroup v2 (unless `init.krun` already did), enable the `pids`
+/// controller and create [`SANDBOX_CGROUP`] with `pids.max = pids_max`. `crabd serve` is
+/// spawned into it ([`enter_cgroup`]), so the cap covers every sandbox task, whatever its
+/// uid (root included), as Docker's `pids_limit` does. Fails when the kernel has no `pids`
+/// controller; the caller falls back to `RLIMIT_NPROC`.
+pub fn setup_pids_cgroup(pids_max: u32) -> io::Result<PathBuf> {
+    let root = Path::new(CGROUP_ROOT);
+    if !root.join("cgroup.controllers").exists() {
+        mount_unless_busy("cgroup2", root, "cgroup2", NOSUID_NODEV_NOEXEC, "")?;
+    }
+    let controllers = fs::read_to_string(root.join("cgroup.controllers"))
+        .map_err(|e| ctx(e, "read cgroup.controllers"))?;
+    if !has_controller(&controllers, "pids") {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("no pids cgroup controller (have: {})", controllers.trim()),
+        ));
+    }
+    // The root cgroup may hold processes (PID 1) and still delegate controllers.
+    fs::write(root.join("cgroup.subtree_control"), "+pids")
+        .map_err(|e| ctx(e, "enable the pids controller"))?;
+    let dir = Path::new(SANDBOX_CGROUP);
+    match fs::create_dir(dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(ctx(e, format!("mkdir {}", dir.display()))),
+    }
+    fs::write(dir.join("pids.max"), pids_max.to_string()).map_err(|e| ctx(e, "write pids.max"))?;
+    Ok(dir.to_path_buf())
+}
+
+/// Move this whole process (every thread) into cgroup `dir`.
+pub fn enter_cgroup(dir: &Path) -> io::Result<()> {
+    fs::write(dir.join("cgroup.procs"), std::process::id().to_string())
+        .map_err(|e| ctx(e, format!("enter cgroup {}", dir.display())))
+}
+
+/// Make the cgroup v2 mount read-only once `crabd serve` is placed. Docker mounts the
+/// container's cgroupfs read-only too. The files are root-owned, so this matters when the
+/// sandbox user is uid 0: without capabilities it could still write `pids.max` through the
+/// owner permission bits, but it can neither write a read-only mount nor remount it.
+pub fn seal_cgroupfs() -> io::Result<()> {
+    rustix::mount::mount_remount(
+        CGROUP_ROOT,
+        MountFlags::BIND | MountFlags::RDONLY | NOSUID_NODEV_NOEXEC,
+        "",
+    )
+    .map_err(|e| ctx(e, "remount cgroupfs read-only"))
+}
+
+/// The `RLIMIT_NPROC` fallback when there is no `pids` controller: set on PID 1 (root is
+/// exempt from it) and inherited by `crabd serve`. It counts the tasks of the sandbox uid,
+/// which in the guest are exactly the sandbox's, but the kernel never applies it to uid 0.
+pub fn limit_nproc(max: u32) -> io::Result<()> {
+    let lim = rustix::process::Rlimit {
+        current: Some(u64::from(max)),
+        maximum: Some(u64::from(max)),
+    };
+    rustix::process::setrlimit(rustix::process::Resource::Nproc, lim)
+        .map_err(|e| ctx(e, "setrlimit(RLIMIT_NPROC)"))
 }
 
 pub fn set_hostname(name: &str) -> io::Result<()> {
@@ -357,4 +450,29 @@ pub fn create_owned_dir(dir: &Path, uid: u32, gid: u32) -> io::Result<()> {
         dirs::chown_fd(&d.fd, uid, gid).map_err(|e| ctx(e, format!("chown {}", dir.display())))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Same tmpfs as the Docker backend's `HostConfig.tmpfs["/tmp"]`
+    /// (`rw,nosuid,nodev,noexec,size=256m,mode=1777`).
+    #[test]
+    fn tmp_matches_the_docker_tmpfs() {
+        assert!(TMP_FLAGS.contains(MountFlags::NOSUID | MountFlags::NODEV | MountFlags::NOEXEC));
+        assert!(!TMP_FLAGS.contains(MountFlags::RDONLY));
+        assert_eq!(
+            tmp_mount_data(sandcrab_protocol::init::SANDBOX_TMP_SIZE_MB),
+            "mode=1777,size=256m"
+        );
+    }
+
+    #[test]
+    fn controller_lookup_is_exact() {
+        assert!(has_controller("cpuset cpu io memory pids\n", "pids"));
+        assert!(!has_controller("cpuset cpu io memory\n", "pids"));
+        assert!(!has_controller("pidsx", "pids"));
+        assert!(!has_controller("", "pids"));
+    }
 }

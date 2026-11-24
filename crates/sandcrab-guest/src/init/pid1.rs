@@ -17,7 +17,8 @@ use std::{
 };
 
 use sandcrab_protocol::init::{
-    CONTROL_PORT, DEFAULT_SHUTDOWN_GRACE_MS, InitConfig, InitConfigureResult, SCRATCH_DRIVE_ID,
+    CONTROL_PORT, DEFAULT_SHUTDOWN_GRACE_MS, InitConfig, InitConfigureResult, SANDBOX_PIDS_MAX,
+    SCRATCH_DRIVE_ID,
 };
 use tokio::signal::unix::{SignalKind, signal};
 use tracing::{error, info, warn};
@@ -31,7 +32,7 @@ use super::{
     drives::{self, BlockDevice},
     netlink, reap, sys,
 };
-use crate::{server::BoxFuture, vsock};
+use crate::{hardening, server::BoxFuture, vsock};
 
 /// Held while spawning children and while reaping, so the reaper can never collect a child
 /// whose exec failed before `std` collects it (std asserts on that `waitpid`).
@@ -91,8 +92,9 @@ async fn boot() -> io::Result<()> {
     if let Err(e) = sys::disable_core_dumps() {
         warn!(error = %e, "could not disable core dumps");
     }
+    let pids_cap = pids_cap();
 
-    let ops = Arc::new(Pid1Ops::new(devices));
+    let ops = Arc::new(Pid1Ops::new(devices, pids_cap));
     let mut sigchld = signal(SignalKind::child())?;
     let mut sigint = signal(SignalKind::interrupt())?;
     let listener = vsock::bind(CONTROL_PORT)?;
@@ -128,6 +130,39 @@ async fn boot() -> io::Result<()> {
     }
 }
 
+/// How the sandbox's task count is capped (Docker's `pids_limit`, [`SANDBOX_PIDS_MAX`]).
+#[derive(Debug)]
+enum PidsCap {
+    /// cgroup v2 `pids.max` on this cgroup; `crabd serve` is spawned into it.
+    Cgroup(PathBuf),
+    /// No `pids` controller: `RLIMIT_NPROC` on the sandbox uid (not enforced for uid 0).
+    Rlimit,
+    /// Neither could be set up.
+    Unlimited,
+}
+
+/// cgroup v2 `pids.max` is the primary cap: it counts every task in the subtree whatever its
+/// uid (uid 0 included), threads too, as Docker's pids cgroup does, and the sandbox cannot
+/// leave or raise it. `RLIMIT_NPROC` only if the kernel lacks the `pids` controller.
+fn pids_cap() -> PidsCap {
+    match sys::setup_pids_cgroup(SANDBOX_PIDS_MAX) {
+        Ok(dir) => {
+            info!(cgroup = %dir.display(), pids_max = SANDBOX_PIDS_MAX, "sandbox pids cap");
+            PidsCap::Cgroup(dir)
+        }
+        Err(e) => {
+            warn!(error = %e, "no pids cgroup; falling back to RLIMIT_NPROC (not applied to uid 0)");
+            match sys::limit_nproc(SANDBOX_PIDS_MAX) {
+                Ok(()) => PidsCap::Rlimit,
+                Err(e) => {
+                    error!(error = %e, "no fork-bomb cap for the sandbox");
+                    PidsCap::Unlimited
+                }
+            }
+        }
+    }
+}
+
 fn resolve(devices: &[BlockDevice], drive_id: &str, label: &str) -> Option<PathBuf> {
     drives::resolve_drive(devices, drive_id, label, |p| {
         drives::read_ext4_label(p).ok().flatten()
@@ -154,14 +189,16 @@ struct Configured {
 
 struct Pid1Ops {
     devices: Vec<BlockDevice>,
+    pids_cap: PidsCap,
     state: tokio::sync::Mutex<Option<Configured>>,
     serve_pid: AtomicU32,
 }
 
 impl Pid1Ops {
-    fn new(devices: Vec<BlockDevice>) -> Self {
+    fn new(devices: Vec<BlockDevice>, pids_cap: PidsCap) -> Self {
         Self {
             devices,
+            pids_cap,
             state: tokio::sync::Mutex::new(None),
             serve_pid: AtomicU32::new(0),
         }
@@ -215,13 +252,46 @@ impl Pid1Ops {
         })
     }
 
+    /// Spawn `crabd serve` as the sandbox user with an empty capability bounding set, inside
+    /// the pids cgroup.
+    ///
+    /// Both without `pre_exec` (which would need `unsafe`): the fork happens on a dedicated
+    /// thread whose bounding set was cleared first (it is per thread and copied into the
+    /// child; PID 1's other threads keep theirs), and PID 1 briefly enters the sandbox cgroup
+    /// so the child is born in it (cgroup v2 moves the whole process), then moves back. The
+    /// child never runs uncapped, not even for an instant.
     fn spawn_serve(&self, v: &ValidatedConfig) -> io::Result<u32> {
         let mut cmd = serve_command(Path::new("/proc/self/exe"), v);
+        let cgroup = match &self.pids_cap {
+            PidsCap::Cgroup(dir) => Some(dir.as_path()),
+            PidsCap::Rlimit | PidsCap::Unlimited => None,
+        };
         let _guard = SPAWN_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let child = std::thread::scope(|s| {
+            s.spawn(|| {
+                // Fail closed: never start tools with a non-empty bounding set.
+                hardening::clear_capability_bounding_set()?;
+                let Some(dir) = cgroup else {
+                    return cmd.spawn();
+                };
+                sys::enter_cgroup(dir)?;
+                let child = cmd.spawn();
+                if let Err(e) = sys::enter_cgroup(Path::new(sys::CGROUP_ROOT)) {
+                    error!(error = %e, "PID 1 could not leave the sandbox cgroup");
+                }
+                child
+            })
+            .join()
+            .map_err(|_| io::Error::other("spawn thread panicked"))?
+        })?;
+        if cgroup.is_some()
+            && let Err(e) = sys::seal_cgroupfs()
+        {
+            warn!(error = %e, "cgroupfs stays writable");
+        }
         // The `Child` is dropped without `wait`: the reaper owns all exit statuses.
-        let child = cmd.spawn()?;
         let pid = child.id();
         self.serve_pid.store(pid, Ordering::Relaxed);
         info!(
@@ -229,6 +299,7 @@ impl Pid1Ops {
             uid = v.config.user.uid,
             gid = v.config.user.gid,
             port = v.config.tools_port,
+            pids_cap = ?self.pids_cap,
             "crabd serve started"
         );
         Ok(pid)

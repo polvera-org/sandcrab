@@ -25,8 +25,9 @@ pub struct DockerLimits {
 impl Default for DockerLimits {
     fn default() -> Self {
         Self {
-            pids_limit: 1024,
-            tmp_size_mb: 256,
+            // Shared with the microVM guests (`crabd init`), so every backend has one baseline.
+            pids_limit: i64::from(sandcrab_protocol::init::SANDBOX_PIDS_MAX),
+            tmp_size_mb: sandcrab_protocol::init::SANDBOX_TMP_SIZE_MB,
             stop_grace: Duration::from_secs(2),
         }
     }
