@@ -215,8 +215,11 @@ pub const LINUX_X86_64: PlatformPins = PlatformPins {
         git: LIBKRUN_GIT,
         homebrew: None,
         release: None,
-        // TODO(lk-e2e-linux): filled from the kvm-dedicated reference build.
-        reference_build_sha256: None,
+        // Reference build on the KVM host (Ubuntu 26.04, stable Rust), after `patchelf`;
+        // a second build there reproduced it byte for byte.
+        reference_build_sha256: Some(
+            "16a1b77f513836f18e3623388ebd7e582c7eb4b3cf34d923882092c3893ac648",
+        ),
     },
     libkrunfw: LibPin {
         name: "libkrunfw",
@@ -230,8 +233,11 @@ pub const LINUX_X86_64: PlatformPins = PlatformPins {
             member: Some("lib/x86_64-linux-gnu/libkrunfw.so.5.6.4"),
             member_sha256: Some("5ec9c03e97e2f6df7817b702eb8bfbc090b36c14186b33ddef4a2e9bfccb1c24"),
         }),
-        // TODO(lk-e2e-linux): filled from the kvm-dedicated reference build.
-        reference_build_sha256: None,
+        // `--fw-from-source` (kernel build) reference on the KVM host. Differs from the
+        // release member: the upstream CI toolchain is not the host's.
+        reference_build_sha256: Some(
+            "f57aed764d365805de5610ac6d6db99bdc1f04773b57ee187a249116bbfddc55",
+        ),
     },
 };
 
