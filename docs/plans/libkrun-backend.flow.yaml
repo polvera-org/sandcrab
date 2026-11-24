@@ -240,7 +240,7 @@ steps:
     title: "crabd parity with Docker hardening in microVMs: drop the capability bounding set, pids limit, /tmp as size-limited nosuid,nodev,noexec tmpfs; seccomp evaluated (design note, may defer)"
     depends_on: [guest-hardening]
     artifacts: [crates/sandcrab-guest/]
-    status: doing
+    status: done
 
   - id: small-fixes
     phase: implement
@@ -258,11 +258,19 @@ steps:
     artifacts: [crates/sandcrab-backend-libkrun/, crates/sandcrab-guest/]
     status: doing
 
+  - id: guest-hardening-3
+    phase: implement
+    agent: ada
+    title: "crabd: /sys read-only for the sandbox (Docker parity), hardening sysctls in init (unprivileged userns/bpf/userfaultfd/io_uring/perf off) per docs/design/guest-seccomp.md"
+    depends_on: [guest-hardening-2, lk-w2-emfile]
+    artifacts: [crates/sandcrab-guest/]
+    status: todo
+
   - id: lk-review
     phase: verify
     agent: nebula
     title: "QA + security review (helper unsafe island, TSI exposure, virtio-fs traversal/identity race, capability honesty, lifeline); decide: per-spawn root-disk hash, Linux lib-hash cost (~187 ms w/o SHA-NI)"
-    depends_on: [bench-report, fc-net-egress, guest-hardening-2, small-fixes]
+    depends_on: [bench-report, fc-net-egress, guest-hardening-2, small-fixes, guest-hardening-3]
     status: todo
 
   - id: lk-live
