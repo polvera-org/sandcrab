@@ -412,14 +412,14 @@ async fn read_until(
 /// Published ports over vsock `CONNECT` + `tunnel.open` on real Firecracker, with network
 /// `disabled` (no NIC).
 ///
-/// Must work: HTTP keep-alive, `Connection: close` and HTTP/1.0-with-`SHUT_WR` responses, a
-/// 4 MiB upload, data after a guest half-close, a refused port, listeners closing on destroy.
+/// Must work: HTTP keep-alive, `Connection: close` and HTTP/1.0-with-`SHUT_WR` responses
+/// followed by the server's EOF (read-until-close clients), a 4 MiB upload, a refused port,
+/// listeners closing on destroy.
 ///
-/// Known limitation (printed as `PROBE`, asserted so a fix is noticed): Firecracker's vsock
-/// bridge does not forward a guest-side `SHUT_WR`, so the host client gets the guest's bytes
-/// but not its EOF while the tunnel is open (needs `crabd` to close the vsock stream on target
-/// EOF). The host does not forward the client's `SHUT_WR` either (Firecracker would turn it
-/// into a full close and drop the reply).
+/// Firecracker's vsock bridge drops half-close in both directions. `crabd` therefore closes a
+/// vsock tunnel when its guest target reaches EOF, so the host sees the server's FIN as a full
+/// close and later host bytes are dropped (asserted). The host does not forward the client's
+/// `SHUT_WR` (Firecracker would turn it into a full close and drop the reply).
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires /dev/kvm, pinned artifacts, a pinned sandcrab/ts-dev:0.1.0 and a static crabd"]
 async fn published_ports_over_vsock_tunnels() {
@@ -510,26 +510,27 @@ async fn published_ports_over_vsock_tunnels() {
     assert!(got.contains("hello from fc /ka2"), "{got:?}");
     drop((r, w));
 
-    // `Connection: close`: the full response arrives; the server's FIN does not (limitation).
-    let (mut r, w) = TcpStream::connect(host(8080)).await.unwrap().into_split();
-    let mut w = w;
+    // `Connection: close`: the full response, then the server's FIN (crabd closes the
+    // tunnel on target EOF).
+    let (mut r, mut w) = TcpStream::connect(host(8080)).await.unwrap().into_split();
     w.write_all(b"GET /close HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
         .await
         .unwrap();
-    let (got, _) = read_until(&mut r, "hello from fc /close", wait).await;
-    assert!(got.contains("hello from fc /close"), "{got:?}");
-    let (_, eof) = read_until(&mut r, "", Duration::from_secs(2)).await;
+    let (got, eof) = read_until(&mut r, "", wait).await;
     println!("PROBE guest FIN reaches host (Connection: close): {eof}");
-    let guest_fin_forwarded = eof;
+    assert!(got.contains("hello from fc /close"), "{got:?}");
+    assert!(eof, "server FIN not forwarded: {got:?}");
     drop((r, w));
 
-    // HTTP/1.0 with the client half-closing after its request: the reply still arrives
-    // (the host does not forward the SHUT_WR, which Firecracker would make a full close).
+    // HTTP/1.0 with the client half-closing after its request: the reply and the server's
+    // FIN still arrive (the host does not forward the SHUT_WR, which Firecracker would make
+    // a full close).
     let (mut r, mut w) = TcpStream::connect(host(8080)).await.unwrap().into_split();
     w.write_all(b"GET /half HTTP/1.0\r\n\r\n").await.unwrap();
     w.shutdown().await.unwrap();
-    let (got, _) = read_until(&mut r, "hello from fc /half", wait).await;
+    let (got, eof) = read_until(&mut r, "", wait).await;
     assert!(got.contains("hello from fc /half"), "{got:?}");
+    assert!(eof, "{got:?}");
     drop(r);
 
     // 4 MiB upload, reply when complete.
@@ -542,26 +543,17 @@ async fn published_ports_over_vsock_tunnels() {
     assert_eq!(got, want);
     drop((r, w));
 
-    // Guest half-closes after `hello`: the host can still send afterwards.
+    // Guest half-closes after `hello`: the host gets the bytes and the EOF; crabd closed the
+    // tunnel, so later host bytes are dropped (the price of read-until-close on vsock).
     let (mut r, mut w) = TcpStream::connect(host(7002)).await.unwrap().into_split();
-    let (got, eof) = read_until(&mut r, "hello", wait).await;
-    assert_eq!(got, "hello");
-    w.write_all(b"after-guest-fin").await.unwrap();
+    let (got, eof) = read_until(&mut r, "", wait).await;
+    assert_eq!((got.as_str(), eof), ("hello", true));
+    let _ = w.write_all(b"after-guest-fin").await;
     tokio::time::sleep(Duration::from_millis(500)).await;
-    let seen = bash(&sb, "cat /tmp/7002.txt 2>&1").await.stdout;
-    let (_, eof_later) = read_until(&mut r, "", Duration::from_secs(1)).await;
-    println!(
-        "PROBE guest half-close: eof_seen={} guest got {seen:?}",
-        eof || eof_later
-    );
-    assert_eq!(seen, "after-guest-fin");
+    let seen = bash(&sb, "cat /tmp/7002.txt 2>/dev/null").await.stdout;
+    println!("PROBE host bytes after the guest's FIN: guest got {seen:?}");
+    assert!(!seen.contains("after-guest-fin"), "{seen:?}");
     drop((r, w));
-
-    // Documented limitation: flip this when crabd closes vsock tunnels on target EOF.
-    assert!(
-        !guest_fin_forwarded,
-        "the guest's FIN now reaches the host: update docs/protocol.md and this test"
-    );
 
     sb.destroy().await.unwrap();
     for p in &ports {
