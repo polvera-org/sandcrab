@@ -385,7 +385,7 @@ fn resolved_spec(env: &Env, template: &str) -> ResolvedSpec {
     ResolvedSpec {
         id: SandboxId::new(),
         image: manifest.image().to_owned(),
-        image_sha256: manifest.template.sha256.clone(),
+        image_sha256: manifest.pinned_sha256_for_host().map(str::to_owned),
         mounts: Vec::new(),
         default_cwd: manifest.workspace.workdir.clone(),
         env: Default::default(),

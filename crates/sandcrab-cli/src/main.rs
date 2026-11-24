@@ -9,6 +9,11 @@ mod args;
 mod doctor;
 #[cfg(all(feature = "firecracker", target_os = "linux"))]
 mod firecracker;
+#[cfg(all(
+    feature = "libkrun",
+    any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))
+))]
+mod libkrun;
 mod run;
 mod util;
 mod workspace;
@@ -29,8 +34,10 @@ use crate::args::{BackendArg, SpawnArgs, parse_backend};
                   kernel: fast, officially supported for single-tenant or trusted-host \
                   workloads (not hardware isolated).\n\
                   Firecracker (`--backend firecracker`, Linux) is hardware isolated and needs a \
-                  read-writable /dev/kvm; `sandcrab doctor` checks its prerequisites. A backend \
-                  that cannot start is an error: sandcrab never falls back to another one."
+                  read-writable /dev/kvm. libkrun (`--backend libkrun`, Apple Silicon macOS and \
+                  Linux) is hardware isolated and needs `sandcrab libkrun install`. \
+                  `sandcrab doctor` checks every backend's prerequisites. A backend that cannot \
+                  start is an error: sandcrab never falls back to another one."
 )]
 pub struct Cli {
     #[command(flatten)]
@@ -52,7 +59,8 @@ pub struct Global {
     #[arg(long = "templates-dir", global = true)]
     pub templates_dirs: Vec<PathBuf>,
 
-    /// Runtime backend (explicit; no fallback): docker | firecracker (Linux builds).
+    /// Runtime backend (explicit; no fallback): docker | firecracker (Linux builds) |
+    /// libkrun (macOS aarch64 and Linux builds).
     #[arg(long, global = true, env = "SANDCRAB_BACKEND", value_parser = parse_backend)]
     pub backend: Option<BackendArg>,
 
@@ -71,6 +79,12 @@ pub struct Global {
     #[arg(long, global = true)]
     pub crabd: Option<PathBuf>,
 
+    /// libkrun only: allow `--network unrestricted` through libkrun's TSI socket proxy.
+    /// SECURITY: with TSI the guest can reach services listening on the HOST's loopback
+    /// (127.0.0.1) and LAN. Off by default, where `unrestricted` is refused as unenforceable.
+    #[arg(long, global = true)]
+    pub libkrun_tsi: bool,
+
     /// Machine-readable JSON output.
     #[arg(long, global = true)]
     pub json: bool,
@@ -83,7 +97,9 @@ pub struct Global {
 #[derive(Debug, Subcommand)]
 pub enum Commands {
     /// Check the host: crabd, Docker, template images + pins, Firecracker prerequisites
-    /// (/dev/kvm, pinned artifacts, rootfs cache, tap pool), state dir.
+    /// (/dev/kvm, pinned artifacts, rootfs cache, tap pool), libkrun prerequisites (hypervisor,
+    /// signed helper, pinned libraries, mke2fs, workspace case sensitivity; reaps orphaned
+    /// libkrun run dirs of dead processes), state dir.
     Doctor {
         /// Remove orphaned sandcrab containers — only this user's, for this state dir, whose
         /// sandcrab process is gone — and Firecracker run dirs of dead sandcrab processes,
@@ -119,6 +135,16 @@ pub enum Commands {
     Rootfs {
         #[command(subcommand)]
         action: firecracker::RootfsCmd,
+    },
+
+    /// libkrun backend: install the pinned libraries and the signed helper.
+    #[cfg(all(
+        feature = "libkrun",
+        any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))
+    ))]
+    Libkrun {
+        #[command(subcommand)]
+        action: libkrun::LibkrunCmd,
     },
 
     /// Spawn a sandbox, run a command, print its output, destroy the sandbox.
@@ -215,6 +241,11 @@ async fn dispatch(cli: Cli) -> anyhow::Result<u8> {
         Commands::Template { action } => workspace::template(g, action),
         #[cfg(all(feature = "firecracker", target_os = "linux"))]
         Commands::Rootfs { action } => firecracker::rootfs_cmd(g, action),
+        #[cfg(all(
+            feature = "libkrun",
+            any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))
+        ))]
+        Commands::Libkrun { action } => libkrun::libkrun_cmd(g, action),
         Commands::Run {
             spawn,
             keep,

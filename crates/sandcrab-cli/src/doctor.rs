@@ -336,6 +336,20 @@ pub async fn doctor(g: &Global, fix: bool, reap: Reap) -> anyhow::Result<u8> {
     kvm(&mut r);
     #[cfg(all(feature = "firecracker", target_os = "linux"))]
     crate::firecracker::doctor(g, &mut r, fix);
+    #[cfg(all(
+        feature = "libkrun",
+        any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))
+    ))]
+    crate::libkrun::doctor(g, &mut r);
+    #[cfg(not(all(
+        feature = "libkrun",
+        any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))
+    )))]
+    r.add(
+        "libkrun",
+        Status::Info,
+        "libkrun: not compiled into this build (macOS aarch64 and Linux only)",
+    );
     state_dir(g, &mut r, fix);
 
     let ok = r.0.iter().all(|c| c.status != Status::Fail);

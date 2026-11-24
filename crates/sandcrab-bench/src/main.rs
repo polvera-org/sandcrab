@@ -57,7 +57,7 @@ enum Command {
 
 #[derive(Debug, Args)]
 struct RunArgs {
-    /// Backends, interleaved ABAB: docker[,firecracker]. Unavailable ones are recorded, not
+    /// Backends, interleaved ABAB: docker[,firecracker][,libkrun]. Unavailable ones are recorded, not
     /// substituted.
     #[arg(long, value_delimiter = ',', default_value = "docker")]
     backends: Vec<String>,

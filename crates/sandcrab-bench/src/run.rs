@@ -920,6 +920,10 @@ fn host_pss(probe: &Probe) -> Result<u64, String> {
         .as_deref()
         .ok_or("container cgroup not found")?;
     let inner = sample::cgroup_pss(cg)?;
+    // libkrun: the helper *is* the VMM and lives inside its cgroup leaf (no shim).
+    if probe.helper_pid.is_some() {
+        return Ok(inner);
+    }
     let shim = match probe.shim_pid {
         Some(p) => sample::pss(p)?,
         None => return Err("containerd-shim pid not found".into()),
@@ -949,8 +953,22 @@ async fn resources_iter(ctx: &Ctx<'_>, bi: usize, spec: &CellSpec) -> IterOut {
     let probe = b.probe(&sb).await;
     out.skip(
         "mem.vmm_overhead",
-        format!("{} has no VMM (Firecracker-only metric)", b.id.label()),
+        format!(
+            "guest RAM vs VMM split not measured for {} (Firecracker-only metric)",
+            b.id.label()
+        ),
     );
+    // libkrun without a cgroup leaf (always on macOS): helper RSS, under its own metric ids.
+    if let Some(pid) = probe
+        .as_ref()
+        .filter(|p| p.cgroup.is_none())
+        .and_then(|p| p.helper_pid)
+    {
+        helper_rss_iter(ctx, &sb, pid, &mut out).await;
+        let _ = sb.destroy().await;
+        lease.cleanup(b);
+        return out;
+    }
     let Some(probe) = probe.filter(|p| p.cgroup.is_some()) else {
         for id in [
             "mem.host_pss_idle",
@@ -1047,6 +1065,53 @@ async fn resources_iter(ctx: &Ctx<'_>, bi: usize, spec: &CellSpec) -> IterOut {
     let _ = sb.destroy().await;
     lease.cleanup(b);
     out
+}
+
+/// Resource metrics for a VMM process without a cgroup (libkrun on macOS, or Linux without
+/// `SANDCRAB_BENCH_KRUN_CGROUP`): helper **RSS** idle/post (`mem.helper_rss_*`, labelled RSS,
+/// never PSS: shared pages count fully) plus the guest view. cgroup-only metrics are skipped.
+async fn helper_rss_iter(ctx: &Ctx<'_>, sb: &Sandbox, pid: u32, out: &mut IterOut) {
+    let plan = ctx.plan;
+    let why = "no cgroup on this host (helper RSS recorded instead, see mem.helper_rss_*)";
+    for id in [
+        "mem.host_pss_idle",
+        "mem.host_pss_post",
+        "cpu.idle_60s",
+        "mem.cgroup_current_idle",
+    ] {
+        out.skip(id, why);
+    }
+    tokio::time::sleep(plan.settle).await;
+    match sample::rss(pid) {
+        Ok(v) => out.bytes("mem.helper_rss_idle", v),
+        Err(e) => out.skip("mem.helper_rss_idle", e),
+    }
+    match guest_mem_available(sb).await {
+        Ok(v) => out.bytes("mem.guest_available_idle", v),
+        Err(e) => out.fail("mem.guest_available_idle", e),
+    }
+    let touch = format!(
+        "head -c {}M /dev/urandom > /tmp/bench-touch && cat /tmp/bench-touch > /dev/null",
+        plan.touch_mib
+    );
+    let wl = async {
+        agent_script(ctx, sb).await?;
+        check_bash(sb, &touch, None).await
+    }
+    .await;
+    if let Err(e) = wl {
+        out.fail("workload", e);
+        return;
+    }
+    tokio::time::sleep(plan.settle).await;
+    match sample::rss(pid) {
+        Ok(v) => out.bytes("mem.helper_rss_post", v),
+        Err(e) => out.skip("mem.helper_rss_post", e),
+    }
+    match guest_mem_available(sb).await {
+        Ok(v) => out.bytes("mem.guest_available", v),
+        Err(e) => out.fail("mem.guest_available", e),
+    }
 }
 
 async fn run_iter(ctx: &Ctx<'_>, bi: usize, spec: &CellSpec) -> IterOut {
@@ -1342,7 +1407,11 @@ pub async fn run(plan: &Plan) -> anyhow::Result<(RunResult, PathBuf)> {
                 name: t.clone(),
                 image,
                 oci_digest: oci,
-                pinned_digest: tpl.manifest.template.sha256.clone().unwrap_or_default(),
+                pinned_digest: tpl
+                    .manifest
+                    .pinned_sha256_for_host()
+                    .unwrap_or_default()
+                    .to_owned(),
                 rootfs_sha256: String::new(),
                 vcpu: tpl.manifest.resources.vcpu,
                 memory_mb: tpl.manifest.resources.memory_mb,
@@ -1564,6 +1633,14 @@ pub async fn run(plan: &Plan) -> anyhow::Result<(RunResult, PathBuf)> {
          is the post-ready list_dir verification"
             .into(),
     );
+    if plan.backends.contains(&BackendId::Libkrun) {
+        notes.push(
+            "libkrun: workspaces are live virtio-fs shares (no attach / sync-back cost); without \
+             a cgroup leaf (always on macOS) memory is the helper's RSS (mem.helper_rss_*), \
+             which counts shared pages fully: not comparable with the Linux PSS columns"
+                .into(),
+        );
+    }
     notes.push(
         "docker: mem.guest_available reads the host /proc/meminfo (no lxcfs), so it is \
          not a per-sandbox number"

@@ -51,8 +51,10 @@
 //!
 //! There is no default and no fallback: pick one with [`SandcrabBuilder::docker`] (feature
 //! `docker`, on by default), `SandcrabBuilder::firecracker` (feature `firecracker`, off by
-//! default, Linux only; hardware isolated, needs `/dev/kvm`) or [`SandcrabBuilder::backend`]
-//! for any [`RuntimeBackend`]. A backend that cannot start (e.g. no `/dev/kvm`) is an error,
+//! default, Linux only; hardware isolated, needs `/dev/kvm`), `SandcrabBuilder::libkrun`
+//! (feature `libkrun`, off by default, Apple Silicon macOS + Linux; hardware isolated, needs a
+//! signed `sandcrab-krun` helper and the pinned libkrun artifacts) or
+//! [`SandcrabBuilder::backend`] for any [`RuntimeBackend`]. A backend that cannot start (e.g. no `/dev/kvm`) is an error,
 //! never a reason to pick another one.
 //! Docker is an officially supported backend: fast, hardened containers on the shared host
 //! kernel. It honestly reports `hardware_isolated = false` and `multi_tenant_safe = false`;
@@ -118,6 +120,35 @@ pub use sandcrab_backend_firecracker::{
     self as firecracker, FirecrackerBackend, FirecrackerConfig, RootfsSource,
 };
 
+/// The libkrun backend crate (config, pinned artifacts, helper protocol, orphan reaping).
+/// Its rootfs source type is `libkrun::RootfsSource` (not re-exported at the root, where
+/// `RootfsSource` is Firecracker's).
+#[cfg(all(
+    feature = "libkrun",
+    any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))
+))]
+pub use sandcrab_backend_libkrun::{self as libkrun, KrunLibs, LibkrunBackend, LibkrunConfig};
+
+/// Resolve the pinned libkrun + libkrunfw for `config` (`config.lib_dir`, else
+/// `<SANDCRAB_HOME>/artifacts/libkrun/<version>/`; never a system or Homebrew path) and verify
+/// the whole provenance chain (`manifest.json` against the compiled-in pins, file SHA-256s).
+/// Install them with `sandcrab libkrun install`.
+#[cfg(all(
+    feature = "libkrun",
+    any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))
+))]
+pub fn libkrun_libs(config: &LibkrunConfig) -> Result<KrunLibs> {
+    let a = libkrun::artifacts::Artifacts::resolve(config)?;
+    let pin = |p: libkrun::artifacts::PinnedPath| libkrun::helper_proto::PinnedFile {
+        path: p.path,
+        sha256: p.sha256,
+    };
+    Ok(KrunLibs {
+        libkrun: pin(a.libkrun),
+        libkrunfw: pin(a.libkrunfw),
+    })
+}
+
 use sandcrab_core::{SandboxManager, TemplateRegistry, WorkspaceRegistry};
 
 /// Which runtime backend a [`Sandcrab`] runs on. Always explicit.
@@ -134,6 +165,14 @@ pub enum BackendConfig {
     /// `/dev/kvm` or the pinned kernel / `firecracker` binary; there is no fallback.
     #[cfg(all(feature = "firecracker", target_os = "linux"))]
     Firecracker(Box<FirecrackerConfig>),
+    /// libkrun microVMs: hardware isolated (Hypervisor.framework / KVM). Construction fails
+    /// without the signed helper, the pinned libkrun artifacts or (Linux) a usable `/dev/kvm`;
+    /// there is no fallback.
+    #[cfg(all(
+        feature = "libkrun",
+        any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))
+    ))]
+    Libkrun(Box<LibkrunConfig>),
     /// Any [`RuntimeBackend`], used exactly as given.
     Custom { backend: Arc<dyn RuntimeBackend> },
 }
@@ -145,6 +184,11 @@ impl std::fmt::Debug for BackendConfig {
             Self::Docker(c) => f.debug_tuple("Docker").field(c).finish(),
             #[cfg(all(feature = "firecracker", target_os = "linux"))]
             Self::Firecracker(c) => f.debug_tuple("Firecracker").field(c).finish(),
+            #[cfg(all(
+                feature = "libkrun",
+                any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))
+            ))]
+            Self::Libkrun(c) => f.debug_tuple("Libkrun").field(c).finish(),
             Self::Custom { backend } => f
                 .debug_struct("Custom")
                 .field("kind", &backend.kind())
@@ -181,6 +225,20 @@ impl SandcrabBuilder {
     #[cfg(all(feature = "firecracker", target_os = "linux"))]
     pub fn firecracker(mut self, config: FirecrackerConfig) -> Self {
         self.backend = Some(BackendConfig::Firecracker(Box::new(config)));
+        self
+    }
+
+    /// Use the libkrun microVM backend (hardware isolated; Apple Silicon macOS and Linux KVM).
+    /// [`Self::build`] resolves the pinned libkrun + libkrunfw ([`libkrun_libs`]) and fails if
+    /// they are missing or do not match their pins, if the `sandcrab-krun` helper is missing
+    /// (or, on macOS, lacks `com.apple.security.hypervisor`), or if `/dev/kvm` is not usable
+    /// (Linux). Never a fallback to another backend.
+    #[cfg(all(
+        feature = "libkrun",
+        any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))
+    ))]
+    pub fn libkrun(mut self, config: LibkrunConfig) -> Self {
+        self.backend = Some(BackendConfig::Libkrun(Box::new(config)));
         self
     }
 
@@ -244,8 +302,8 @@ impl SandcrabBuilder {
     pub fn build(self) -> Result<Sandcrab> {
         let backend_config = self.backend.ok_or_else(|| {
             SandboxError::InvalidConfig(
-                "no runtime backend configured: call .docker(..), .firecracker(..) or \
-                 .backend(..) explicitly (Sandcrab never picks or falls back to a backend)"
+                "no runtime backend configured: call .docker(..), .firecracker(..), \
+                 .libkrun(..) or .backend(..) explicitly (Sandcrab never picks or falls back to a backend)"
                     .into(),
             )
         })?;
@@ -267,6 +325,11 @@ impl SandcrabBuilder {
         let mut docker = None;
         #[cfg(all(feature = "firecracker", target_os = "linux"))]
         let mut firecracker = None;
+        #[cfg(all(
+            feature = "libkrun",
+            any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))
+        ))]
+        let mut libkrun = None;
         let backend: Arc<dyn RuntimeBackend> = match backend_config {
             #[cfg(feature = "docker")]
             BackendConfig::Docker(mut config) => {
@@ -281,6 +344,16 @@ impl SandcrabBuilder {
             BackendConfig::Firecracker(config) => {
                 let b = FirecrackerBackend::new(*config)?;
                 firecracker = Some(b.clone());
+                Arc::new(b)
+            }
+            #[cfg(all(
+                feature = "libkrun",
+                any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))
+            ))]
+            BackendConfig::Libkrun(config) => {
+                let libs = libkrun_libs(&config)?;
+                let b = LibkrunBackend::new(*config, libs)?;
+                libkrun = Some(b.clone());
                 Arc::new(b)
             }
             BackendConfig::Custom { backend } => backend,
@@ -313,6 +386,11 @@ impl SandcrabBuilder {
             docker,
             #[cfg(all(feature = "firecracker", target_os = "linux"))]
             firecracker,
+            #[cfg(all(
+                feature = "libkrun",
+                any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))
+            ))]
+            libkrun,
         })
     }
 }
@@ -327,6 +405,11 @@ pub struct Sandcrab {
     docker: Option<DockerBackend>,
     #[cfg(all(feature = "firecracker", target_os = "linux"))]
     firecracker: Option<FirecrackerBackend>,
+    #[cfg(all(
+        feature = "libkrun",
+        any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))
+    ))]
+    libkrun: Option<LibkrunBackend>,
 }
 
 impl std::fmt::Debug for Sandcrab {
@@ -407,6 +490,17 @@ impl Sandcrab {
     #[must_use]
     pub fn firecracker_backend(&self) -> Option<&FirecrackerBackend> {
         self.firecracker.as_ref()
+    }
+
+    /// The libkrun backend, when that is the selected backend (selected with
+    /// [`SandcrabBuilder::libkrun`]).
+    #[cfg(all(
+        feature = "libkrun",
+        any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))
+    ))]
+    #[must_use]
+    pub fn libkrun_backend(&self) -> Option<&LibkrunBackend> {
+        self.libkrun.as_ref()
     }
 
     /// Check the template's pinned image digest against the image present on the backend
@@ -604,6 +698,69 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, SandboxError::Backend { .. }), "{err}");
         assert!(err.to_string().contains("/dev/kvm"), "{err}");
+    }
+
+    /// `require_hardware_isolation` passes with a real `LibkrunBackend` (constructed without
+    /// host checks, so no libkrun, helper or hypervisor is needed) and its capabilities are
+    /// reported as-is (`hardware_isolated`, not `multi_tenant_safe`).
+    #[cfg(all(
+        feature = "libkrun",
+        any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))
+    ))]
+    #[tokio::test]
+    async fn libkrun_passes_hardware_isolation_gate() {
+        let env = Env::new();
+        let home = env.tmp.path().join("lk");
+        let mut config = LibkrunConfig::with_home(&home, "/nonexistent/crabd");
+        // Temp dirs can exceed the Unix socket path budget; nothing is created here.
+        config.run_dir = PathBuf::from("/tmp/sandcrab-sdk-test-krun");
+        let pinned = |name: &str| libkrun::helper_proto::PinnedFile {
+            path: home.join(name),
+            sha256: "0".repeat(64),
+        };
+        let libs = KrunLibs {
+            libkrun: pinned("libkrun"),
+            libkrunfw: pinned("libkrunfw"),
+        };
+        let backend = LibkrunBackend::new_unchecked(config, libs).unwrap();
+        let sc = env
+            .builder()
+            .backend(backend)
+            .require_hardware_isolation(true)
+            .build()
+            .unwrap();
+        assert_eq!(sc.backend_kind(), BackendKind::Libkrun);
+        let caps = sc.backend_capabilities();
+        assert!(
+            caps.hardware_isolated && !caps.multi_tenant_safe,
+            "{caps:?}"
+        );
+        assert!(!caps.supports_snapshots && caps.supports_host_dir_mounts);
+    }
+
+    /// `.libkrun(..)` without installed artifacts is an error naming the install command,
+    /// never a silent switch to another backend.
+    #[cfg(all(
+        feature = "libkrun",
+        any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))
+    ))]
+    #[tokio::test]
+    async fn libkrun_without_artifacts_is_an_error_not_a_fallback() {
+        let env = Env::new();
+        let home = env.tmp.path().join("lk");
+        let mut config = LibkrunConfig::with_home(&home, "/x/crabd");
+        config.lib_dir = Some(home.join("artifacts-missing"));
+        let err = env
+            .builder()
+            .libkrun(config)
+            .require_hardware_isolation(true)
+            .build()
+            .unwrap_err();
+        assert!(
+            !matches!(err, SandboxError::HardwareIsolationRequired(_)),
+            "{err}"
+        );
+        assert!(err.to_string().contains("libkrun"), "{err}");
     }
 
     #[cfg(feature = "docker")]

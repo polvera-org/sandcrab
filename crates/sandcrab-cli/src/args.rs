@@ -14,18 +14,40 @@ pub enum BackendArg {
     /// Firecracker microVMs: hardware isolated, needs /dev/kvm.
     #[cfg(all(feature = "firecracker", target_os = "linux"))]
     Firecracker,
+    /// libkrun microVMs: hardware isolated (Hypervisor.framework / KVM).
+    #[cfg(all(
+        feature = "libkrun",
+        any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))
+    ))]
+    Libkrun,
 }
 
 /// Is the firecracker backend compiled into this binary?
 pub const FIRECRACKER_COMPILED: bool = cfg!(all(feature = "firecracker", target_os = "linux"));
 
+/// Is the libkrun backend compiled into this binary?
+pub const LIBKRUN_COMPILED: bool = cfg!(all(
+    feature = "libkrun",
+    any(
+        target_os = "linux",
+        all(target_os = "macos", target_arch = "aarch64")
+    )
+));
+
 /// Backends compiled into this binary (for messages).
-pub fn compiled_backends() -> &'static str {
-    match (cfg!(feature = "docker"), FIRECRACKER_COMPILED) {
-        (true, true) => "docker, firecracker",
-        (true, false) => "docker",
-        (false, true) => "firecracker",
-        (false, false) => "none",
+pub fn compiled_backends() -> String {
+    let names: Vec<&str> = [
+        (cfg!(feature = "docker"), "docker"),
+        (FIRECRACKER_COMPILED, "firecracker"),
+        (LIBKRUN_COMPILED, "libkrun"),
+    ]
+    .into_iter()
+    .filter_map(|(on, n)| on.then_some(n))
+    .collect();
+    if names.is_empty() {
+        "none".into()
+    } else {
+        names.join(", ")
     }
 }
 
@@ -46,7 +68,21 @@ pub fn parse_backend(s: &str) -> Result<BackendArg, String> {
              `firecracker`; available: {})",
             compiled_backends()
         )),
-        "cloud-hypervisor" | "libkrun" => Err(format!(
+        #[cfg(all(
+            feature = "libkrun",
+            any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))
+        ))]
+        "libkrun" | "krun" => Ok(BackendArg::Libkrun),
+        #[cfg(not(all(
+            feature = "libkrun",
+            any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))
+        )))]
+        "libkrun" | "krun" => Err(format!(
+            "backend `{s}` is not compiled into this build (macOS aarch64 and Linux only, \
+             cargo feature `libkrun`; available: {})",
+            compiled_backends()
+        )),
+        "cloud-hypervisor" => Err(format!(
             "backend `{s}` is not compiled into / available in this build (available: {})",
             compiled_backends()
         )),
@@ -233,7 +269,21 @@ mod tests {
             let e = parse_backend("firecracker").unwrap_err();
             assert!(e.contains("not compiled"), "{e}");
         }
-        let e = parse_backend("libkrun").unwrap_err();
+        if LIBKRUN_COMPILED {
+            #[cfg(all(
+                feature = "libkrun",
+                any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))
+            ))]
+            {
+                assert_eq!(parse_backend("libkrun").unwrap(), BackendArg::Libkrun);
+                assert_eq!(parse_backend("krun").unwrap(), BackendArg::Libkrun);
+            }
+            assert!(compiled_backends().contains("libkrun"));
+        } else {
+            let e = parse_backend("libkrun").unwrap_err();
+            assert!(e.contains("not compiled"), "{e}");
+        }
+        let e = parse_backend("cloud-hypervisor").unwrap_err();
         assert!(e.contains("not compiled"), "{e}");
         assert!(parse_backend("qemu").unwrap_err().contains("unknown"));
     }

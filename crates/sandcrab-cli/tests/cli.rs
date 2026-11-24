@@ -201,9 +201,31 @@ fn backend_must_be_explicit_and_docker_needs_no_opt_in() {
     assert!(!err.contains("allow-insecure"), "{err}");
     assert!(!err.contains("local dev"), "{err}");
 
-    let out = cli.run(&["--backend", "libkrun", "run", "--", "true"]);
+    let out = cli.run(&["--backend", "cloud-hypervisor", "run", "--", "true"]);
     assert_eq!(out.status.code(), Some(2));
     assert!(stderr(&out).contains("not compiled"), "{}", stderr(&out));
+
+    // libkrun (default feature on macOS aarch64 / Linux): with nothing installed in this
+    // fresh state dir it is a precise error, never a fallback to another backend.
+    let out = cli.run(&["--backend", "libkrun", "run", "--", "true"]);
+    let err = stderr(&out);
+    if cfg!(any(
+        target_os = "linux",
+        all(target_os = "macos", target_arch = "aarch64")
+    )) {
+        assert_eq!(out.status.code(), Some(1), "{err}");
+        assert!(err.contains("libkrun backend unavailable"), "{err}");
+        assert!(err.contains("never falls back"), "{err}");
+    } else {
+        assert_eq!(out.status.code(), Some(2), "{err}");
+        assert!(err.contains("not compiled"), "{err}");
+    }
+
+    // The TSI opt-in is libkrun-only.
+    let out = cli.run(&["--backend", "docker", "--libkrun-tsi", "run", "--", "true"]);
+    let err = stderr(&out);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(err.contains("--libkrun-tsi only applies"), "{err}");
 }
 
 /// `--allow-insecure` / `SANDCRAB_ALLOW_INSECURE` are deprecated no-ops: still accepted
@@ -237,6 +259,7 @@ fn deprecated_allow_insecure_is_a_noop_with_warning() {
     assert!(stderr(&out).contains("no backend selected"));
 }
 
+#[cfg(target_os = "linux")]
 fn kvm_usable() -> bool {
     std::fs::OpenOptions::new()
         .read(true)
@@ -246,6 +269,7 @@ fn kvm_usable() -> bool {
 }
 
 /// Sandcrab-managed Docker containers on this host (`None` without a Docker daemon).
+#[cfg(target_os = "linux")]
 fn docker_sandboxes() -> Option<usize> {
     let out = Command::new("docker")
         .args(["ps", "-aq", "--filter", "label=sandcrab.managed=true"])
