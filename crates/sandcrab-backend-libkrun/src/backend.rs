@@ -490,6 +490,13 @@ impl RuntimeBackend for LibkrunBackend {
         net::enforces(network, self.net_options())
     }
 
+    fn network_policy_hint(&self, network: &NetworkConfig) -> Option<String> {
+        match net::plan(network, self.net_options()) {
+            Err(SandboxError::PolicyUnenforceable(why)) => Some(why),
+            _ => None,
+        }
+    }
+
     async fn spawn(&self, spec: &ResolvedSpec) -> Result<Box<dyn SandboxHandle>> {
         spec.reject_secrets()?;
         // Fail before creating anything: policy, ports, sizes.
