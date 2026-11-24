@@ -74,7 +74,7 @@ steps:
     title: "Host-local template pins (option B): record image IDs per host in ~/.sandcrab at build time, verify against them; repo manifests keep base digests only; label as local integrity (reproducible pins = later option A)"
     depends_on: [templates-arm64]
     artifacts: [templates/, crates/sandcrab-core/src/template.rs, crates/sandcrab-cli/]
-    status: doing
+    status: done
 
   # ---- frontier 3 (parallel, disjoint files in the new crate)
   - id: lk-helper
