@@ -12,9 +12,20 @@
 #     (anything else, incl. all non-IPv4, from a tap is dropped before input/forward rules);
 #   - no guest -> host (input from taps: only established/related);
 #   - no guest -> guest, no guest -> private/link-local/CGNAT ranges (LAN, cloud metadata,
-#     tailnets) unless --allow-private;
+#     tailnets) or the uplink's own network (on-link subnet + default gateway, even when
+#     public) unless --allow-private;
+#   - no guest -> reserved/special ranges (this-network, IETF protocol assignments,
+#     documentation, benchmarking, multicast, class E, broadcast), always;
+#   - no outbound SMTP (tcp 25, 465, 587: spam from the host's IP gets it blocklisted or
+#     the server suspended) unless --allow-smtp;
 # plus net.ipv4.ip_forward=1. If Docker's DOCKER-USER iptables chain exists, ACCEPT rules
 # for tap traffic are added there (Docker sets the FORWARD policy to DROP).
+#
+# Docker: every block above lives in our own table at priority `filter - 1`, i.e. before
+# Docker's (iptables-nft) filter chains, and an nftables drop is final, so Docker can never
+# re-open what we block. Only the DOCKER-USER ACCEPTs (guest connectivity) depend on Docker,
+# and losing them fails closed. With --persist the unit is bound to docker.service
+# (PartOf= + WantedBy=), so a Docker restart/stop+start re-runs this script and restores them.
 #
 # Taps vanish on reboot: use --persist to install a root-owned copy of this script at
 # /usr/local/sbin/sandcrab-fc-net-setup (never the user-writable repo copy: a root unit
@@ -23,7 +34,7 @@
 #
 # Usage:
 #   sudo scripts/fc-net-setup.sh [--user USER] [--count N] [--prefix sctap] [--uplink IF]
-#                                [--allow-private] [--persist] [--dry-run]
+#                                [--allow-private] [--allow-smtp] [--persist] [--dry-run]
 #   sudo scripts/fc-net-setup.sh --uninstall [--prefix sctap] [--count N]
 #
 # Verify afterwards:
@@ -36,6 +47,7 @@ COUNT=64
 PREFIX="sctap"
 UPLINK=""
 ALLOW_PRIVATE=0
+ALLOW_SMTP=0
 PERSIST=0
 UNINSTALL=0
 DRY_RUN=0
@@ -45,6 +57,11 @@ INSTALL_DIR="/usr/local/sbin"
 INSTALLED="$INSTALL_DIR/sandcrab-fc-net-setup"
 SYSCTL_FILE="/etc/sysctl.d/90-sandcrab-fc.conf"
 PRIVATE_V4="10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 100.64.0.0/10"
+# Never routable to anything a guest should reach (RFC 6890 special-purpose registry).
+# 240.0.0.0/4 includes the limited broadcast 255.255.255.255.
+RESERVED_V4="0.0.0.0/8, 192.0.0.0/24, 192.0.2.0/24, 198.18.0.0/15, 198.51.100.0/24, \
+203.0.113.0/24, 224.0.0.0/4, 240.0.0.0/4"
+SMTP_PORTS="25, 465, 587"
 
 die() { echo "fc-net-setup: $*" >&2; exit 1; }
 log() { echo "fc-net-setup: $*"; }
@@ -63,6 +80,7 @@ while [[ $# -gt 0 ]]; do
     --prefix) PREFIX="${2:?}"; shift 2 ;;
     --uplink) UPLINK="${2:?}"; shift 2 ;;
     --allow-private) ALLOW_PRIVATE=1; shift ;;
+    --allow-smtp) ALLOW_SMTP=1; shift ;;
     --persist) PERSIST=1; shift ;;
     --uninstall) UNINSTALL=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
@@ -188,9 +206,28 @@ for ((n = 0; n < COUNT; n++)); do
 done
 
 # 3. nftables: replace our table atomically (add-then-delete makes the delete never fail).
-private_rule=""
+private_rule="" uplink_net_rule="" uplink_gw_rule=""
 if [[ $ALLOW_PRIVATE == 0 ]]; then
-  private_rule="iifname \"${PREFIX}*\" ip daddr { $PRIVATE_V4 } drop"
+  private_rule="iifname \"${PREFIX}*\" ip daddr { $PRIVATE_V4 } counter drop"
+  # The uplink's own network is the host's LAN even when it is public address space (a
+  # dedicated server's provider /24 and its router): its on-link subnet(s) and the default
+  # gateway, read from the routing table now (re-read on every run, i.e. every boot with
+  # --persist). Separate rules: they may overlap PRIVATE_V4, and an nft set may not.
+  valid_v4() { [[ $1 =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?$ ]]; }
+  nets="" gws=""
+  for a in $(ip -4 route show dev "$UPLINK" scope link proto kernel | awk '{print $1}'); do
+    if valid_v4 "$a"; then nets+="${nets:+, }$a"; fi
+  done
+  for a in $(ip -4 route show default dev "$UPLINK" | awk '{for(i=1;i<NF;i++) if($i=="via") print $(i+1)}'); do
+    if valid_v4 "$a"; then gws+="${gws:+, }$a"; fi
+  done
+  if [[ -n $nets ]]; then uplink_net_rule="iifname \"${PREFIX}*\" ip daddr { $nets } counter drop"; fi
+  if [[ -n $gws ]]; then uplink_gw_rule="iifname \"${PREFIX}*\" ip daddr { $gws } counter drop"; fi
+fi
+smtp_rule=""
+if [[ $ALLOW_SMTP == 0 ]]; then
+  # Reject (not drop) so a mailer fails fast instead of hanging until its connect timeout.
+  smtp_rule="iifname \"${PREFIX}*\" tcp dport { $SMTP_PORTS } counter reject with tcp reset"
 fi
 # Anti-spoofing: (tap, guest source) pairs; tap n's guest is 172.30.n.2 (crate: net::TapPlan).
 guest_srcs=""
@@ -218,7 +255,11 @@ table inet $TABLE {
   chain forward {
     type filter hook forward priority filter - 1; policy accept;
     iifname "${PREFIX}*" oifname "${PREFIX}*" drop
+    iifname "${PREFIX}*" ip daddr { $RESERVED_V4 } counter drop
     $private_rule
+    $uplink_net_rule
+    $uplink_gw_rule
+    $smtp_rule
     iifname "${PREFIX}*" oifname "$UPLINK" accept
     oifname "${PREFIX}*" ct state established,related accept
     iifname "${PREFIX}*" drop
@@ -248,11 +289,22 @@ if [[ $PERSIST == 1 ]]; then
   self="$(readlink -f "$0")"
   run install -o root -g root -m 0755 "$self" "$INSTALLED"
   extra=""
-  [[ $ALLOW_PRIVATE == 1 ]] && extra=" --allow-private"
+  if [[ $ALLOW_PRIVATE == 1 ]]; then extra+=" --allow-private"; fi
+  if [[ $ALLOW_SMTP == 1 ]]; then extra+=" --allow-smtp"; fi
+  # Docker coupling: PartOf= propagates `systemctl restart/stop docker` to this unit (it is
+  # ordered After= docker, so it re-runs once Docker is up again), and WantedBy= docker
+  # re-starts it whenever docker.service starts (stop+start, crash auto-restart, boot).
+  # Re-running is safe while guests are up: taps are kept, the table swap is atomic and
+  # conntrack state survives it.
+  docker_part="" docker_wanted=""
+  if systemctl cat docker.service >/dev/null 2>&1; then
+    docker_part=$'\nPartOf=docker.service'
+    docker_wanted=" docker.service"
+  fi
   unit="[Unit]
 Description=Sandcrab Firecracker tap pool + NAT
 After=network-online.target docker.service
-Wants=network-online.target
+Wants=network-online.target$docker_part
 
 [Service]
 Type=oneshot
@@ -260,7 +312,7 @@ RemainAfterExit=yes
 ExecStart=$INSTALLED --user $USER_NAME --count $COUNT --prefix $PREFIX --uplink $UPLINK$extra
 
 [Install]
-WantedBy=multi-user.target"
+WantedBy=multi-user.target$docker_wanted"
   if [[ $DRY_RUN == 1 ]]; then
     echo "+ write $UNIT (root:root 0644):"; echo "$unit"
   else
@@ -268,7 +320,8 @@ WantedBy=multi-user.target"
     chown root:root "$UNIT"
   fi
   run systemctl daemon-reload
-  run systemctl enable "$(basename "$UNIT")"
+  # reenable: also drops [Install] symlinks of an older unit version.
+  run systemctl -q reenable "$(basename "$UNIT")"
 fi
 
 if ! id -nG "$USER_NAME" | tr ' ' '\n' | grep -qx kvm; then
