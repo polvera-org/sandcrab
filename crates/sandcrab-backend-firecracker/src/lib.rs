@@ -56,7 +56,7 @@ pub use sandcrab_rootfs::hash;
 pub use backend::{FirecrackerBackend, KVM_DEVICE, check_kvm};
 pub use config::{FirecrackerConfig, RootfsSource};
 pub use error::{Error, Result};
-pub use net::{TapPlan, TapPoolConfig};
+pub use net::{TapPlan, TapPoolConfig, default_lock_dir as default_tap_lock_dir};
 pub use reap::ReapReport;
 pub use sandcrab_rootfs::{default_cache_root, sandcrab_home};
 pub use vm::GUEST_CID;

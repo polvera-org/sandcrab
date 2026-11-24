@@ -90,7 +90,7 @@ crabagent -w landing --port 5173 --network unrestricted --backend docker \
 | `--allow-insecure` | off | **Deprecated no-op**, hidden from `--help`: prints a warning, no other effect. Same for `SANDCRAB_ALLOW_INSECURE` |
 | `--state-dir <dir>` | `$SANDCRAB_HOME`, else `~/.sandcrab` | State root |
 | `--templates-dir <dir>` | `./templates`, then `<state root>/templates` | Repeatable, first wins |
-| `--crabd <path>` | `$SANDCRAB_CRABD`, else `target/<arch>-unknown-linux-musl/release/crabd` | Static `crabd` |
+| `--crabd <path>` | `$SANDCRAB_CRABD`, else `<target dir>/<arch>-unknown-linux-musl/release/crabd` (target dir: `$CARGO_TARGET_DIR`, else `target/`) | Static `crabd` |
 | `--model <id>` | `claude-sonnet-5-5` | Also `CRABAGENT_MODEL` |
 | `--effort low\|medium\|high\|xhigh\|max` | model default | `output_config.effort`. Also `CRABAGENT_EFFORT` |
 | `--max-tokens <n>` | `64000` | Per model response |

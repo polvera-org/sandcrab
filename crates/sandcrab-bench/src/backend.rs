@@ -465,10 +465,7 @@ pub fn default_crabd(repo_root: &Path) -> PathBuf {
     if let Some(p) = std::env::var_os("SANDCRAB_CRABD").filter(|v| !v.is_empty()) {
         return PathBuf::from(p);
     }
-    repo_root.join(format!(
-        "target/{}-unknown-linux-musl/release/crabd",
-        std::env::consts::ARCH
-    ))
+    sandcrab_sdk::core::crabd_build_path(repo_root)
 }
 
 #[cfg(test)]

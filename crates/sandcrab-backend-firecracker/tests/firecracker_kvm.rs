@@ -14,7 +14,8 @@
 //! cargo test -p sandcrab-backend-firecracker --test firecracker_kvm -- --ignored --nocapture --test-threads=1
 //! ```
 //!
-//! `crabd` comes from `$SANDCRAB_CRABD`, else `target/<arch>-unknown-linux-musl/release/crabd`.
+//! `crabd` comes from `$SANDCRAB_CRABD`, else `<target dir>/<arch>-unknown-linux-musl/release/crabd`
+//! (`$CARGO_TARGET_DIR`, relative to the repo root, else `target/`).
 
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -42,10 +43,7 @@ fn crabd() -> PathBuf {
     if let Some(p) = std::env::var_os("SANDCRAB_CRABD").filter(|v| !v.is_empty()) {
         return PathBuf::from(p);
     }
-    root().join(format!(
-        "target/{}-unknown-linux-musl/release/crabd",
-        std::env::consts::ARCH
-    ))
+    sandcrab_core::crabd_build_path(&root())
 }
 
 struct Env {

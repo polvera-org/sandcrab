@@ -172,7 +172,7 @@ pub struct Cli {
     pub templates_dirs: Vec<PathBuf>,
 
     /// Host path of the static musl `crabd` (default: $SANDCRAB_CRABD, else
-    /// target/<arch>-unknown-linux-musl/release/crabd).
+    /// <target dir>/<arch>-unknown-linux-musl/release/crabd, target dir $CARGO_TARGET_DIR or target/).
     #[arg(long)]
     pub crabd: Option<PathBuf>,
 

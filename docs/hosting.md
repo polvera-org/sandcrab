@@ -209,6 +209,15 @@ nftables table `inet sandcrab` (no other tables are touched) that masquerades
 `172.30.0.0/16` and enforces the egress policy below; `net.ipv4.ip_forward=1`; and, if
 Docker's `DOCKER-USER` chain exists, ACCEPT rules for tap traffic there.
 
+At runtime each sandbox leases a tap with an `flock` on `<lock dir>/<tap>.lock`. The lock dir
+is host-wide per user, so every Sandcrab process of that user shares one lease set, whatever
+its `SANDCRAB_HOME`: `/run/user/<uid>/sandcrab/taps`, else `$XDG_RUNTIME_DIR/sandcrab/taps`,
+else `$TMPDIR/sandcrab-<uid>/taps` (usually `/tmp`). It is created 0700, and a lease is
+refused unless the dir is a real directory owned by the user with mode 0700 and its parent is
+owned by the user (or root) and not writable by group or others. So a `/tmp/sandcrab-<uid>`
+pre-created by someone else is never used. Override it with
+`FirecrackerConfig::taps.lock_dir`; all processes sharing the pool must use the same dir.
+
 #### Egress policy
 
 Guests with `unrestricted` networking get IPv4 internet access and nothing else:

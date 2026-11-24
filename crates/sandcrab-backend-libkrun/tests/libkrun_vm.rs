@@ -48,17 +48,7 @@ fn crabd() -> PathBuf {
     if let Some(p) = std::env::var_os("SANDCRAB_CRABD").filter(|v| !v.is_empty()) {
         return PathBuf::from(p);
     }
-    let rel = format!(
-        "{}-unknown-linux-musl/release/crabd",
-        std::env::consts::ARCH
-    );
-    if let Some(t) = std::env::var_os("CARGO_TARGET_DIR").filter(|v| !v.is_empty()) {
-        let p = PathBuf::from(t).join(&rel);
-        if p.is_file() {
-            return p;
-        }
-    }
-    root().join("target").join(rel)
+    sandcrab_core::crabd_build_path(&root())
 }
 
 struct Env {

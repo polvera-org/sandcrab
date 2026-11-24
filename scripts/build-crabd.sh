@@ -3,12 +3,24 @@
 #
 # Usage: scripts/build-crabd.sh [x86_64|aarch64|amd64|arm64|linux/amd64|linux/arm64]   (default: host arch)
 # Prints the binary path and its SHA-256 (also written next to it as crabd.sha256).
+# Output: <target dir>/<arch>-unknown-linux-musl/release/crabd, where the target dir is
+# $CARGO_TARGET_DIR (absolute, or relative to the directory you run this from) or <repo>/target.
 # Requires: rustup target <arch>-unknown-linux-musl, and on Linux hosts musl-tools (musl-gcc).
 # On macOS no C toolchain is needed: crabd links with Rust's bundled `rust-lld` against the
 # target's self-contained musl CRT (override with CARGO_TARGET_<TRIPLE>_LINKER).
 set -euo pipefail
 
+# Resolve a relative CARGO_TARGET_DIR against the caller's cwd (as cargo would) before cd.
+if [ -n "${CARGO_TARGET_DIR:-}" ]; then
+  case "$CARGO_TARGET_DIR" in
+    /*) ;;
+    *) CARGO_TARGET_DIR="$(pwd)/$CARGO_TARGET_DIR" ;;
+  esac
+  export CARGO_TARGET_DIR
+fi
+
 cd "$(dirname "$0")/.."
+target_dir="${CARGO_TARGET_DIR:-$(pwd)/target}"
 
 arch="${1:-$(uname -m)}"
 arch="${arch#linux/}"
@@ -38,7 +50,7 @@ fi
 export RUSTFLAGS="${RUSTFLAGS:-} -C target-feature=+crt-static"
 cargo build --release --locked -p sandcrab-guest --bin crabd --target "$target" >&2
 
-bin="target/${target}/release/crabd"
+bin="${target_dir}/${target}/release/crabd"
 if command -v file >/dev/null 2>&1; then
   # GNU file: "static-pie linked" (musl-gcc); rust-lld output is a plain "statically linked" exec.
   if ! file -L "$bin" | grep -qE 'static(ally|-pie)? linked'; then
@@ -54,6 +66,6 @@ else
 fi
 echo "$sha  crabd" > "${bin}.sha256"
 size="$(stat -c %s "$bin" 2>/dev/null || stat -f %z "$bin")"
-echo "path:   $(pwd)/$bin"
+echo "path:   $bin"
 echo "sha256: $sha"
 echo "size:   $size bytes"
