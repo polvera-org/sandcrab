@@ -88,14 +88,29 @@ impl ListenArgs {
     }
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
     // Before clap: the kernel starts `init=/sbin/crabd` without a subcommand.
     let args: Vec<_> = std::env::args_os().collect();
     if sandcrab_guest::init::is_init_invocation(std::process::id(), &args) {
-        return sandcrab_guest::init::run().await;
+        return runtime().block_on(sandcrab_guest::init::run());
     }
+    // Before the runtime starts any thread: `no_new_privs` is per thread, inherited by every
+    // thread and process created afterwards (all tool processes). Fail closed.
+    if let Err(e) = sandcrab_guest::hardening::forbid_privilege_gain() {
+        eprintln!("crabd: cannot set no_new_privs: {e}");
+        return ExitCode::FAILURE;
+    }
+    runtime().block_on(cli_main())
+}
 
+fn runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("failed to build the tokio runtime")
+}
+
+async fn cli_main() -> ExitCode {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
