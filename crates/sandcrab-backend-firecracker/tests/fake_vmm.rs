@@ -516,6 +516,9 @@ fn env_with(tweak: impl FnOnce(&mut FirecrackerConfig, &Path)) -> Env {
     cfg.ctrl_alt_del_after = Duration::from_millis(300);
     cfg.kill_after = Duration::from_millis(600);
     cfg.taps.sysfs_net = home.join("sysfs-net");
+    // Fake taps: keep their leases out of the host-wide lock dir the real pool uses. Nested so
+    // the parent is created 0700 (the tempdir itself may be group-writable under umask 002).
+    cfg.taps.lock_dir = Some(home.join("tap-locks").join("taps"));
     tweak(&mut cfg, home);
     let backend = Arc::new(FirecrackerBackend::new_unchecked(cfg).unwrap());
 

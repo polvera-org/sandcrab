@@ -265,7 +265,8 @@ and idempotent, plus a systemd oneshot so it survives reboot) does the following
 - `ip tuntap add dev sctap<N> mode tap user nicolas group nicolas` for N in 0..63. Each tap gets `172.30.<N>.1/30`, guest `.2`.
 - An `nftables` **dedicated table** `inet sandcrab` handles masquerade from `172.30.0.0/16` out the uplink, drops guest→host
   (`input iifname "sctap*" drop` except established) and guest→guest, and sets `net.ipv4.ip_forward=1`. Using a separate table keeps Proxmox's `pve-firewall` rules untouched.
-- At runtime the backend needs **no privileges**. It takes `flock(~/.sandcrab/run/net/sctap<N>.lock)`, passes `host_dev_name` to
+- At runtime the backend needs **no privileges**. It takes `flock(<tap lock dir>/sctap<N>.lock)` in a host-wide per-user dir
+  (`/run/user/<uid>/sandcrab/taps` or `$XDG_RUNTIME_DIR/...`, else `/tmp/sandcrab-<uid>/taps`; 0700, owner-checked) so every sandcrab home shares one lease set, passes `host_dev_name` to
   FC (the tap is user-owned, so `open(/dev/net/tun)`+`TUNSETIFF` succeeds unprivileged), and sets `ip=` boot args plus DNS in `init.configure`. MAC = `06:00:AC:1E:<N>:02`.
 - **Rejected:** a setuid helper (new privileged attack surface for us to own). **Rejected:** `CAP_NET_ADMIN` on the sandcrab binary (too broad).
   **Rejected:** a per-VM netns (needs root per spawn, so later with the jailer).

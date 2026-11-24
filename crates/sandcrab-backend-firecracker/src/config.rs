@@ -33,7 +33,8 @@ pub struct FirecrackerConfig {
     pub rootfs: RootfsSource,
     /// Artifact / rootfs / blank-scratch / read-only-workspace image cache.
     pub cache_root: PathBuf,
-    /// Per-sandbox run dirs `<run_dir>/<sandbox id>/` (0700) and tap locks `<run_dir>/net/`.
+    /// Per-sandbox run dirs `<run_dir>/<sandbox id>/` (0700). Tap locks are host-wide, not
+    /// here (see [`TapPoolConfig::lock_dir`]).
     /// Kept apart from Docker's `run/` so neither backend's orphan reaper sees the other's
     /// directories. Socket paths must stay ≤ 108 bytes, so keep this short.
     pub run_dir: PathBuf,

@@ -328,7 +328,7 @@ impl FirecrackerBackend {
 
         // Network.
         let net = if spec.network.policy == NetworkPolicy::Unrestricted {
-            let lease = acquire_tap(&cfg.taps, &cfg.run_dir.join("net"), self.host_user.uid)?;
+            let lease = acquire_tap(&cfg.taps, self.host_user.uid)?;
             vm.meta.tap = Some(lease.plan.name.clone());
             vm.tap = Some(lease);
             vm.meta.save(&vm.dir)?;
