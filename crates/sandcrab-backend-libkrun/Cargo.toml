@@ -30,6 +30,12 @@ rustix = { workspace = true, features = ["fs", "process", "stdio"] }
 sandcrab-core = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true
 
+# Spawn → helper config → ctl.sock → init.* → tools → destroy against a fake `sandcrab-krun`
+# (this test binary re-executes itself as the fake helper, so it needs its own `main`).
+[[test]]
+name = "fake_helper"
+harness = false
+
 # Same as `[workspace.lints]` except `unsafe_code` is `deny` instead of `forbid`, so the
 # single FFI module (`src/ffi.rs`) can opt out with `#[allow(unsafe_code)]` (design §3).
 # Keep the rest in sync with the root `Cargo.toml`.
