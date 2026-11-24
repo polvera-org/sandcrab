@@ -30,7 +30,9 @@ use tokio::net::UnixStream;
 /// How long one readiness probe (`ping`) may take before the connection is retried.
 const PROBE_TIMEOUT: Duration = Duration::from_millis(250);
 const BACKOFF_START: Duration = Duration::from_millis(2);
-const BACKOFF_CAP: Duration = Duration::from_millis(20);
+/// libkrun binds `ctl.sock` ~180 ms after launch and then accepts-and-closes until the guest
+/// listens (~50 ms later on M2): a connect attempt costs microseconds, so poll tightly.
+const BACKOFF_CAP: Duration = Duration::from_millis(5);
 
 /// One control connection (requests are sequential).
 #[derive(Debug)]
