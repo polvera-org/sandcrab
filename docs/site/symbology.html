@@ -275,7 +275,7 @@ section.guide > p { color:var(--ink-2); max-width:44em; }
 </svg></span>
           <div><p class="eyebrow">06 · One guest protocol</p><h2>One wire</h2></div>
         </header>
-        <p class="tech"><span class="label">What it means</span>Host and crabd always talk over one protocol: u32 big-endian length-prefixed JSON-RPC 2.0, with method = tool name. The same frames run over vsock (microVMs), UDS or TCP (DockerDev). No backend-specific shortcuts like docker exec.</p>
+        <p class="tech"><span class="label">What it means</span>Host and crabd always talk over one protocol: u32 big-endian length-prefixed JSON-RPC 2.0, with method = tool name. The same frames run over vsock (microVMs), UDS or TCP (Docker). No backend-specific shortcuts like docker exec.</p>
         <p class="meta"><span class="label">The picture</span>A single cable from host to crab. Each packet has a header segment (the length prefix). Jar, container and chip all plug into the same wire.</p>
         <details><summary>3D translation</summary><ul><li>Host: small teal server tower. Cable: TubeGeometry along a gentle catenary.</li><li>Packets: rounded boxes with a coral header slab on the leading face, flowing as instances along the curve.</li><li>Loop: packets slide host → crab (requests) and back (results); backend platforms below light up in turn while the wire stays the same.</li></ul></details>
         <p class="files"><code>assets/crab/one-wire.webp</code> <code>assets/crab/svg/one-wire.svg</code></p>
