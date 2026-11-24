@@ -156,7 +156,7 @@ steps:
     agent: ada
     title: Same suite on kvm-dedicated (x86_64 KVM); verify virtio-fs ownership as unprivileged user, cgroup leaf; fix gaps
     depends_on: [lk-e2e-macos]
-    status: doing
+    status: done
 
   # ---- benchmarks: microVMs vs Docker on bare metal (kvm-dedicated) + the Mac backends
   - id: kvm-net
@@ -224,7 +224,7 @@ steps:
     title: "Bench: Firecracker memory/CPU probes (currently 'not measured'), fix the wrong 'firecracker has no VMM' message"
     depends_on: [bench-kvm-fc]
     artifacts: [crates/sandcrab-bench/]
-    status: todo
+    status: doing
 
   - id: fc-net-egress
     phase: implement
@@ -232,7 +232,7 @@ steps:
     title: "fc-net-setup.sh: block outbound SMTP (25/465/587) and the remaining reserved ranges (0/8, 192.0.0/24, 198.18/15, multicast); survive Docker restarts; re-apply on kvm-dedicated"
     depends_on: [kvm-net]
     artifacts: [scripts/fc-net-setup.sh, docs/hosting.md]
-    status: todo
+    status: doing
 
   - id: guest-hardening-2
     phase: implement
@@ -240,7 +240,7 @@ steps:
     title: "crabd parity with Docker hardening in microVMs: drop the capability bounding set, pids limit, /tmp as size-limited nosuid,nodev,noexec tmpfs; seccomp evaluated (design note, may defer)"
     depends_on: [guest-hardening]
     artifacts: [crates/sandcrab-guest/]
-    status: todo
+    status: doing
 
   - id: lk-review
     phase: verify
