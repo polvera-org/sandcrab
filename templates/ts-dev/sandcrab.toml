@@ -5,7 +5,8 @@ description = "Node.js 26 Active LTS + pnpm + bun + TypeScript + vitest + biome 
 image = "sandcrab/ts-dev:0.1.0"
 # Pins the locally built image ID (docker image inspect --format {{.Id}}); not
 # reproducible across rebuilds yet. Refresh with: templates/build.sh --pin
-sha256 = "sha256:dc8c0695633cedc3834bf4d8c0ff6870b9da1ecd1974cd478d2ca8a5c5d8636a"
+sha256 = "sha256:e19b87bade1212d760613299b2a391283ab642d64137b966e92530343123df74"
+sha256_by_arch = { amd64 = "sha256:e19b87bade1212d760613299b2a391283ab642d64137b966e92530343123df74", arm64 = "sha256:86fff0aba9268cecbbbfabbf4e98ce0332ef9fd1e65d6dbc5ef40929ff515cb7" }
 
 [resources]
 vcpu = 2

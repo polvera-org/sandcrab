@@ -5,7 +5,8 @@ description = "Headless Chromium, Playwright, ffmpeg, ImageMagick, and Typst ren
 image = "sandcrab/render:0.1.0"
 # Pins the locally built image ID (docker image inspect --format {{.Id}}); not
 # reproducible across rebuilds yet. Refresh with: templates/build.sh --pin
-sha256 = "sha256:100b98afecb12cb4615d52bcf5a25d553d2151a30717d3a23ccefe16b86f4c4d"
+sha256 = "sha256:d15a1909f1cfd3884450f2c6b993e49ba95f16e502e00d2ac1d5ea4e1cb61ab0"
+sha256_by_arch = { amd64 = "sha256:d15a1909f1cfd3884450f2c6b993e49ba95f16e502e00d2ac1d5ea4e1cb61ab0", arm64 = "sha256:00bf1eeb0ea76d7cdcb8bddb40c552cde9b6237c5d0141d3a2ee6d858a69208e" }
 
 [resources]
 vcpu = 2
