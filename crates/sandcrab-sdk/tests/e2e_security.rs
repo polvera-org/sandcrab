@@ -6,7 +6,7 @@ mod common;
 
 use std::sync::Arc;
 
-use common::{docker_config, docker_ps, host_uid, run, run_exclusive, sh};
+use common::{E2eBackend, docker_config, docker_ps, host_uid, run, run_exclusive, sh};
 use sandcrab_sdk::{
     BackendKind, MountMode, NetworkConfig, NetworkPolicy, SandboxConfig, SandboxError,
 };
@@ -114,10 +114,23 @@ async fn sandbox_hardening_network_user_capabilities() {
             .await
             .unwrap();
         assert_ne!(tcp.exit_code, Some(0), "raw TCP egress succeeded: {tcp:?}");
-        let ifaces = sh(&sb, "ls /sys/class/net").await;
-        assert!(
-            ifaces.split_whitespace().all(|i| i == "lo"),
-            "only loopback expected: {ifaces}"
+        // Only loopback. libkrun: libkrunfw's kernel always has `dummy0` (TSI's interface);
+        // with TSI off it is down, unaddressed and the sandbox cannot bring it up.
+        let links = sh(
+            &sb,
+            "for i in /sys/class/net/*; do echo \"$(basename $i) $(cat $i/flags)\"; done",
+        )
+        .await;
+        for line in links.lines() {
+            let (name, flags) = line.split_once(' ').unwrap();
+            let up = u32::from_str_radix(flags.trim_start_matches("0x"), 16).unwrap() & 1 != 0;
+            let tolerated = h.backend == E2eBackend::Libkrun && name.starts_with("dummy") && !up;
+            assert!(name == "lo" || tolerated, "only loopback expected: {links}");
+        }
+        assert_eq!(
+            sh(&sb, "tail -n +2 /proc/net/route").await,
+            "",
+            "no IPv4 routes"
         );
 
         // No capabilities, no privilege escalation.
@@ -137,15 +150,15 @@ async fn sandbox_hardening_network_user_capabilities() {
         let su = sb.bash("touch /etc/sandcrab-e2e").await.unwrap();
         assert_ne!(su.exit_code, Some(0), "rootfs writable as root? {su:?}");
 
-        // Docker runs as the host user, so workspace files stay host-owned.
-        if h.is_docker() {
+        // Docker and libkrun run as the host user, so workspace files stay host-owned.
+        if h.live_workspaces() {
             let uid: u32 = sh(&sb, "id -u").await.trim().parse().unwrap();
             assert_eq!(uid, host_uid());
             assert_ne!(uid, 0);
             sb.file_write("/workspace/owned.txt", "x").await.unwrap();
         }
         sb.destroy().await.unwrap();
-        if h.is_docker() {
+        if h.live_workspaces() {
             use std::os::unix::fs::MetadataExt;
             let root = h
                 .ws()

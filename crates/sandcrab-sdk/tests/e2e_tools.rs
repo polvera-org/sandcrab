@@ -7,9 +7,10 @@ mod common;
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
-use common::{bash_t, run, sh, wait_for};
+use common::{E2eBackend, bash_t, run, sh, wait_for};
 use sandcrab_sdk::{
-    KillSignal, MountMode, NetworkPolicy, SandboxConfig, ToolError, is_tool_error, tool_definitions,
+    KillSignal, MountMode, NetworkPolicy, SandboxConfig, SandboxError, ToolError, is_tool_error,
+    tool_definitions,
 };
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -103,8 +104,7 @@ async fn http_get(addr: std::net::SocketAddr, path: &str) -> Option<String> {
         .ok()?
         .ok()?;
     // HTTP/1.1 framed by Content-Length, like browsers and curl: the response is complete
-    // without waiting for the server's close (on Firecracker the guest's FIN does not reach the
-    // host while the tunnel is open; docs/protocol.md).
+    // without waiting for the server's close.
     let req = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n");
     s.write_all(req.as_bytes()).await.ok()?;
     let mut buf = Vec::new();
@@ -145,11 +145,21 @@ async fn dev_server_via_process_tools_and_published_port() {
         h.ws().create(&ws).unwrap();
         // Docker publishes through its own port mapping (needs a NIC, hence `unrestricted`);
         // the microVM backends forward over `tunnel.open`, so the same scenario runs there.
+        // libkrun refuses `unrestricted` without the TSI opt-in (the guest could reach host
+        // loopback), and its tunnels need no NIC: it runs with network `disabled`.
         let config = SandboxConfig::from_template("ts-dev")
             .mount(ws.as_str(), "/workspace", MountMode::ReadWrite)
             .default_cwd("/workspace")
             .network(NetworkPolicy::Unrestricted)
             .port(8080);
+        let config = if h.backend == E2eBackend::Libkrun {
+            let err = h.sc.spawn(config.clone()).await.unwrap_err();
+            assert!(matches!(err, SandboxError::PolicyUnenforceable(_)), "{err}");
+            assert!(err.to_string().contains("TSI"), "{err}");
+            config.network(NetworkPolicy::Disabled)
+        } else {
+            config
+        };
         let sb = h.sc.spawn(config).await.unwrap();
         let addr = sb.host_addr(8080).expect("port 8080 published");
         assert!(addr.ip().is_loopback(), "published on {addr}");
