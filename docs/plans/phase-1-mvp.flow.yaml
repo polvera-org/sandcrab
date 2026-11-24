@@ -333,7 +333,7 @@ steps:
     title: Review the Docker promotion (no silent fallback, capability honesty, hardening unchanged, gates)
     depends_on: [docker-official]
     artifacts: []
-    status: todo
+    status: done
 
   - id: site-feedback
     phase: implement
@@ -349,4 +349,4 @@ steps:
     title: Reposition Docker as officially supported across README, docs/, walkthrough, bench report
     depends_on: [docker-official-review]
     artifacts: [README.md, docs/]
-    status: todo
+    status: done
