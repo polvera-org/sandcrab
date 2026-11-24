@@ -124,7 +124,7 @@ steps:
     title: ports.rs (127.0.0.1 listeners → tunnel.open) for libkrun; wire FC published ports on the same primitive
     depends_on: [lk-backend, vsock-tunnel]
     artifacts: [crates/sandcrab-backend-libkrun/src/ports.rs, crates/sandcrab-backend-firecracker/src/backend.rs]
-    status: doing
+    status: done
 
   - id: lk-wire
     phase: implement
@@ -149,7 +149,7 @@ steps:
     title: tests/libkrun_vm.rs (#[ignore]) on the Mac — shared e2e matrix + loopback/listener/ro-remount regressions; fix gaps
     depends_on: [lk-wire, lk-fake-tests, guest-virtiofs, templates-arm64, lk-ports, template-pins-local, guest-hardening]
     artifacts: [crates/sandcrab-backend-libkrun/tests/libkrun_vm.rs]
-    status: todo
+    status: doing
 
   - id: lk-e2e-linux
     phase: implement
