@@ -44,6 +44,7 @@ pub fn config(g: &Global) -> anyhow::Result<LibkrunConfig> {
     let mut c = LibkrunConfig::with_home(&home, std::path::absolute(util::crabd_path(g))?);
     c.lib_dir = Some(artifacts::default_dir(&home));
     c.allow_tsi_unrestricted = g.libkrun_tsi;
+    c.cgroup_parent = sandcrab_sdk::libkrun::config::cgroup_parent_from_env();
     Ok(c)
 }
 
@@ -241,6 +242,43 @@ pub fn preflight(c: &LibkrunConfig) -> anyhow::Result<()> {
 /// `sandcrab doctor` checks for the libkrun backend. Missing prerequisites fail only when
 /// `--backend libkrun` is selected (warn otherwise). Always reaps orphaned run dirs of dead
 /// sandcrab processes (only those: live sandboxes are never touched).
+/// Host-side cap of the helper: a delegated cgroup v2 leaf on Linux (`$SANDCRAB_LIBKRUN_CGROUP`),
+/// none on macOS. A configured but unusable parent blocks spawns, so it is a blocker here too.
+fn cgroup(c: &LibkrunConfig, r: &mut Report, blockers: &mut Vec<&str>, bad: Status) {
+    #[cfg(target_os = "linux")]
+    match &c.cgroup_parent {
+        Some(p) => match sandcrab_sdk::libkrun::check_cgroup_parent(p) {
+            Ok(()) => r.add(
+                "lk:cgroup",
+                Status::Ok,
+                format!("helper leaves under {} (memory.max, pids.max)", p.display()),
+            ),
+            Err(e) => {
+                blockers.push("cgroup");
+                r.add("lk:cgroup", bad, e.to_string());
+            }
+        },
+        None => r.add(
+            "lk:cgroup",
+            Status::Warn,
+            format!(
+                "no host-side memory/pids cap on the helper (VMM); set {} to a delegated cgroup \
+                 v2 directory (docs/hosting.md)",
+                sandcrab_sdk::libkrun::config::CGROUP_ENV
+            ),
+        ),
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (c, blockers, bad);
+        r.add(
+            "lk:cgroup",
+            Status::Info,
+            "no cgroups on macOS: guest RAM bounds the guest, VMM overhead is not capped",
+        );
+    }
+}
+
 pub fn doctor(g: &Global, r: &mut Report) {
     let selected = matches!(g.backend, Some(BackendArg::Libkrun));
     let bad = if selected { Status::Fail } else { Status::Warn };
@@ -333,6 +371,7 @@ pub fn doctor(g: &Global, r: &mut Report) {
         }
     }
     workspace_case(g, r, selected);
+    cgroup(&c, r, &mut blockers, bad);
     if c.allow_tsi_unrestricted {
         r.add(
             "lk:network",

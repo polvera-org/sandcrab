@@ -9,6 +9,10 @@ use crate::helper_proto::{MAX_LOG_LEVEL, MAX_SOCKET_PATH, VirtiofsSemantics};
 
 /// File name of the helper binary (`src/bin/sandcrab-krun.rs`).
 pub const HELPER_BIN_NAME: &str = "sandcrab-krun";
+
+/// `$SANDCRAB_LIBKRUN_CGROUP`: delegated cgroup v2 parent for the helper leaves (Linux), read
+/// by [`LibkrunConfig::from_env`] and the CLI.
+pub const CGROUP_ENV: &str = "SANDCRAB_LIBKRUN_CGROUP";
 /// The helper's entitlements (`entitlements.plist`: only `com.apple.security.hypervisor`),
 /// embedded so installers can sign the helper without a source checkout (design §4).
 pub const ENTITLEMENTS_PLIST: &str = include_str!("../entitlements.plist");
@@ -106,11 +110,14 @@ impl LibkrunConfig {
         }
     }
 
-    /// [`Self::with_home`] at `$SANDCRAB_HOME` / `~/.sandcrab`.
+    /// [`Self::with_home`] at `$SANDCRAB_HOME` / `~/.sandcrab`, with `cgroup_parent` from
+    /// `$SANDCRAB_LIBKRUN_CGROUP` ([`CGROUP_ENV`]) when set.
     pub fn from_env(crabd: impl Into<PathBuf>) -> Result<Self> {
         let home = sandcrab_rootfs::sandcrab_home()
             .map_err(|e| SandboxError::InvalidConfig(e.to_string()))?;
-        Ok(Self::with_home(&home, crabd))
+        let mut c = Self::with_home(&home, crabd);
+        c.cgroup_parent = cgroup_parent_from_env();
+        Ok(c)
     }
 
     /// Run dir of one sandbox.
@@ -153,6 +160,14 @@ impl LibkrunConfig {
         }
         Ok(())
     }
+}
+
+/// `$SANDCRAB_LIBKRUN_CGROUP` as a path, if set and non-empty.
+#[must_use]
+pub fn cgroup_parent_from_env() -> Option<PathBuf> {
+    std::env::var_os(CGROUP_ENV)
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
 }
 
 #[cfg(test)]

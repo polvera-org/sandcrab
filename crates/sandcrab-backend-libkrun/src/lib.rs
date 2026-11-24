@@ -37,5 +37,8 @@ mod vm;
 pub mod workspace;
 
 pub use backend::{CAPABILITIES, KrunLibs, LibkrunBackend};
+/// Linux: validate a delegated cgroup v2 parent for the helper leaves (`doctor`).
+#[cfg(target_os = "linux")]
+pub use cgroup::check_parent as check_cgroup_parent;
 pub use config::{LibkrunConfig, RootfsSource};
 pub use helper_proto::{HelperConfig, HelperConfigError, HelperNetwork, VirtiofsSemantics};
