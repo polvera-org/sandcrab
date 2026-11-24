@@ -212,8 +212,13 @@ works there, but libkrunfw for x86 macOS is not shipped by Homebrew) → "not co
   Unit tests never touch libkrun.
 - **Errors:** before spawn, `doctor` and the backend check `codesign -d --entitlements -` output for the key. If it is
   missing, the error says "`sandcrab-krun` lacks com.apple.security.hypervisor; run scripts/sign-krun-helper.sh". If
-  `krun_start_enter` still returns `-EINVAL` with `VmCreate`, it maps to the same hint **[spike]**. A Developer ID or
-  notarization is only needed for distribution (open question 5).
+  `krun_start_enter` still returns `-EINVAL` with `VmCreate`, it maps to the same hint **[spike]**.
+- **Release signing (decided 2026-11-24: ad-hoc now, Developer ID later).** Design for it from the start:
+  `scripts/sign-krun-helper.sh` takes an optional identity (`SANDCRAB_SIGN_IDENTITY`, default `-` = ad-hoc). With a
+  Developer ID it signs with `--options runtime --timestamp` (hardened runtime), and the same `entitlements.plist` gains
+  `com.apple.security.cs.disable-library-validation` only if the release build still dlopens third-party dylibs (prefer
+  bundling pinned, re-signed dylibs in the release so it is not needed). Notarization (`xcrun notarytool submit --wait`,
+  then `stapler`) is a separate release-pipeline step, documented in `docs/hosting.md` and not run in dev or CI.
 
 ## 5. Guest artifacts
 
@@ -658,19 +663,15 @@ Frontiers: {rootfs-crate, protocol-mounts} → {lk-scaffold, guest-virtiofs, tem
 9. **Boot numbers come from a minimal Alpine root.** Debian templates add rootfs size (page-in) but not kernel time. The
    `lk-bench` numbers are authoritative.
 
-## 18. Open questions for the human
+## 18. Decisions (human, 2026-11-24)
 
-1. **`unrestricted` on libkrun in Phase A:** ship the explicit `allow_tsi_unrestricted` escape hatch (guest can reach host
-   loopback, which is documented and opt-in), or refuse `unrestricted` until the passt/gvproxy step lands? *Recommendation: ship the opt-in flag;
-   agents on a Mac need `pip install`.*
-2. **Artifact source on macOS:** copy the Homebrew bottles into `~/.sandcrab/artifacts` (simple, matches what we tested), or build
-   libkrun/libkrunfw from pinned tags (reproducible, but slow and needs a Linux kernel toolchain for libkrunfw)?
-   *Recommendation: bottles, pinned by sha.*
-3. **Docker as a build-time prerequisite on macOS** for `sandcrab rootfs build` (export + container mke2fs). Accept it, or
-   invest in a Docker-free OCI layer importer (registry pull + whiteout handling + our own ext4 writer)? *Recommendation: accept it for Phase 2.*
-4. **Case-sensitive managed workspaces on macOS:** create managed workspaces inside a case-sensitive APFS sparse image
-   (`hdiutil`, no sudo) so repos with case-colliding paths work? *Recommendation: yes, as a `ManagedDir` option, later.*
-5. **Distribution signing:** are ad-hoc-signed local builds enough, or do you want a Developer ID-signed/notarized
-   `sandcrab-krun` for releases?
-6. **CLI default features:** include `libkrun` in the CLI's default features once e2e is green, like `firecracker`?
-7. **Apple Containerization:** agree to keep it as a "maybe later" macOS backend rather than Phase 2 scope?
+1. **`unrestricted` in Phase A:** ship the explicit, documented TSI opt-in (`allow_tsi_unrestricted` / `--libkrun-tsi`).
+2. **Artifact source:** the install script offers **both**. It defaults to the Homebrew bottles (copied into
+   `~/.sandcrab/artifacts` and pinned by SHA-256) when `brew` is present, with `--from-source` to build libkrun/libkrunfw
+   from pinned tags. Without Homebrew, it offers only the from-source build. On Linux, from-source is the path.
+3. **Docker at build time on macOS** for `sandcrab rootfs build`: accepted for Phase 2.
+4. **Case-sensitive APFS sparse images** for managed workspaces: yes, later (not in this flow).
+5. **Signing:** ad-hoc for early dev on the maintainer's Mac. Developer ID + hardened runtime + notarization are
+   designed in now (§4) and implemented before the first public release.
+6. **CLI default features:** add `libkrun` to the CLI's default features (on macOS aarch64 and Linux) once e2e is green.
+7. **Apple Containerization:** "maybe later", outside Phase 2.

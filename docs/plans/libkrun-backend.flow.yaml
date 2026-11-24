@@ -22,9 +22,9 @@ steps:
   - id: lk-approve
     phase: plan
     agent: nova
-    title: Human approval of design + answers to open questions (network escape hatch, pins source, CI)
+    title: "Human approval of design + answers (2026-11-24: TSI opt-in, brew default + from-source, Docker at build, ad-hoc now / Developer ID later, libkrun in CLI defaults)"
     depends_on: [lk-design]
-    status: todo
+    status: done
 
   # ---- frontier 1 (parallel)
   - id: rootfs-crate
@@ -33,7 +33,7 @@ steps:
     title: Extract OCI→ext4 pipeline into crates/sandcrab-rootfs (lib + sandcrab-rootfs bin), add --arch/--platform, arch in cache key; FC re-exports; build-crabd.sh uses rust-lld on Darwin
     depends_on: [lk-approve]
     artifacts: [crates/sandcrab-rootfs/, crates/sandcrab-backend-firecracker/src/rootfs/, crates/sandcrab-backend-firecracker/src/lib.rs, crates/sandcrab-backend-firecracker/Cargo.toml, Cargo.toml, scripts/build-crabd.sh, scripts/build-rootfs.sh]
-    status: todo
+    status: doing
 
   - id: protocol-mounts
     phase: implement
@@ -41,7 +41,7 @@ steps:
     title: "protocol::init GuestMount → MountSource {Block (serde default), VirtioFs{tag}}; core TemplateManifest sha256_by_arch; update FC control.rs call sites"
     depends_on: [lk-approve]
     artifacts: [crates/sandcrab-protocol/src/init.rs, crates/sandcrab-core/src/template.rs, crates/sandcrab-backend-firecracker/src/control.rs]
-    status: todo
+    status: doing
 
   # ---- frontier 2
   - id: lk-scaffold
@@ -80,7 +80,7 @@ steps:
   - id: lk-artifacts
     phase: implement
     agent: ada
-    title: "artifacts.rs pins (macOS arm64 brew bottles, Linux x86_64 source builds), scripts/fetch-libkrun.sh, `sandcrab libkrun install` support fn"
+    title: "artifacts.rs pins + scripts/fetch-libkrun.sh offering Homebrew bottles (default when brew present) and --from-source pinned tags (only option without brew; Linux path); `sandcrab libkrun install` support fn"
     depends_on: [lk-scaffold]
     artifacts: [crates/sandcrab-backend-libkrun/src/artifacts.rs, scripts/fetch-libkrun.sh]
     status: todo
@@ -121,7 +121,7 @@ steps:
   - id: lk-wire
     phase: implement
     agent: ada
-    title: "SDK feature libkrun + .libkrun(), CLI --backend libkrun / --libkrun-tsi / `libkrun install`, doctor checks (hv_support, entitlement, pins, /dev/kvm, APFS case), bench BackendId::Libkrun + macOS RSS sampler"
+    title: "SDK feature libkrun + .libkrun(), CLI --backend libkrun (in CLI default features on macOS aarch64 + Linux) / --libkrun-tsi / `libkrun install`, doctor checks (hv_support, entitlement, pins, /dev/kvm, APFS case), bench BackendId::Libkrun + macOS RSS sampler"
     depends_on: [lk-backend, lk-artifacts]
     artifacts: [crates/sandcrab-sdk/, crates/sandcrab-cli/, crates/sandcrab-bench/src/backend.rs, crates/sandcrab-bench/src/sample.rs, crates/sandcrab-bench/Cargo.toml]
     status: todo
@@ -176,7 +176,7 @@ steps:
   - id: lk-docs
     phase: document
     agent: rosetta
-    title: hosting.md (macOS + Linux libkrun setup), cli.md, README backend table, ROADMAP, CHANGELOG
+    title: "hosting.md (macOS + Linux libkrun setup, install script brew/from-source, release signing: Developer ID + hardened runtime + notarization), cli.md, README backend table, ROADMAP, CHANGELOG"
     depends_on: [lk-review, lk-live]
     artifacts: [docs/hosting.md, docs/cli.md, README.md, docs/ROADMAP.md, CHANGELOG.md]
     status: todo
