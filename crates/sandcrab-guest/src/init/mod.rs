@@ -8,7 +8,8 @@
 //! - [`command`] — the privilege-dropped `crabd serve` child command;
 //! - [`export`] — `pack_tree` / `stream_tree`, the guest side of workspace sync-back;
 //! - [`control`] — the `init.*` control-connection handler, generic over [`control::InitOps`];
-//! - [`netlink`] — the one `RTM_NEWLINK` message that brings `lo` up.
+//! - [`netlink`] — the one `RTM_NEWLINK` message that brings `lo` up;
+//! - [`reap`] — the reaper's `waitpid(-1)` loop (any process group, so orphans too).
 //!
 //! Linux-only: `sys` (mounts, pivot_root, reboot, ...) and `pid1` (boot sequence, reaper,
 //! the real `InitOps`). Those need a booted microVM and are covered by the Firecracker e2e
@@ -23,6 +24,7 @@ pub mod export;
 pub mod netlink;
 #[cfg(target_os = "linux")]
 mod pid1;
+pub mod reap;
 #[cfg(target_os = "linux")]
 pub mod sys;
 

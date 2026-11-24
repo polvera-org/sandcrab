@@ -9,6 +9,7 @@
 //! - [`server`] — listeners (UDS / TCP / vsock), per-connection request multiplexing,
 //!   `hello` / `ping`, graceful shutdown.
 //! - [`context`] — [`ToolContext`] shared by every tool call (default cwd, limits, processes).
+//! - [`hardening`] — `no_new_privs` for `crabd serve` and everything it spawns.
 //! - [`tools`] — [`tools::dispatch`] plus one module per tool family.
 //! - [`tunnel`] — `tunnel.open`: raw relay to a guest loopback TCP port.
 //! - [`vsock`] — AF_VSOCK listener (Linux only).
@@ -16,6 +17,7 @@
 
 pub mod codec;
 pub mod context;
+pub mod hardening;
 pub mod init;
 pub mod server;
 pub mod tools;

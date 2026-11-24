@@ -491,6 +491,38 @@ async fn binary_serves_and_exits_cleanly_on_sigterm() {
     assert!(!sock.exists());
 }
 
+/// Every tool process of `crabd serve` runs with `no_new_privs`, as under Docker's
+/// `no-new-privileges`: the microVM backends have no other place that sets it.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn binary_tool_processes_have_no_new_privs() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("crabd.sock");
+    let mut child = tokio::process::Command::new(CRABD)
+        .args(["serve", "--unix"])
+        .arg(&sock)
+        .arg("--default-cwd")
+        .arg(dir.path())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut c = None;
+    for _ in 0..250 {
+        if let Ok(s) = UnixStream::connect(&sock).await {
+            c = Some(s);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let mut c = c.expect("crabd socket came up");
+    let cmd = "grep '^NoNewPrivs:' /proc/self/status";
+    send(&mut c, &req(1, "bash", json!({ "command": cmd }))).await;
+    let r = recv(&mut c).await;
+    assert_eq!(r["result"]["stdout"], "NoNewPrivs:\t1\n", "{r}");
+    child.kill().await.unwrap();
+}
+
 #[test]
 fn binary_vsock_flag() {
     let port = (60_000 + std::process::id() % 5_000).to_string();

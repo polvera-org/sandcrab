@@ -16,7 +16,6 @@ use std::{
     time::Duration,
 };
 
-use rustix::process::WaitOptions;
 use sandcrab_protocol::init::{
     CONTROL_PORT, DEFAULT_SHUTDOWN_GRACE_MS, InitConfig, InitConfigureResult, SCRATCH_DRIVE_ID,
 };
@@ -30,7 +29,7 @@ use super::{
     control::{InitOps, serve_control_connection},
     dirs,
     drives::{self, BlockDevice},
-    netlink, sys,
+    netlink, reap, sys,
 };
 use crate::{server::BoxFuture, vsock};
 
@@ -135,29 +134,18 @@ fn resolve(devices: &[BlockDevice], drive_id: &str, label: &str) -> Option<PathB
     })
 }
 
-/// Reap every exited child: orphans re-parented to PID 1 and `crabd serve` itself.
+/// Reap every exited child: orphans re-parented to PID 1 and `crabd serve` itself (see
+/// [`super::reap`] for why a global `waitpid(-1)` cannot steal anyone's exit status).
 fn reap(serve_pid: &AtomicU32) {
     let _guard = SPAWN_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    loop {
-        match rustix::process::waitpid(None, WaitOptions::NOHANG) {
-            Ok(Some((pid, status))) => {
-                let pid = pid.as_raw_nonzero().get().unsigned_abs();
-                if pid == serve_pid.load(Ordering::Relaxed) {
-                    error!(pid, ?status, "crabd serve exited; tools are unavailable");
-                    serve_pid.store(0, Ordering::Relaxed);
-                }
-            }
-            Ok(None) => break,
-            Err(rustix::io::Errno::CHILD) => break,
-            Err(rustix::io::Errno::INTR) => {}
-            Err(e) => {
-                warn!(error = %e, "waitpid");
-                break;
-            }
+    reap::reap_exited(|pid, status| {
+        if pid == serve_pid.load(Ordering::Relaxed) {
+            error!(pid, ?status, "crabd serve exited; tools are unavailable");
+            serve_pid.store(0, Ordering::Relaxed);
         }
-    }
+    });
 }
 
 struct Configured {
