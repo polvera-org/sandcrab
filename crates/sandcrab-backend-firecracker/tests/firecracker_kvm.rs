@@ -289,9 +289,29 @@ async fn unrestricted_network_reaches_the_internet() {
         .spawn(SandboxConfig::from_template("base").network(NetworkConfig::unrestricted()))
         .await
         .unwrap();
-    let r = bash(&sb, "ip -br addr show eth0; getent hosts example.com").await;
-    assert!(r.stdout.contains("172.30."), "{}", r.stdout);
-    assert_eq!(r.exit_code, Some(0), "DNS through NAT: {}", r.stdout);
+    // The templates ship no iproute2: read the guest address from procfs.
+    let r = bash(
+        &sb,
+        "grep -o '172\\.30\\.[0-9]*\\.2' /proc/net/fib_trie | head -n1; getent hosts example.com",
+    )
+    .await;
+    assert!(r.stdout.contains("172.30."), "{r:?}");
+    assert_eq!(r.exit_code, Some(0), "DNS through NAT: {r:?}");
+    // Real egress (the guest is IPv4-only; the pool's NAT is IPv4).
+    let r = bash(
+        &sb,
+        "curl -4 -sS -o /dev/null -m 15 -w '%{http_code}' https://example.com",
+    )
+    .await;
+    assert_eq!(r.exit_code, Some(0), "HTTPS through NAT: {r:?}");
+    assert!(r.stdout.starts_with(['2', '3']), "{r:?}");
+    // guest → link-local / cloud metadata is dropped (private ranges, fc-net-setup.sh).
+    let r = bash(
+        &sb,
+        "timeout 3 bash -c '</dev/tcp/169.254.169.254/80' 2>&1; echo rc=$?",
+    )
+    .await;
+    assert!(!r.stdout.contains("rc=0"), "{}", r.stdout);
     // guest → host is dropped by the `inet sandcrab` table.
     let r = bash(
         &sb,
