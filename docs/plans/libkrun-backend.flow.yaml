@@ -91,7 +91,7 @@ steps:
     title: "RuntimeBackend: vm.rs (run dir, helper spawn, lifeline, readiness, timings, crash watch), control.rs, workspace.rs, net.rs (disabled + TSI opt-in), reap.rs, cgroup.rs (Linux), capabilities"
     depends_on: [lk-scaffold, protocol-mounts]
     artifacts: [crates/sandcrab-backend-libkrun/src/backend.rs, crates/sandcrab-backend-libkrun/src/vm.rs, crates/sandcrab-backend-libkrun/src/control.rs, crates/sandcrab-backend-libkrun/src/workspace.rs, crates/sandcrab-backend-libkrun/src/net.rs, crates/sandcrab-backend-libkrun/src/reap.rs, crates/sandcrab-backend-libkrun/src/cgroup.rs]
-    status: doing
+    status: done
 
   - id: vsock-tunnel
     phase: implement
