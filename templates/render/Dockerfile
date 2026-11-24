@@ -19,9 +19,15 @@
 # Non-root: browsers in /opt/ms-playwright (world-readable), globals in
 # /usr/local/lib/node_modules with NODE_PATH set so `require('playwright')`
 # resolves from any cwd; caches under $HOME (/home/sandcrab, 1777).
+#
+# Multi-arch (linux/amd64, linux/arm64): the node digest is an OCI index digest;
+# Typst's release tarball is selected by TARGETARCH and checked against a
+# per-arch sha256; Playwright downloads the target arch's Chromium build.
+# BASE_IMAGE is set by templates/build.sh to the arch-suffixed base tag.
+ARG BASE_IMAGE=sandcrab/base:0.1.0
 FROM node:26.13.1-trixie-slim@sha256:e6bedef217677b276c591795e169840edd9096dbf13f29df8ef8d1856b8820bc AS node-runtime
 
-FROM sandcrab/base:0.1.0 AS typst
+FROM ${BASE_IMAGE} AS typst
 ARG TARGETARCH
 ARG TYPST_VERSION=0.15.1
 ARG TYPST_SHA256_AMD64=a6d077d0a95eed5a2eba715b2dae06be954f624ccbf85758a03f389ded33118c
@@ -38,7 +44,7 @@ RUN set -eu; \
     tar -xJf /tmp/typst.tar.xz -C /tmp; \
     install -m 0755 "/tmp/typst-${triple}/typst" /usr/local/bin/typst
 
-FROM sandcrab/base:0.1.0
+FROM ${BASE_IMAGE}
 
 ARG PLAYWRIGHT_VERSION=1.65.1
 
