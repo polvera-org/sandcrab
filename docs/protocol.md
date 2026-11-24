@@ -376,7 +376,7 @@ add per-chunk JSON overhead. vsock and Unix sockets both allow many cheap connec
 | Result | `{port}`, sent only **after** the guest TCP connect succeeded, so an ack means the stream is live |
 | Errors (then `crabd` closes) | `-32602` bad port; `-32004` nothing listening; `-32001` tunnel limit reached or connect failed; `-32002` connect timeout (5 s) |
 | Position | must be the **first** frame. Later on a connection it is `-32600` and the connection stays in frame mode |
-| Close | EOF on one side is propagated as a half-close (`shutdown(SHUT_WR)`) to the other; the tunnel ends when both directions are done or either side errors |
+| Close | EOF on one side is propagated as a half-close (`shutdown(SHUT_WR)`) to the other; the tunnel ends when both directions are done or either side errors. **vsock listeners** (Firecracker, libkrun): when the guest target reaches EOF, `crabd` flushes its bytes and closes the whole tunnel instead (see below) |
 
 It is a connection-level verb, not a tool: it is not in `TOOL_NAMES` and not in `hello`. A
 `crabd` that predates it answers `-32601`.
@@ -405,24 +405,26 @@ for a listener. Backends wire `SandboxConfig.ports` onto `PortForwards::bind` (o
 per port, `127.0.0.1:<ephemeral>`, reported by `SandboxHandle::published_ports`, closed on
 destroy, drop and VMM exit). Docker keeps its own port mapping.
 
-**Half-close over Firecracker vsock (measured on KVM).** Firecracker's vsock bridge does not
-preserve half-close in either direction:
+**Half-close over vsock (measured).** Neither microVM vsock bridge preserves half-close in
+both directions:
 
-- a host-side `SHUT_WR` on the vsock UDS becomes a **full close** (the guest's reply is lost);
-- a guest-side `SHUT_WR` is **never forwarded** to the host (the host keeps receiving and
-  sending, but sees no EOF while the tunnel is open).
+| | host `SHUT_WR` on the vsock UDS | guest `SHUT_WR` |
+| --- | --- | --- |
+| Firecracker (KVM) | becomes a **full close** (the guest's reply is lost) | **never forwarded** (no EOF on the host) |
+| libkrun 1.19.8 (HVF) | **breaks the stream** (reply lost, the host never sees EOF) | forwarded as EOF |
 
-So the Firecracker backend sets `ForwarderConfig::forward_half_close = false`: a client's
-`SHUT_WR` is not sent into the tunnel, and the tunnel ends when the guest side closes, the
-client closes, or the guest is silent for 30 s after the client's EOF. What works: HTTP/1.1
-(keep-alive or `Connection: close`) and any protocol framed by length; HTTP/1.0 clients that
-half-close after the request get the full response. What does not: a client that waits for the
-server's EOF to know the response is complete (`Connection: close` without `Content-Length`,
-HTTP/1.0 read-to-close) sees the bytes but not the EOF until the tunnel ends, and protocols that
-need the guest to see the client's EOF (upload-then-EOF). The guest-side fix is for `crabd` to
-close a vsock tunnel when its loopback target reaches EOF. Unix-socket transports (Docker) and
-the libkrun `v.sock` mapping are unaffected by this setting (libkrun's half-close is not yet
-measured on a real VM).
+So both backends set `ForwarderConfig::forward_half_close = false`: a client's `SHUT_WR` is
+not sent into the tunnel, and the tunnel ends when the guest side closes, the client closes,
+or the guest is silent for 30 s after the client's EOF. And on vsock listeners `crabd` closes
+the tunnel when its loopback target reaches EOF (after flushing the target's bytes;
+`TunnelConfig::close_on_target_eof`), so the host sees the server's FIN on both backends.
+
+What works: HTTP/1.1 (keep-alive or `Connection: close`, with or without `Content-Length`),
+HTTP/1.0 (also when the client half-closes after the request), read-until-close clients, and
+any protocol framed by length. What does not: protocols that need the guest to see the
+client's EOF (upload-until-EOF gets no reply), and a guest server that half-closes first and
+then keeps reading (host bytes after the guest's FIN are dropped). Unix-socket transports
+(Docker) keep full half-close semantics in both directions.
 
 ## `init.*` control contract (microVMs)
 
