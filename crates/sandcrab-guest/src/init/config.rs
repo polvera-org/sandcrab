@@ -10,8 +10,8 @@ use std::{
 };
 
 use sandcrab_protocol::init::{
-    CONTROL_PORT, GuestMount, InitConfig, MAX_DRIVE_ID_LEN, MAX_EXT4_LABEL_LEN, MountSource,
-    ROOT_DRIVE_ID, SCRATCH_DRIVE_ID,
+    CONTROL_PORT, GuestMount, InitConfig, MAX_DRIVE_ID_LEN, MAX_EXT4_LABEL_LEN,
+    MAX_VIRTIOFS_TAG_LEN, MountSource, ROOT_DRIVE_ID, SCRATCH_DRIVE_ID,
 };
 
 /// Guest paths that may never be (or contain) a workspace mount point.
@@ -113,45 +113,116 @@ fn validate_env(cfg: &InitConfig) -> io::Result<()> {
     Ok(())
 }
 
+/// virtio-fs `tag`: `[A-Za-z0-9_.:-]`, 1..=36 bytes (the virtio-fs config field size).
+pub fn validate_virtiofs_tag(tag: &str) -> io::Result<()> {
+    if tag.is_empty() || tag.len() > MAX_VIRTIOFS_TAG_LEN {
+        return Err(invalid(format!(
+            "virtio-fs tag `{tag}` must be 1..={MAX_VIRTIOFS_TAG_LEN} bytes"
+        )));
+    }
+    if !tag
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b':' | b'-'))
+    {
+        return Err(invalid(format!(
+            "virtio-fs tag `{tag}` must match [A-Za-z0-9_.:-]+"
+        )));
+    }
+    Ok(())
+}
+
+/// Where a planned workspace mount comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StepSource {
+    /// virtio-blk drive holding an ext4 filesystem.
+    Block {
+        drive_id: String,
+        /// ext4 label used when no device serial matches.
+        label: String,
+    },
+    /// virtio-fs share (libkrun), mounted by tag.
+    VirtioFs { tag: String },
+}
+
 /// One workspace mount, validated, in mount order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MountStep {
-    pub drive_id: String,
-    /// ext4 label used when no device serial matches.
-    pub label: String,
+    pub source: StepSource,
     /// Normalised absolute mount point.
     pub target: PathBuf,
+    /// `MS_RDONLY`. For virtio-fs the host VMM enforces it too; the guest flag is defence
+    /// in depth.
     pub read_only: bool,
 }
 
 impl MountStep {
-    /// Filesystem-specific mount data: `noload` skips journal replay on a read-only drive
-    /// (which would otherwise write to it).
+    /// The block `drive_id`, or `None` for a virtio-fs share.
+    #[must_use]
+    pub fn drive_id(&self) -> Option<&str> {
+        match &self.source {
+            StepSource::Block { drive_id, .. } => Some(drive_id),
+            StepSource::VirtioFs { .. } => None,
+        }
+    }
+
+    /// `mount(2)` filesystem type.
+    #[must_use]
+    pub fn fstype(&self) -> &'static str {
+        match self.source {
+            StepSource::Block { .. } => "ext4",
+            StepSource::VirtioFs { .. } => "virtiofs",
+        }
+    }
+
+    /// Filesystem-specific mount data: `noload` skips journal replay on a read-only ext4
+    /// drive (which would otherwise write to it). virtio-fs takes none.
     #[must_use]
     pub fn data(&self) -> &'static str {
-        if self.read_only { "noload" } else { "" }
+        match self.source {
+            StepSource::Block { .. } if self.read_only => "noload",
+            _ => "",
+        }
+    }
+
+    /// Whether to add `MS_NOATIME` (block drives; virtio-fs leaves atime to the host).
+    #[must_use]
+    pub fn noatime(&self) -> bool {
+        matches!(self.source, StepSource::Block { .. })
     }
 }
 
 /// Validate `mounts` and order them parents-first (stable for equal depth).
 pub fn plan_mounts(mounts: &[GuestMount]) -> io::Result<Vec<MountStep>> {
     let mut ids = BTreeSet::new();
+    let mut tags = BTreeSet::new();
     let mut targets = BTreeSet::new();
     let mut steps = Vec::with_capacity(mounts.len());
     for m in mounts {
-        let (drive_id, label) = match &m.source {
-            MountSource::Block { drive_id, label } => (drive_id, label),
-            // libkrun virtio-fs shares land with the guest-virtiofs step.
+        let source = match &m.source {
+            MountSource::Block { drive_id, label } => {
+                validate_drive_id(drive_id)?;
+                if !ids.insert(drive_id.clone()) {
+                    return Err(invalid(format!("duplicate drive_id `{drive_id}`")));
+                }
+                let label = label.clone().unwrap_or_else(|| drive_id.clone());
+                if label.is_empty() || label.len() > MAX_EXT4_LABEL_LEN || label.contains('\0') {
+                    return Err(invalid(format!(
+                        "ext4 label `{label}` must be 1..={MAX_EXT4_LABEL_LEN} bytes"
+                    )));
+                }
+                StepSource::Block {
+                    drive_id: drive_id.clone(),
+                    label,
+                }
+            }
             MountSource::VirtioFs { tag } => {
-                return Err(invalid(format!(
-                    "virtio-fs mount `{tag}` is not supported by this crabd"
-                )));
+                validate_virtiofs_tag(tag)?;
+                if !tags.insert(tag.clone()) {
+                    return Err(invalid(format!("duplicate virtio-fs tag `{tag}`")));
+                }
+                StepSource::VirtioFs { tag: tag.clone() }
             }
         };
-        validate_drive_id(drive_id)?;
-        if !ids.insert(drive_id.clone()) {
-            return Err(invalid(format!("duplicate drive_id `{drive_id}`")));
-        }
         let target = validate_mount_point(&m.guest_path)?;
         if !targets.insert(target.clone()) {
             return Err(invalid(format!(
@@ -159,15 +230,8 @@ pub fn plan_mounts(mounts: &[GuestMount]) -> io::Result<Vec<MountStep>> {
                 target.display()
             )));
         }
-        let label = label.clone().unwrap_or_else(|| drive_id.clone());
-        if label.is_empty() || label.len() > MAX_EXT4_LABEL_LEN || label.contains('\0') {
-            return Err(invalid(format!(
-                "ext4 label `{label}` must be 1..={MAX_EXT4_LABEL_LEN} bytes"
-            )));
-        }
         steps.push(MountStep {
-            drive_id: drive_id.clone(),
-            label,
+            source,
             target,
             read_only: m.read_only,
         });
@@ -264,7 +328,78 @@ mod tests {
         assert_eq!(plan[1].target, Path::new("/workspace/data"));
         assert!(plan[1].read_only);
         assert_eq!(plan[1].data(), "noload");
-        assert_eq!(plan[1].label, "ws1");
+        assert_eq!(
+            plan[1].source,
+            StepSource::Block {
+                drive_id: "ws1".into(),
+                label: "ws1".into()
+            }
+        );
+        assert_eq!(plan[1].drive_id(), Some("ws1"));
+        assert_eq!(plan[1].fstype(), "ext4");
+        assert!(plan[1].noatime());
+    }
+
+    #[test]
+    fn plan_virtio_fs_mounts() {
+        let plan = plan_mounts(&[
+            GuestMount::virtio_fs("sandcrab-ro", "/workspace/ref/", true),
+            GuestMount::virtio_fs("ws0", "/workspace", false),
+            gm("vol0", "/data", false),
+        ])
+        .unwrap();
+        assert_eq!(plan[0].target, Path::new("/workspace"));
+        assert_eq!(plan[0].source, StepSource::VirtioFs { tag: "ws0".into() });
+        assert_eq!(plan[0].fstype(), "virtiofs");
+        assert_eq!(plan[0].data(), "");
+        assert!(!plan[0].read_only);
+        assert!(!plan[0].noatime());
+        assert_eq!(plan[0].drive_id(), None);
+        // Mixed with a block volume; equal depth keeps input order.
+        assert_eq!(plan[1].target, Path::new("/data"));
+        assert_eq!(plan[1].fstype(), "ext4");
+        assert_eq!(plan[2].target, Path::new("/workspace/ref"));
+        assert!(plan[2].read_only);
+        // Read-only virtio-fs gets MS_RDONLY but no ext4 `noload`.
+        assert_eq!(plan[2].data(), "");
+        assert_eq!(
+            plan[2].source,
+            StepSource::VirtioFs {
+                tag: "sandcrab-ro".into()
+            }
+        );
+    }
+
+    #[test]
+    fn plan_rejects_bad_virtio_fs_mounts() {
+        let vf = |tag: &str, path: &str| GuestMount::virtio_fs(tag, path, false);
+        for (m, why) in [
+            (vec![vf("", "/w")], "1..=36"),
+            (vec![vf(&"t".repeat(37), "/w")], "1..=36"),
+            (vec![vf("ws 0", "/w")], "[A-Za-z0-9_.:-]"),
+            (vec![vf("ws0,ro", "/w")], "[A-Za-z0-9_.:-]"),
+            (vec![vf("ws\0x", "/w")], "[A-Za-z0-9_.:-]"),
+            (
+                vec![vf("ws0", "/w"), vf("ws0", "/v")],
+                "duplicate virtio-fs tag",
+            ),
+            (vec![vf("ws0", "/w"), vf("ws1", "/w/./")], "two workspaces"),
+            (
+                vec![vf("ws0", "/w"), gm("ws1", "/w", false)],
+                "two workspaces",
+            ),
+            (vec![vf("ws0", "/dev/x")], "reserved"),
+            (vec![vf("ws0", "/a/../b")], ".."),
+            (vec![vf("ws0", "/")], "`/`"),
+            (vec![vf("ws0", "w")], "absolute"),
+        ] {
+            let err = plan_mounts(&m).unwrap_err().to_string();
+            assert!(err.contains(why), "{m:?}: {err}");
+        }
+        // A tag and a drive_id may share a name: they are different namespaces.
+        let ok = [vf("ws0", "/w"), gm("ws0", "/v", false)];
+        assert_eq!(plan_mounts(&ok).unwrap().len(), 2);
+        assert_eq!(plan_mounts(&[vf(&"t".repeat(36), "/w")]).unwrap().len(), 1);
     }
 
     #[test]
@@ -294,9 +429,6 @@ mod tests {
         }
         let long_label = GuestMount::block("ws0", Some("x".repeat(17)), "/w", false);
         assert!(plan_mounts(&[long_label]).is_err());
-        let virtio_fs = GuestMount::virtio_fs("ws0", "/w", false);
-        let err = plan_mounts(&[virtio_fs]).unwrap_err().to_string();
-        assert!(err.contains("not supported"), "{err}");
     }
 
     #[test]
