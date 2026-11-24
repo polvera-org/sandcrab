@@ -375,6 +375,9 @@ fn harness() -> ExitCode {
         ("unenforceable_requests_are_refused", || {
             Box::pin(unenforceable_requests_are_refused())
         }),
+        ("published_ports_forward_over_vsock", || {
+            Box::pin(published_ports_forward_over_vsock())
+        }),
         ("api_error_cleans_up", || Box::pin(api_error_cleans_up())),
         ("guest_that_never_boots_times_out", || {
             Box::pin(guest_that_never_boots_times_out())
@@ -825,18 +828,135 @@ async fn unenforceable_requests_are_refused() {
         .await
         .unwrap_err();
     assert!(matches!(err, SandboxError::PolicyUnenforceable(_)), "{err}");
-    let err = e
-        .manager
-        .spawn(SandboxConfig::from_template("base").port(3000))
-        .await
-        .unwrap_err();
-    assert!(matches!(err, SandboxError::Unimplemented(_)), "{err}");
-    assert!(err.to_string().contains("tunnel.open"), "{err}");
+    for cfg in [
+        SandboxConfig::from_template("base").port(0),
+        SandboxConfig::from_template("base").port(3000).port(3000),
+    ] {
+        let err = e.manager.spawn(cfg).await.unwrap_err();
+        assert!(matches!(err, SandboxError::InvalidConfig(_)), "{err}");
+    }
     assert!(e.leftover_run_dirs().is_empty());
     assert!(
         !e.run_dir().join("fake-log").exists(),
         "no VMM was ever launched"
     );
+}
+
+/// Loopback echo server on the test host (the fake guest's "loopback": `MockCrabd` dials host
+/// `127.0.0.1` for `tunnel.open`). Echoes until EOF, then half-closes.
+async fn echo_server() -> u16 {
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = l.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        while let Ok((s, _)) = l.accept().await {
+            tokio::spawn(async move {
+                let (mut r, mut w) = s.into_split();
+                let _ = tokio::io::copy(&mut r, &mut w).await;
+                let _ = w.shutdown().await;
+            });
+        }
+    });
+    port
+}
+
+/// Send `data`, half-close, read the echo to EOF.
+async fn echo_round_trip(addr: std::net::SocketAddr, data: &[u8]) -> Vec<u8> {
+    let s = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let (mut r, mut w) = s.into_split();
+    let data = data.to_vec();
+    let writer = tokio::spawn(async move {
+        w.write_all(&data).await.unwrap();
+        w.shutdown().await.unwrap();
+    });
+    let mut back = Vec::new();
+    tokio::time::timeout(Duration::from_secs(10), r.read_to_end(&mut back))
+        .await
+        .expect("echo within 10 s")
+        .unwrap();
+    writer.await.unwrap();
+    back
+}
+
+/// Wait until `addr` refuses connections (listener closed).
+async fn port_closed(addr: std::net::SocketAddr) -> bool {
+    for _ in 0..500 {
+        if tokio::net::TcpStream::connect(addr).await.is_err() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    false
+}
+
+/// Published ports over vsock `CONNECT 1024` + `tunnel.open`, with network `disabled`: data
+/// and half-close go through, a port nothing listens on refuses per connection, destroy and a
+/// VMM crash close the listeners.
+async fn published_ports_forward_over_vsock() {
+    let e = env();
+    let open = echo_server().await;
+    let closed = {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        l.local_addr().unwrap().port()
+    };
+    let sb = e
+        .manager
+        .spawn(SandboxConfig::from_template("base").port(open).port(closed))
+        .await
+        .unwrap();
+    let ports = sb.published_ports().to_vec();
+    assert_eq!(
+        ports.iter().map(|p| p.guest).collect::<Vec<_>>(),
+        [open, closed]
+    );
+    assert!(
+        ports
+            .iter()
+            .all(|p| p.host.ip().is_loopback() && p.host.port() != 0)
+    );
+
+    let data: Vec<u8> = (0..1024 * 1024u32).map(|i| (i % 251) as u8).collect();
+    assert!(echo_round_trip(ports[0].host, &data).await == data);
+
+    let mut s = tokio::net::TcpStream::connect(ports[1].host).await.unwrap();
+    let mut buf = Vec::new();
+    let n = tokio::time::timeout(Duration::from_secs(10), s.read_to_end(&mut buf))
+        .await
+        .unwrap()
+        .unwrap_or(0);
+    assert_eq!(n, 0, "nothing listening: closed without data");
+    let r: BashResult = sb
+        .call(BashParams {
+            command: "still here".into(),
+            cwd: None,
+            env: Default::default(),
+            timeout_ms: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(r.stdout, "still here");
+
+    sb.destroy().await.unwrap();
+    for p in &ports {
+        assert!(port_closed(p.host).await, "{p:?} open after destroy");
+    }
+    assert!(e.leftover_run_dirs().is_empty());
+
+    // VMM crash (SIGKILL): the listeners close without a destroy.
+    let sb = e
+        .manager
+        .spawn(SandboxConfig::from_template("base").port(open))
+        .await
+        .unwrap();
+    let addr = sb.published_ports()[0].host;
+    assert_eq!(echo_round_trip(addr, b"x").await, b"x");
+    let vmm = RunMeta::load(&e.leftover_run_dirs()[0])
+        .unwrap()
+        .vmm
+        .unwrap();
+    assert!(vmm.kill(true));
+    assert!(port_closed(addr).await, "listener open after the VMM died");
+    let _ = sb.destroy().await;
+    assert!(e.leftover_run_dirs().is_empty());
 }
 
 /// Wait until no process with this identity remains (the fake runs as our child).

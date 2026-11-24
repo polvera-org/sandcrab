@@ -8,7 +8,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use sandcrab_core::{
-    Connector, LifecycleTimings, PublishedPort, Result, SandboxError, SandboxHandle, SandboxId,
+    Connector, LifecycleTimings, PortForwards, PublishedPort, Result, SandboxError, SandboxHandle,
+    SandboxId,
 };
 use sandcrab_protocol::init::{CONTROL_PORT, InitConfig, InitConfigureResult};
 use tokio::process::{Child, Command};
@@ -404,8 +405,10 @@ pub(crate) fn sync_back_limits(
     Ok((cfg.unpack_limits.bounded_by(capacity), capacity))
 }
 
-/// Live Firecracker sandbox.
+/// Live Firecracker sandbox. Dropping it without `destroy` closes the published ports (field
+/// order: before the VM is killed).
 pub(crate) struct FirecrackerSandbox {
+    pub ports: PortForwards,
     pub vm: Vm,
     pub api: ApiClient,
     pub connector: Arc<VsockConnector>,
@@ -491,7 +494,7 @@ impl SandboxHandle for FirecrackerSandbox {
     }
 
     fn published_ports(&self) -> Vec<PublishedPort> {
-        Vec::new()
+        self.ports.published().to_vec()
     }
 
     fn timings(&self) -> LifecycleTimings {
@@ -500,6 +503,10 @@ impl SandboxHandle for FirecrackerSandbox {
 
     async fn destroy(mut self: Box<Self>) -> Result<()> {
         let t = self.timings.clone();
+        // 0. Stop accepting: no new tunnels into a VM that is going away.
+        std::mem::replace(&mut self.ports, PortForwards::none())
+            .shutdown()
+            .await;
         // 1. Sync rw workspaces back while the guest is still up.
         let mut failed: Vec<(RwDriveMeta, String)> = Vec::new();
         for d in self.sync.clone() {

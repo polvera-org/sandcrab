@@ -339,10 +339,134 @@ async fn policy_rejections_leave_nothing_behind() {
     assert!(matches!(err, SandboxError::PolicyUnenforceable(_)), "{err}");
     let err = env
         .manager
-        .spawn(SandboxConfig::from_template("base").port(8080))
+        .spawn(SandboxConfig::from_template("base").port(8080).port(8080))
         .await
         .unwrap_err();
-    assert!(matches!(err, SandboxError::Unimplemented(_)), "{err}");
+    assert!(matches!(err, SandboxError::InvalidConfig(_)), "{err}");
+    assert!(leftovers(&env).is_empty());
+    assert!(no_firecracker_left(&env));
+}
+
+/// Guest servers for the port test (node, from the `ts-dev` template):
+/// - 8080: HTTP;
+/// - 7001: counts bytes until the client half-closes, then replies `got <n>` (host → guest
+///   half-close);
+/// - 7002: sends `hello`, half-closes its write side, then records what the client sends
+///   afterwards in `/tmp/7002.txt` (guest → host half-close).
+const PORT_SERVERS_JS: &str = r"
+const net = require('net'), http = require('http'), fs = require('fs');
+http.createServer((q, s) => s.end('hello from fc ' + q.url)).listen(8080, '127.0.0.1');
+net.createServer({ allowHalfOpen: true }, s => {
+  let n = 0;
+  s.on('data', d => n += d.length);
+  s.on('end', () => s.end('got ' + n));
+}).listen(7001, '127.0.0.1');
+net.createServer({ allowHalfOpen: true }, s => {
+  let got = '';
+  s.on('data', d => got += d);
+  s.on('end', () => { fs.writeFileSync('/tmp/7002.txt', got); s.destroy(); });
+  s.end('hello');
+}).listen(7002, '127.0.0.1', () => console.log('LISTENING'));
+";
+
+/// Published ports over vsock `CONNECT` + `tunnel.open` on real Firecracker, with network
+/// `disabled` (no NIC): HTTP, a large upload with host → guest half-close, guest → host
+/// half-close, a port nothing listens on, and the listeners closing on destroy.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires /dev/kvm, pinned artifacts, a pinned sandcrab/ts-dev:0.1.0 and a static crabd"]
+async fn published_ports_over_vsock_tunnels() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    async fn read_all(s: &mut tokio::net::tcp::OwnedReadHalf) -> std::io::Result<Vec<u8>> {
+        let mut buf = Vec::new();
+        tokio::time::timeout(Duration::from_secs(20), s.read_to_end(&mut buf))
+            .await
+            .map_err(|_| std::io::Error::other("read timed out"))??;
+        Ok(buf)
+    }
+
+    let env = env();
+    let sb = env
+        .manager
+        .spawn(
+            SandboxConfig::from_template("ts-dev")
+                .port(8080)
+                .port(7001)
+                .port(7002)
+                .port(7003),
+        )
+        .await
+        .unwrap();
+    let ports = sb.published_ports().to_vec();
+    let host = |guest: u16| {
+        ports
+            .iter()
+            .find(|p| p.guest == guest)
+            .expect("published")
+            .host
+    };
+    for p in sb.published_ports() {
+        assert_eq!(p.host.ip(), std::net::Ipv4Addr::LOCALHOST, "{p:?}");
+    }
+    assert_eq!(
+        bash(&sb, "ls /sys/class/net").await.stdout.trim(),
+        "lo",
+        "no NIC"
+    );
+
+    // Nothing listens yet: refused per connection, the sandbox is fine.
+    let (mut r, _w) = TcpStream::connect(host(7003)).await.unwrap().into_split();
+    assert!(read_all(&mut r).await.unwrap_or_default().is_empty());
+
+    bash(
+        &sb,
+        &format!("cat > /tmp/s.js <<'EOF'\n{PORT_SERVERS_JS}\nEOF\nnohup node /tmp/s.js > /tmp/s.log 2>&1 &\nfor i in $(seq 100); do grep -q LISTENING /tmp/s.log && break; sleep 0.1; done; cat /tmp/s.log"),
+    )
+    .await;
+
+    // HTTP/1.1 request/response with keep-alive off: the common case must work regardless.
+    let (mut r, mut w) = TcpStream::connect(host(8080)).await.unwrap().into_split();
+    w.write_all(b"GET /ping HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let body = String::from_utf8(read_all(&mut r).await.unwrap()).unwrap();
+    assert!(body.contains("hello from fc /ping"), "{body}");
+
+    // Host → guest half-close: 4 MiB upload, SHUT_WR, then the reply comes back.
+    let (mut r, mut w) = TcpStream::connect(host(7001)).await.unwrap().into_split();
+    let data = vec![7u8; 4 * 1024 * 1024];
+    w.write_all(&data).await.unwrap();
+    w.shutdown().await.unwrap();
+    let reply = read_all(&mut r).await;
+    println!("host->guest half-close: {reply:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&reply.unwrap()),
+        format!("got {}", data.len()),
+        "host -> guest half-close must keep the reverse direction open"
+    );
+
+    // Guest → host half-close: we see EOF, then can still send.
+    let (mut r, mut w) = TcpStream::connect(host(7002)).await.unwrap().into_split();
+    assert_eq!(read_all(&mut r).await.unwrap(), b"hello");
+    let sent = w.write_all(b"after-eof").await;
+    let _ = w.shutdown().await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let seen = bash(&sb, "cat /tmp/7002.txt 2>&1").await.stdout;
+    println!("guest->host half-close: write={sent:?} guest saw={seen:?}");
+    assert_eq!(
+        seen, "after-eof",
+        "guest -> host half-close must keep the host -> guest direction open"
+    );
+
+    let addrs: Vec<_> = sb.published_ports().iter().map(|p| p.host).collect();
+    sb.destroy().await.unwrap();
+    for a in addrs {
+        assert!(
+            TcpStream::connect(a).await.is_err(),
+            "{a} open after destroy"
+        );
+    }
     assert!(leftovers(&env).is_empty());
     assert!(no_firecracker_left(&env));
 }

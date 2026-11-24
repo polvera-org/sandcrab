@@ -10,8 +10,9 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use sandcrab_core::{
-    BackendCapabilities, BackendKind, MountMode, NetworkConfig, NetworkPolicy, ResolvedSpec,
-    Result, RuntimeBackend, SandboxError, SandboxHandle, UserSpec, WorkspaceBacking,
+    BackendCapabilities, BackendKind, Connector, ForwarderConfig, MountMode, NetworkConfig,
+    NetworkPolicy, PortForwards, ResolvedSpec, Result, RuntimeBackend, SandboxError, SandboxHandle,
+    StopSignal, UserSpec, WorkspaceBacking,
 };
 use sandcrab_protocol::init::{
     DEFAULT_TOOLS_PORT, GuestMount, InitConfig, InitUser, ROOT_DRIVE_ID, SCRATCH_DRIVE_ID,
@@ -20,6 +21,7 @@ use sandcrab_protocol::init::{
 use crate::api::{ApiClient, BootSource, MachineConfig, NetworkInterface};
 use crate::config::{FirecrackerConfig, RootfsSource};
 use crate::net::acquire_tap;
+use crate::proc::ProcId;
 use crate::rootfs::{Arch, MkfsStrategy, RootfsBuilder, RootfsRequest};
 use crate::rundir::{self, CgroupLeaf, RwDriveMeta, SCRATCH_FILE};
 use crate::vm::{
@@ -420,6 +422,19 @@ fn check_executable(p: &Path) -> Result<()> {
 
 /// Network policies this backend enforces (no silent downgrade): `disabled` = no NIC,
 /// `unrestricted` = tap + NAT. Domain allow-lists cannot be enforced in V1.
+/// Resolves once the VMM process is gone (crash watch for the published ports; the VMM is
+/// owned by `Vm`, so its liveness is polled by identity).
+fn vmm_gone(vmm: ProcId) -> StopSignal {
+    Box::pin(async move {
+        while vmm.is_alive() {
+            tokio::time::sleep(VMM_POLL).await;
+        }
+    })
+}
+
+/// How often the published-port crash watch checks the VMM.
+const VMM_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+
 fn enforces(network: &NetworkConfig) -> bool {
     matches!(
         network.policy,
@@ -457,17 +472,30 @@ impl RuntimeBackend for FirecrackerBackend {
                 spec.network.policy
             )));
         }
-        if !spec.ports.is_empty() {
-            return Err(SandboxError::Unimplemented(
-                "port publishing on firecracker (needs the guest `tunnel.open` vsock tunnel, \
-                 not implemented in V1)",
-            ));
-        }
+        sandcrab_core::validate_ports(&spec.ports)?;
         let (dir, meta) = rundir::create(&self.config.run_dir, spec.id)?;
         let mut vm = Vm::new(spec.id, dir, meta, self.config.recovery_dir.clone());
-        match self.spawn_vm(spec, &mut vm).await {
-            Ok((api, sync)) => Ok(Box::new(FirecrackerSandbox {
-                connector: Arc::new(VsockConnector::new(vm.vsock(), DEFAULT_TOOLS_PORT)),
+        let started = async {
+            let (api, sync) = self.spawn_vm(spec, &mut vm).await?;
+            let connector = Arc::new(VsockConnector::new(vm.vsock(), DEFAULT_TOOLS_PORT));
+            // Published ports: 127.0.0.1 listeners → `tunnel.open` over vsock (design §6).
+            let ports = PortForwards::bind(
+                Arc::clone(&connector) as Arc<dyn Connector>,
+                &spec.ports,
+                ForwarderConfig::default(),
+                vm.vmm.map(vmm_gone),
+            )
+            .await?;
+            if !ports.is_empty() {
+                spec.timings.mark_custom("ports_published");
+            }
+            Ok::<_, SandboxError>((api, sync, connector, ports))
+        }
+        .await;
+        match started {
+            Ok((api, sync, connector, ports)) => Ok(Box::new(FirecrackerSandbox {
+                ports,
+                connector,
                 vm,
                 api,
                 sync,

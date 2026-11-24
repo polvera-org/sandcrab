@@ -28,9 +28,10 @@
 //!
 //! Host requirements: `/dev/kvm` read-write (group `kvm`), e2fsprogs ≥ 1.47.1 (or Docker /
 //! fakeroot fallback) for images, Docker for rootfs builds, and for `unrestricted`
-//! networking a one-time `sudo scripts/fc-net-setup.sh`. Not supported in V1:
-//! `egress_restricted` (refused), published ports (`Unimplemented`: needs guest
-//! `tunnel.open`), snapshots, live host-dir sharing.
+//! networking a one-time `sudo scripts/fc-net-setup.sh`. Published ports need no NIC: each
+//! is a `127.0.0.1:<ephemeral>` listener whose connections go `CONNECT 1024` →
+//! `tunnel.open` → guest loopback ([`sandcrab_core::PortForwards`]). Not supported in V1:
+//! `egress_restricted` (refused), snapshots, live host-dir sharing.
 
 pub mod api;
 pub mod artifacts;
