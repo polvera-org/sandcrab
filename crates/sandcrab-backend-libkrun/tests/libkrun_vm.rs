@@ -92,12 +92,17 @@ fn env() -> Env {
 }
 
 fn env_with(tsi: bool) -> Env {
+    env_cfg(tsi, |_| {})
+}
+
+fn env_cfg(tsi: bool, tweak: impl FnOnce(&mut LibkrunConfig)) -> Env {
     // Keep the run dir short: socket paths must fit in 104 bytes on macOS.
     let tmp = tempfile::Builder::new()
         .prefix("sclk")
         .tempdir_in("/tmp")
         .unwrap();
-    let (cfg, libs) = config(tmp.path(), tsi);
+    let (mut cfg, libs) = config(tmp.path(), tsi);
+    tweak(&mut cfg);
     let backend = Arc::new(LibkrunBackend::new(cfg, libs).unwrap());
     let workspaces = WorkspaceRegistry::open(tmp.path().join("state")).unwrap();
     let project = tmp.path().join("project");
@@ -147,13 +152,15 @@ fn leftovers(env: &Env) -> Vec<PathBuf> {
 }
 
 /// No `sandcrab-krun` process of this user is left (tests run with `--test-threads=1`).
+/// Matches the command line, not the name: on Linux libkrun renames the VMM process
+/// (`comm` = "libkrun VM").
 fn no_helper_left() -> bool {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let out = std::process::Command::new("pgrep")
-            .args(["-x", "-U"])
+            .args(["-f", "-U"])
             .arg(rustix::process::getuid().as_raw().to_string())
-            .arg("sandcrab-krun")
+            .arg("(^|/)sandcrab-krun( |$)")
             .output()
             .unwrap();
         if out.stdout.is_empty() {
@@ -575,6 +582,98 @@ async fn policy_rejections_leave_nothing_behind() {
         .await
         .unwrap();
     sb.destroy().await.unwrap();
+    assert!(leftovers(&env).is_empty());
+}
+
+/// Linux: with `$SANDCRAB_LIBKRUN_CGROUP` (a delegated cgroup v2 parent; the test process must
+/// run inside the delegated tree, e.g. under `systemd-run --user --scope`) the helper runs in
+/// its own leaf with `memory.max` = guest RAM + VMM overhead and `pids.max`, and the leaf is
+/// removed on destroy. Skipped (with a note) when the variable is unset.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "real libkrun on Linux + a delegated cgroup in $SANDCRAB_LIBKRUN_CGROUP"]
+async fn helper_runs_in_its_cgroup_leaf() {
+    let Some(parent) = sandcrab_backend_libkrun::config::cgroup_parent_from_env() else {
+        println!("SKIP: SANDCRAB_LIBKRUN_CGROUP is not set");
+        return;
+    };
+    let env = env_cfg(false, |c| c.cgroup_parent = Some(parent.clone()));
+    let overhead = env.backend.config().vmm_overhead_mib;
+    let pids_max = env.backend.config().pids_max;
+    let sb = env
+        .manager
+        .spawn(SandboxConfig::from_template("base"))
+        .await
+        .unwrap();
+    let leaf = parent.join(format!("sandcrab-{}", sb.id()));
+    let read = |f: &str| std::fs::read_to_string(leaf.join(f)).unwrap();
+    let mem_mb = bash(&sb, "awk '/MemTotal/{print $2}' /proc/meminfo").await;
+    assert_eq!(mem_mb.exit_code, Some(0), "{mem_mb:?}");
+    let procs: Vec<u32> = read("cgroup.procs")
+        .lines()
+        .map(|l| l.parse().unwrap())
+        .collect();
+    assert_eq!(procs.len(), 1, "only the helper: {procs:?}");
+    // libkrun renames the VMM thread (`comm` = "libkrun VM"); the executable is the helper.
+    let exe = std::fs::read_link(format!("/proc/{}/exe", procs[0])).unwrap();
+    assert!(exe.ends_with("sandcrab-krun"), "{}", exe.display());
+    let memory_max: u64 = read("memory.max").trim().parse().unwrap();
+    assert!(
+        memory_max > overhead << 20,
+        "memory.max {memory_max} covers guest RAM + {overhead} MiB"
+    );
+    assert_eq!(read("pids.max").trim(), pids_max.to_string());
+    let current: u64 = read("memory.current").trim().parse().unwrap();
+    println!(
+        "CGROUP leaf memory.max={} MiB memory.current={} MiB pids.current={}",
+        memory_max >> 20,
+        current >> 20,
+        read("pids.current").trim()
+    );
+    assert!(current > 0 && current <= memory_max);
+    sb.destroy().await.unwrap();
+    assert!(!leaf.exists(), "leaf removed on destroy");
+
+    // Dropped with no runtime left to run a destroy (a panicking caller whose runtime shuts
+    // down): the VM's own Drop kills the helper and must still remove the leaf.
+    let backend = env.backend.clone();
+    let state = env.tmp.path().join("state2");
+    let id = std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (manager, sb) = rt.block_on(async {
+            let manager = SandboxManager::new(
+                backend,
+                WorkspaceRegistry::open(state).unwrap(),
+                TemplateRegistry::load(&[root().join("templates")]).unwrap(),
+                ManagerConfig::default(),
+            )
+            .unwrap();
+            let sb = manager
+                .spawn(SandboxConfig::from_template("base"))
+                .await
+                .unwrap();
+            (manager, sb)
+        });
+        let id = sb.id();
+        // Outside `block_on` there is no current runtime: the manager cannot schedule a
+        // destroy and drops the handle while the helper is still running.
+        drop(sb);
+        drop(manager);
+        drop(rt);
+        id
+    })
+    .join()
+    .unwrap();
+    let leaf = parent.join(format!("sandcrab-{id}"));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while leaf.exists() && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(!leaf.exists(), "leaf removed after drop");
+    assert!(no_helper_left());
     assert!(leftovers(&env).is_empty());
 }
 

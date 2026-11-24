@@ -9,7 +9,8 @@
 //!    file (74, see [`ffi::check_libkrunfw_lookup`]); libkrunfw + libkrun SHA-256 before
 //!    `dlopen` (71 / 74); disks exist, optional disk SHA-256s (70 / 71); workspace roots'
 //!    `(dev, ino)` against the lease identity (72). Shares are handed to libkrun as
-//!    `/dev/fd/<n>` of the verified directory fd, closing the verify → open race (§8).
+//!    `/dev/fd/<n>` (Linux: `/proc/self/fd/<n>/.`) of the verified directory fd, closing the
+//!    verify → open race (§8).
 //!    Stale sockets at the vsock UDS paths (from a SIGKILLed run) are removed (70 if the
 //!    path is something else).
 //! 4. Apply the [`ffi::plan`] (each `krun_*` call is logged to stderr first; 73 on failure).
@@ -263,9 +264,25 @@ impl ShareRoot {
     /// on macOS: nested create/rename/symlink/chmod/unlink work, and a host rename+recreate of
     /// the path after boot stays invisible to the guest). The fd stays open (no exec happens,
     /// so `CLOEXEC` is irrelevant) until `krun_start_enter` takes over the process.
+    ///
+    /// **Linux:** libkrun's passthrough server opens the root with `O_PATH | O_NOFOLLOW`, and
+    /// `/dev/fd/<n>` ends in the `/proc/self/fd/<n>` magic link, so `O_NOFOLLOW` would open
+    /// the link itself (every guest access then fails with `EIO`). `/proc/self/fd/<n>/.`
+    /// crosses the magic link as an intermediate component (always followed) and ends in `.`,
+    /// the verified directory itself.
     fn share_path(&self) -> PathBuf {
-        PathBuf::from(format!("/dev/fd/{}", self.fd.as_raw_fd()))
+        share_path_for(self.fd.as_raw_fd())
     }
+}
+
+#[cfg(target_os = "linux")]
+fn share_path_for(fd: i32) -> PathBuf {
+    PathBuf::from(format!("/proc/self/fd/{fd}/."))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn share_path_for(fd: i32) -> PathBuf {
+    PathBuf::from(format!("/dev/fd/{fd}"))
 }
 
 fn open_shares(shares: &[VirtioFsShare]) -> Result<Vec<ShareRoot>, Fail> {
@@ -305,4 +322,39 @@ fn open_shares(shares: &[VirtioFsShare]) -> Result<Vec<ShareRoot>, Fail> {
             Ok(ShareRoot { fd })
         })
         .collect()
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    /// The share path, opened the way libkrun's passthrough server opens its root
+    /// (`O_PATH | O_NOFOLLOW`), is the verified directory, even after the host path is swapped.
+    #[test]
+    fn share_path_opens_the_pinned_directory() {
+        use rustix::fs::{FileType, Mode, OFlags};
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("ws");
+        std::fs::create_dir(&dir).unwrap();
+        let fd = rustix::fs::open(
+            &dir,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .unwrap();
+        let want = std::fs::metadata(&dir).unwrap();
+        std::fs::rename(&dir, tmp.path().join("moved")).unwrap();
+        std::fs::create_dir(&dir).unwrap();
+
+        let root = ShareRoot { fd };
+        let opened = rustix::fs::open(
+            root.share_path(),
+            OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .unwrap();
+        let st = rustix::fs::fstat(opened).unwrap();
+        assert!(FileType::from_raw_mode(st.st_mode).is_dir());
+        assert_eq!((st.st_dev, st.st_ino), (want.dev(), want.ino()));
+    }
 }

@@ -98,6 +98,24 @@ clone_pinned() { # <repo> <tag> <commit> <dest>
 
 need() { for c in "$@"; do command -v "$c" >/dev/null || die "missing prerequisite: $c"; done; }
 
+# Symbols the helper resolves at load time (crates/sandcrab-backend-libkrun/src/ffi.rs
+# `Krun::load`): fail the install, not the first spawn, when a build lacks a feature.
+REQUIRED_SYMBOLS="krun_set_log_level krun_create_ctx krun_free_ctx krun_set_vm_config
+  krun_add_disk krun_set_root_disk_remount krun_add_virtiofs4 krun_disable_implicit_vsock
+  krun_add_vsock krun_add_vsock_port2 krun_set_port_map krun_set_workdir krun_set_exec
+  krun_get_max_vcpus krun_start_enter"
+
+check_symbols() { # <library>
+  if [ "$dry" = 1 ]; then say "(dry-run) would check the exported symbols of $1"; return; fi
+  need nm
+  local syms s
+  if [ "$plat" = macos ]; then syms="$(nm -gU "$1" | awk '{print $3}' | sed 's/^_//')"
+  else syms="$(nm -D --defined-only "$1" | awk '{print $3}')"; fi
+  for s in $REQUIRED_SYMBOLS; do
+    printf '%s\n' "$syms" | grep -qx "$s" || die "$1 lacks $s (built without a needed feature?)"
+  done
+}
+
 # ---- platform
 os="$(uname -s)" arch="$(uname -m)"
 case "$os/$arch" in
@@ -205,7 +223,9 @@ else
   # libkrun
   clone_pinned "$LIBKRUN_REPO" "$LIBKRUN_TAG" "$LIBKRUN_COMMIT" "$workdir/libkrun"
   # Keep cargo's output inside the throwaway workdir (never a shared CARGO_TARGET_DIR).
-  run env -u CARGO_TARGET_DIR make -C "$workdir/libkrun" -j"$jobs"
+  # BLK=1: virtio-blk (`krun_add_disk`, `krun_set_root_disk_remount`) is a cargo feature that
+  # upstream's Makefile leaves off by default; the Homebrew bottle has it.
+  run env -u CARGO_TARGET_DIR make -C "$workdir/libkrun" -j"$jobs" BLK=1
   if [ "$plat" = macos ]; then
     stage "$workdir/libkrun/target/release/libkrun.$LIBKRUN_VERSION.dylib" "$krun_file"
   else
@@ -214,6 +234,7 @@ else
     run patchelf --set-rpath '$ORIGIN' "$staging/$krun_file"
     krun_fix='["patchelf --set-rpath $ORIGIN"]'
   fi
+  check_symbols "$staging/$krun_file"
   krun_origin=source krun_commit="\"$LIBKRUN_COMMIT\""
 fi
 

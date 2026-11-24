@@ -133,6 +133,8 @@ impl LibkrunBackend {
         check_entitlement(&config.helper)?;
         #[cfg(target_os = "linux")]
         check_kvm(Path::new("/dev/kvm"))?;
+        #[cfg(target_os = "linux")]
+        check_cgroup(config.cgroup_parent.as_deref())?;
         libs.check(config.verify_pins)?;
         let backend = Self::new_unchecked(config, libs)?;
         match backend.reap_orphans() {
@@ -452,6 +454,27 @@ fn check_entitlement(helper: &Path) -> Result<()> {
             helper.display(),
             helper.display()
         )))
+    }
+}
+
+/// Linux: a configured cgroup parent must be usable (never silently ignored); without one the
+/// helper has no host-side memory/pids cap, which is warned about once per process.
+#[cfg(target_os = "linux")]
+fn check_cgroup(parent: Option<&Path>) -> Result<()> {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    match parent {
+        Some(p) => crate::cgroup::check_parent(p),
+        None => {
+            WARNED.call_once(|| {
+                tracing::warn!(
+                    "libkrun: no cgroup parent, so the helper (VMM) memory and pids are not \
+                     capped on the host; set {} to a delegated cgroup v2 directory \
+                     (docs/hosting.md)",
+                    crate::config::CGROUP_ENV
+                );
+            });
+            Ok(())
+        }
     }
 }
 

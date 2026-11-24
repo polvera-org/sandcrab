@@ -449,6 +449,11 @@ impl Drop for KrunVm {
             return;
         }
         self.kill();
+        // The helper is still exiting: a plain rmdir of its leaf would fail with EBUSY.
+        #[cfg(target_os = "linux")]
+        if let Some(cg) = self.cgroup.take() {
+            cg.kill_and_remove(std::time::Duration::from_secs(2));
+        }
         self.cleanup();
     }
 }

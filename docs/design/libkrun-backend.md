@@ -432,6 +432,51 @@ BackendCapabilities { hardware_isolated: true, multi_tenant_safe: false,
   is 9–22 s (`base`) and ~60 s (`ts-dev`). The CLI pays the first-spawn cost on every `run`.
   Teardown is ~25 ms (`init.shutdown`).
 
+### 12.2 Results on Linux KVM (step `lk-e2e-linux`, 2026-11-24, `kvm-dedicated`, Xeon D-2141I, kernel 7.0, libkrun 1.19.8)
+
+Run as the unprivileged `<user>` (in the `kvm` group), no root, no nftables rules (TSI off
+needs none; the host's Firecracker nftables setup is unrelated).
+
+- `tests/libkrun_vm.rs`: 8/8, the Mac's seven plus `helper_runs_in_its_cgroup_leaf` (Linux).
+  SDK e2e (`SANDCRAB_E2E_BACKEND=libkrun`): 14/14. The differences from Docker are the same as
+  on the Mac.
+- **Gaps fixed:**
+  - `scripts/fetch-libkrun.sh` built libkrun without `BLK=1`, so `krun_add_disk` was missing
+    (exit 74 at the first spawn). It now builds with `BLK=1` and checks the exported symbols
+    before installing.
+  - **`/dev/fd/<n>` share roots do not work on Linux.** libkrun's passthrough server opens its
+    root with `O_PATH | O_NOFOLLOW`, and `/dev/fd/<n>` ends in the `/proc/self/fd/<n>` magic
+    link, so it opened the link itself and every guest access failed with `EIO`. The helper
+    now passes `/proc/self/fd/<n>/.`, which crosses the magic link as an intermediate
+    component and ends at the verified directory. The identity-swap test passes.
+  - libkrun renames the helper's main thread (`comm` = "libkrun VM"), so the tests'
+    "no helper left" check matches the command line, not the name.
+- **virtio-fs ownership (default `LINUX_COMPLETE`, no `CAP_SETUID` in the helper):** the guest
+  runs as the host uid:gid. Guest-created files, directories and symlinks land on the host
+  owned by `<user>`, with the guest's mode bits. A guest `chown` to another uid fails with
+  `EPERM`. A guest `chmod u+s` does set the setuid bit on the host file (setuid to `<user>`,
+  so no gain for the guest; the same as a Docker bind mount). Read-only shares return `EROFS`,
+  and the unprivileged guest user cannot remount.
+- **cgroup v2:** works with a delegated parent (`docs/hosting.md`, "libkrun on Linux"). The
+  owning process must run inside the delegated tree, because moving a pid needs write access
+  to the common ancestor's `cgroup.procs`. A process in an SSH session scope gets `EACCES`.
+  The backend checks a configured parent at construction (`InvalidConfig` with the fix), warns
+  once when none is configured, and `doctor` reports `lk:cgroup`. Measured leaf for `base`:
+  `memory.max` 640 MiB (512 + 128), `memory.current` ~66 MiB, 13 pids.
+- **Library pinning:** the helper's environment is exactly `LD_LIBRARY_PATH=<pinned artifact
+  dir>`. A caller's `LD_PRELOAD` or `LD_LIBRARY_PATH` does not reach it, and only the pinned
+  `libkrun.so.1` and `libkrunfw.so.5` are mapped.
+- **TSI off and ports:** the same results as on the Mac. The guest cannot reach the host's
+  loopback or public address, a guest `0.0.0.0` listener is unreachable from the host, and
+  `dummy0` is down. Half-close: a guest FIN reaches the host, and a host `SHUT_WR` is not
+  forwarded (`forward_half_close = false`).
+- **Spawn time (warm, `base`, 1 vCPU, release helper): p50 ~407 ms** (Mac ~165 ms). The
+  breakdown: helper launch ~1 ms; **pin check ~187 ms** (31 MB of libkrun + libkrunfw: this
+  Xeon has no SHA-NI, and coreutils `sha256sum` takes the same ~200 ms; CPUs with SHA
+  extensions do it in ~20 ms); libkrun VM setup ~110 ms; guest boot ~100 ms
+  (`guest_boot_ms`); `init.configure` + `hello` ~5 ms. The first spawn of a process adds
+  ~400 ms in `rootfs_ready` (`docker image inspect` + hashing `crabd`). Teardown is 30–70 ms.
+
 ## 13. Bench
 
 - `sandcrab-bench`: `BackendId::Libkrun` (`"libkrun" | "krun"`), `open_libkrun` gated the same way as the SDK, and
