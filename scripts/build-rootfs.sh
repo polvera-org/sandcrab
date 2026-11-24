@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Build (or reuse from cache) the Firecracker ext4 rootfs for a Sandcrab template.
+# Build (or reuse from cache) the microVM (Firecracker / libkrun) ext4 rootfs for a Sandcrab template.
 #
-#   scripts/build-rootfs.sh <template> --crabd <path> [--out <cache-root>] [--mkfs native|container|fakeroot] [--verify]
+#   scripts/build-rootfs.sh <template> --crabd <path> [--arch linux/amd64|linux/arm64] [--out <cache-root>] [--mkfs native|container|fakeroot] [--verify]
+#
+# --arch (alias --platform) defaults to the host arch; crabd must be built for it (scripts/build-crabd.sh).
 #
 # Thin wrapper over the `sandcrab-rootfs` binary (crates/sandcrab-rootfs); all logic
 # lives in Rust (`rootfs::RootfsBuilder`). Output:
@@ -13,7 +15,7 @@ set -euo pipefail
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 case "${1:-}" in
-  ""|-h|--help) sed -n '2,12p' "$0"; exit 0 ;;
+  ""|-h|--help) sed -n '2,13p' "$0"; exit 0 ;;
 esac
 template="$1"; shift
 
