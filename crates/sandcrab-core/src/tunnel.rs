@@ -46,11 +46,17 @@ pub const RELAY_BUF: usize = 64 * 1024;
 /// Most guest ports one sandbox may publish (each is one host listener).
 pub const MAX_PUBLISHED_PORTS: usize = 64;
 
-/// Forwarder limits.
+/// Forwarder limits and transport quirks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ForwarderConfig {
     pub max_tunnels: usize,
     pub open_timeout: Duration,
+    /// Forward the client's half-close (`SHUT_WR`) into the tunnel. `true` for transports
+    /// that preserve half-close (Unix sockets). Firecracker's vsock bridge turns a host-side
+    /// `SHUT_WR` into a full close, which would drop the guest's reply to a client that
+    /// half-closes after its request; with `false` the host side just stops writing and the
+    /// tunnel ends when the guest side (or the client) closes.
+    pub forward_half_close: bool,
 }
 
 impl Default for ForwarderConfig {
@@ -58,6 +64,7 @@ impl Default for ForwarderConfig {
         Self {
             max_tunnels: DEFAULT_MAX_TUNNELS,
             open_timeout: DEFAULT_TUNNEL_OPEN_TIMEOUT,
+            forward_half_close: true,
         }
     }
 }
@@ -382,8 +389,14 @@ async fn relay(
             return;
         }
     };
-    let copy =
-        tokio::io::copy_bidirectional_with_sizes(&mut client, &mut tunnel, RELAY_BUF, RELAY_BUF);
+    let copy = async {
+        if config.forward_half_close {
+            tokio::io::copy_bidirectional_with_sizes(&mut client, &mut tunnel, RELAY_BUF, RELAY_BUF)
+                .await
+        } else {
+            relay_without_half_close(&mut client, &mut tunnel).await
+        }
+    };
     tokio::select! {
         biased;
         _ = stop.wait_for(|s| *s) => debug!(%peer, guest_port, "tunnel closed: forwarder stopped"),
@@ -391,6 +404,74 @@ async fn relay(
             Ok((up, down)) => debug!(%peer, guest_port, host_to_guest = up, guest_to_host = down, "tunnel closed"),
             Err(e) => debug!(%peer, guest_port, error = %e, "tunnel ended with error"),
         },
+    }
+}
+
+/// After the client's EOF (not forwarded), how long the guest may stay silent before the
+/// tunnel is closed. Without it a transport that never reports the guest's EOF (Firecracker
+/// vsock) would hold the tunnel slot until the client gives up.
+pub const HALF_CLOSE_LINGER: Duration = Duration::from_secs(30);
+
+/// Relay where the client's EOF is *not* forwarded: host → guest stops at client EOF, the
+/// tunnel's write side stays open, and the relay ends when guest → host reaches EOF (then the
+/// client gets a half-close), either side errors, or the guest sends nothing for
+/// [`HALF_CLOSE_LINGER`] after the client's EOF.
+async fn relay_without_half_close(
+    client: &mut TcpStream,
+    tunnel: &mut crate::BoxedStream,
+) -> std::io::Result<(u64, u64)> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let start = tokio::time::Instant::now();
+    let last_down_ms = AtomicU64::new(0);
+    let (mut client_r, mut client_w) = client.split();
+    let (mut tunnel_r, mut tunnel_w) = tokio::io::split(tunnel);
+    let up = async {
+        let mut buf = vec![0u8; RELAY_BUF];
+        let mut total = 0u64;
+        loop {
+            let n = client_r.read(&mut buf).await?;
+            if n == 0 {
+                tunnel_w.flush().await?;
+                return Ok::<_, std::io::Error>(total);
+            }
+            tunnel_w.write_all(&buf[..n]).await?;
+            total += n as u64;
+        }
+    };
+    let down = async {
+        let mut buf = vec![0u8; RELAY_BUF];
+        let mut total = 0u64;
+        loop {
+            let n = tunnel_r.read(&mut buf).await?;
+            if n == 0 {
+                client_w.shutdown().await?;
+                return Ok::<_, std::io::Error>(total);
+            }
+            client_w.write_all(&buf[..n]).await?;
+            total += n as u64;
+            let ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+            last_down_ms.store(ms, Ordering::Relaxed);
+        }
+    };
+    tokio::pin!(up, down);
+    let mut up_done: Option<(u64, tokio::time::Instant)> = None;
+    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    loop {
+        tokio::select! {
+            r = &mut up, if up_done.is_none() => up_done = Some((r?, tokio::time::Instant::now())),
+            r = &mut down => return Ok((up_done.map_or(0, |u| u.0), r?)),
+            _ = tick.tick(), if up_done.is_some() => {
+                let (up_bytes, eof_at) = up_done.expect("guarded");
+                let last = start + Duration::from_millis(last_down_ms.load(Ordering::Relaxed));
+                if last.max(eof_at).elapsed() >= HALF_CLOSE_LINGER {
+                    // Returning drops both streams: the client sees the connection close.
+                    debug!("guest silent after the client's EOF; closing the tunnel");
+                    return Ok((up_bytes, 0));
+                }
+            }
+        }
     }
 }
 
