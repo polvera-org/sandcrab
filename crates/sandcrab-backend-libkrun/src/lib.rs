@@ -36,5 +36,6 @@ pub mod reap;
 mod vm;
 pub mod workspace;
 
+pub use backend::{CAPABILITIES, KrunLibs, LibkrunBackend};
 pub use config::{LibkrunConfig, RootfsSource};
 pub use helper_proto::{HelperConfig, HelperConfigError, HelperNetwork, VirtiofsSemantics};
