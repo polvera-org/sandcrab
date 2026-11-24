@@ -325,7 +325,7 @@ steps:
     title: "Promote Docker to an official backend: DockerDev → Docker rename, drop the insecure opt-in, keep explicit selection + honest capabilities"
     depends_on: [docs]
     artifacts: [crates/, AGENTS.md]
-    status: doing
+    status: done
 
   - id: docker-official-review
     phase: verify
@@ -341,7 +341,7 @@ steps:
     title: Apply human feedback to the landing page + 3D presentation (incl. Docker positioning)
     depends_on: [docker-official]
     artifacts: [docs/site/landing/, docs/site/presentation.html, docs/site/presentation/]
-    status: todo
+    status: done
 
   - id: docker-official-docs
     phase: document
