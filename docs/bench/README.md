@@ -6,7 +6,7 @@ authority on metrics, scenarios, statistics, fairness rules and the decision fra
 The harness talks to the backends only through the public SDK, so the same code measures
 every backend. Each run writes one schema-versioned JSON file into `results/`.
 
-**V1 scope:** only **DockerDev** is measured. Firecracker is wired in: `--backends
+**V1 scope:** only **Docker** is measured. Firecracker is wired in: `--backends
 firecracker` compiles into the default build. On a host without a usable `/dev/kvm`, or
 without the pinned FC artifacts, the backend shows up in the results as
 `{"status": "unavailable", "reason": "...", "todo": true}`, both in `backends[]` and on every
@@ -29,7 +29,7 @@ KVM host (kvm-homelab), which is still to do.
 ```bash
 cargo build --release -p sandcrab-bench
 
-# Smoke run (tiny N, short windows; the result is marked invalid). A few minutes on DockerDev.
+# Smoke run (tiny N, short windows; the result is marked invalid). A few minutes on Docker.
 target/release/sandcrab-bench run --quick --backends docker,firecracker
 
 # Full spec run (N=30, 5 warmups, ABAB-interleaved, seeded cell order)
@@ -103,7 +103,7 @@ first:
 
 `summarize` prints all of this as a table.
 
-## Fairness notes and known deviations (DockerDev, V1)
+## Fairness notes and known deviations (Docker, V1)
 
 - **Interleaving:** iterations alternate between backends (ABAB) within each cell, the
   starting backend alternates per cell, and the cell order is shuffled from the recorded

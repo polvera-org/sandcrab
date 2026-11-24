@@ -25,5 +25,8 @@ Resolves the open decisions in `BRIEF.md` §4. Approved by the maintainer on 202
 ## Consequences
 
 - `DockerDevConfig::allow_insecure_dev_backend` defaults to `false`.
+  *Superseded (2026-11-24):* Docker is now an officially supported backend. `DockerDev` was renamed
+  `Docker`, no opt-in is needed (the old opt-ins are deprecated no-ops), and
+  `require_hardware_isolation` refuses non-microVM backends with `HardwareIsolationRequired`.
 - Firecracker has no `virtio-fs`: workspaces need a block-volume model (see `docs/design/firecracker-backend.md`).
 - The V1 Firecracker backend reports `multi_tenant_safe = false` until `jailer` confinement lands.

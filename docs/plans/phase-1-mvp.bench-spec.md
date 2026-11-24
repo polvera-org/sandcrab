@@ -156,6 +156,8 @@ Metric IDs: `spawn_ready`, `first_call`, `call.bash_echo`, `call.file_rw_1m`, `c
 
 **Hard gate (applied before scoring), per AGENTS.md invariant 1.** DockerDev is **never** eligible as the production or multi-tenant default, whatever its scores. It is eligible only for the local-dev/CI context. If no hardware-isolated backend passes its gates, the report recommends "no production default yet", not Docker.
 
+> **Note (2026-11-24):** Docker (formerly DockerDev) is now an officially supported backend for single-tenant and trusted-host workloads, so it is also eligible for that context. It still reports `multi_tenant_safe = false` and stays ineligible as the multi-tenant default.
+
 **Second gate.** A backend whose failure rate is >1% in mandatory cells is ineligible for any default until it's fixed.
 
 **Scoring.** Each criterion gets a 0–5 score using the rule in the table, multiplied by a context weight. Weights are fixed now, before data, and each context's weights sum to 100.

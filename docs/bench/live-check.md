@@ -6,6 +6,10 @@ entirely by `crabagent` (model `claude-sonnet-5-5`, default effort) with every t
 running inside a Sandcrab DockerDev sandbox. The operator only wrote the prompts, dropped
 one file into the workspace between turns, and copied `dist/` out at the end.
 
+> **Note (later rename):** this run predates the decision to make Docker an officially
+> supported backend. `DockerDev` is now `Docker`, and the `--allow-insecure` opt-in used at
+> the time is a deprecated no-op; the commands below omit it.
+
 Result: [`docs/site/landing/`](../site/landing/index.html). Cleaned transcript of all three
 sessions: [`live-check/transcript.jsonl`](live-check/transcript.jsonl) (1.2 MB; tool outputs
 over 4 KB and one base64 blob elided, home paths and the ssh host redacted; scanned
@@ -18,7 +22,7 @@ cargo build --release -p sandcrab-agent -p sandcrab-cli        # 3m23s, CARGO_BU
 target/release/sandcrab doctor                                  # docker + all 4 template pins: ok
 crabagent --workspace landing --template ts-dev \
   --mount-host docs/site:/kit:ro --network unrestricted --port 5173 \
-  --backend docker --allow-insecure --transcript /tmp/live/transcriptN.jsonl -p - < promptN.txt
+  --backend docker --transcript /tmp/live/transcriptN.jsonl -p - < promptN.txt
 ```
 
 The CLI accepted every flag in the flow notes as written; nothing had to be adapted.
@@ -151,7 +155,7 @@ label=sandcrab.managed` was empty.
 
 | ID | Severity | Component | Bug | Repro |
 | --- | --- | --- | --- | --- |
-| B1 | Medium | `sandcrab-backend-docker` | No `RLIMIT_CORE` limit. Crashing processes dump unbounded `core.*` files into the cwd, which is usually the persistent workspace. They count against the workspace and need host-side cleanup. | `sandcrab --backend docker --allow-insecure run -t ts-dev -- 'ulimit -c'` → `unlimited`. Set `HostConfig.Ulimits` `core=0`. |
+| B1 | Medium | `sandcrab-backend-docker` | No `RLIMIT_CORE` limit. Crashing processes dump unbounded `core.*` files into the cwd, which is usually the persistent workspace. They count against the workspace and need host-side cleanup. | `sandcrab --backend docker run -t ts-dev -- 'ulimit -c'` → `unlimited`. Set `HostConfig.Ulimits` `core=0`. |
 | B2 | Low | `sandcrab-backend-docker` (`spec.rs`) | The `/tmp` tmpfs is mounted `noexec` (Docker's tmpfs default) while the module doc says `nosuid,nodev`. Scripts and `.so` files under `/tmp` fail with `Permission denied` / `failed to map segment`. This is arguably good hardening, but it is undocumented and the system prompt doesn't mention it. | `run -t ts-dev -- 'grep " /tmp " /proc/mounts'` → `…nosuid,nodev,noexec…`; a `chmod +x /tmp/x.sh; /tmp/x.sh` → rc 126. Either document it (doc + crabagent prompt) or pass `exec` explicitly. |
 | B3 | Medium | `crabagent` | `download` (and `file_read`) of an image returns base64 text to the model, so an agent cannot look at a screenshot. This wastes about 100k+ tokens and pushes agents into slow workarounds (friction #1). | Turn 2 transcript: `download /tmp/h1.png` → `content_base64` 170,088 chars in a `tool_result`. Map image MIME types to an `image` content block. |
 | B4 | Low (UX) | `crabagent` | In `-p` mode the published port's URL is advertised (banner and the model's final message) but torn down at exit. | Any `-p` run with `--port`: the URL is dead after the summary prints. Possible fixes: say so in the banner, add `--keep-alive`, or tell the model in `-p` mode that servers die at exit. |
