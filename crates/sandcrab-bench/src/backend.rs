@@ -88,10 +88,12 @@ fn caps(sc: &Sandcrab) -> Capabilities {
 pub fn fc_paths(opts: &OpenOpts) -> crate::host::FcPaths {
     #[cfg(all(feature = "firecracker", target_os = "linux"))]
     {
-        let c = sandcrab_sdk::FirecrackerConfig::with_home(&opts.state_dir, opts.crabd.clone());
-        crate::host::FcPaths {
-            firecracker_bin: Some(c.firecracker_bin),
-            kernel: Some(c.kernel),
+        match fc_config(opts) {
+            Ok(c) => crate::host::FcPaths {
+                firecracker_bin: Some(c.firecracker_bin),
+                kernel: Some(c.kernel),
+            },
+            Err(_) => crate::host::FcPaths::default(),
         }
     }
     #[cfg(not(all(feature = "firecracker", target_os = "linux")))]
@@ -152,6 +154,19 @@ async fn open_docker(
     Err("sandcrab-bench was built without the `docker` feature".into())
 }
 
+/// Firecracker config: the pinned artifacts and the rootfs cache come from the Sandcrab home
+/// (`$SANDCRAB_HOME` / `~/.sandcrab`, shared with the CLI, slow to build), never from the
+/// per-run state dir, which would always be empty; run / recovery dirs stay per run.
+#[cfg(all(feature = "firecracker", target_os = "linux"))]
+fn fc_config(opts: &OpenOpts) -> Result<sandcrab_sdk::FirecrackerConfig, String> {
+    let home = sandcrab_sdk::firecracker::sandcrab_home()
+        .map_err(|e| format!("cannot locate the Sandcrab home: {e}"))?;
+    let mut config = sandcrab_sdk::FirecrackerConfig::with_home(&home, opts.crabd.clone());
+    config.run_dir = opts.state_dir.join("run");
+    config.recovery_dir = opts.state_dir.join("recovery");
+    Ok(config)
+}
+
 #[cfg(all(feature = "firecracker", target_os = "linux"))]
 fn open_firecracker(
     builder: sandcrab_sdk::SandcrabBuilder,
@@ -167,7 +182,7 @@ fn open_firecracker(
              with nested virtualization) — TODO: run on kvm-homelab"
         ));
     }
-    let config = sandcrab_sdk::FirecrackerConfig::with_home(&opts.state_dir, opts.crabd.clone());
+    let config = fc_config(opts)?;
     for p in [&config.kernel, &config.firecracker_bin] {
         if !p.is_file() {
             return Err(format!(
