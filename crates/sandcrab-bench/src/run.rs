@@ -1407,11 +1407,14 @@ pub async fn run(plan: &Plan) -> anyhow::Result<(RunResult, PathBuf)> {
                 name: t.clone(),
                 image,
                 oci_digest: oci,
-                pinned_digest: tpl
-                    .manifest
-                    .pinned_sha256_for_host()
-                    .unwrap_or_default()
-                    .to_owned(),
+                // Host-local pin (local integrity, not provenance); empty when unpinned.
+                pinned_digest: sandcrab_sdk::core::effective_pin(
+                    b.sc.manager().pin_store().as_ref(),
+                    &tpl.manifest,
+                    sandcrab_sdk::core::ImageArch::host(),
+                )?
+                .map(|p| p.digest)
+                .unwrap_or_default(),
                 rootfs_sha256: String::new(),
                 vcpu: tpl.manifest.resources.vcpu,
                 memory_mb: tpl.manifest.resources.memory_mb,

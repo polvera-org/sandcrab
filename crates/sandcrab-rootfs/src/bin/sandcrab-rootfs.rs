@@ -60,21 +60,86 @@ struct TemplateToml {
 }
 #[derive(serde::Deserialize)]
 struct TemplateSection {
+    #[serde(default)]
+    version: String,
     image: String,
+    /// Deprecated in-manifest pins (fallback only; pins are host-local now).
     sha256: Option<String>,
-    /// Per-arch image-id pins (`[template.sha256_by_arch] amd64 = "…", arm64 = "…"`).
     #[serde(default)]
     sha256_by_arch: BTreeMap<String, String>,
 }
 
 impl TemplateSection {
-    /// The image-id pin for `arch`: `sha256_by_arch.<arch>`, else the single-arch `sha256`.
+    /// The deprecated in-manifest pin for `arch`: `sha256_by_arch.<arch>`, else `sha256`.
     fn pin(&self, arch: Arch) -> Option<String> {
         self.sha256_by_arch
             .get(arch.as_str())
             .or(self.sha256.as_ref())
             .cloned()
     }
+}
+
+/// Host-local pin file (`sandcrab_core::pins`; this tool does not depend on core, so it reads
+/// the same schema-1 layout itself): `<pins dir>/<name>/<version>/<arch>.json`.
+#[derive(serde::Deserialize)]
+struct HostPin {
+    schema: u32,
+    template: String,
+    version: String,
+    arch: String,
+    image_id: String,
+}
+
+/// `$SANDCRAB_TEMPLATE_PINS`, else `<sandcrab home>/template-pins`.
+fn pins_dir() -> Result<PathBuf, String> {
+    match std::env::var_os("SANDCRAB_TEMPLATE_PINS").filter(|v| !v.is_empty()) {
+        Some(p) => Ok(PathBuf::from(p)),
+        None => Ok(rootfs::sandcrab_home()
+            .map_err(|e| e.to_string())?
+            .join("template-pins")),
+    }
+}
+
+/// The image-id pin for `name`/`version`/`arch`: the host-local pin file, else the
+/// deprecated in-manifest pin. A present but invalid pin file is an error.
+fn resolve_pin(
+    pins: &Path,
+    name: &str,
+    t: &TemplateSection,
+    arch: Arch,
+) -> Result<Option<String>, String> {
+    let safe = |s: &str| {
+        !s.is_empty()
+            && !s.contains("..")
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._+-".contains(&b))
+    };
+    if !safe(name) || !safe(&t.version) {
+        return Ok(t.pin(arch));
+    }
+    let path = pins
+        .join(name)
+        .join(&t.version)
+        .join(format!("{}.json", arch.as_str()));
+    let text = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(t.pin(arch)),
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+    };
+    let bad = |why: &str| format!("corrupt template pin {}: {why}", path.display());
+    let pin: HostPin = serde_json::from_str(&text).map_err(|e| bad(&e.to_string()))?;
+    let hex_ok = pin.image_id.strip_prefix("sha256:").is_some_and(|h| {
+        h.len() == 64 && h.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    });
+    if pin.schema != 1
+        || pin.template != name
+        || pin.version != t.version
+        || pin.arch != arch.as_str()
+        || !hex_ok
+    {
+        return Err(bad("unexpected schema, key or image_id"));
+    }
+    Ok(Some(pin.image_id))
 }
 
 fn load_template(dir: &Path, name: &str) -> Result<TemplateSection, String> {
@@ -104,13 +169,20 @@ fn run(cli: Cli) -> Result<(), String> {
                 None => Arch::host().map_err(|e| e.to_string())?,
             };
             let t = load_template(&templates_dir, &template)?;
+            let pin = resolve_pin(&pins_dir()?, &template, &t, arch)?;
+            if pin.is_none() {
+                eprintln!(
+                    "warning: template `{template}` is not pinned on this host \
+                     (`templates/build.sh {template}`); building without an image-id check"
+                );
+            }
             let mut b = RootfsBuilder::new(&cache).verify_on_hit(verify);
             if let Some(s) = mkfs {
                 b = b.strategy(s);
             }
             let built = b
                 .build(&RootfsRequest {
-                    expected_image_id: t.pin(arch),
+                    expected_image_id: pin,
                     image: t.image,
                     template: Some(template),
                     crabd,
@@ -175,5 +247,35 @@ mod tests {
         );
         let bare: TemplateToml = toml::from_str("[template]\nimage = \"i\"\n").unwrap();
         assert_eq!(bare.template.pin(Arch::Amd64), None);
+    }
+
+    #[test]
+    fn host_local_pin_wins_and_corrupt_is_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let t: TemplateToml = toml::from_str(
+            "[template]\nversion = \"0.1.0\"\nimage = \"i\"\nsha256 = \"sha256:legacy\"\n",
+        )
+        .unwrap();
+        let t = t.template;
+        assert_eq!(
+            resolve_pin(tmp.path(), "base", &t, Arch::Arm64).unwrap(),
+            Some("sha256:legacy".into())
+        );
+        let id = format!("sha256:{}", "a".repeat(64));
+        let dir = tmp.path().join("base/0.1.0");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("arm64.json"),
+            format!(
+                r#"{{"schema":1,"template":"base","version":"0.1.0","arch":"arm64","image":"i","image_id":"{id}","source":"build","recorded_at":"2026-11-24T00:00:00Z"}}"#
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_pin(tmp.path(), "base", &t, Arch::Arm64).unwrap(),
+            Some(id)
+        );
+        std::fs::write(dir.join("arm64.json"), "{}").unwrap();
+        assert!(resolve_pin(tmp.path(), "base", &t, Arch::Arm64).is_err());
     }
 }

@@ -14,6 +14,7 @@ pub mod error;
 pub(crate) mod fsx;
 pub mod manager;
 pub mod mounts;
+pub mod pins;
 pub mod policy;
 pub mod registry;
 pub mod sandbox;
@@ -35,6 +36,10 @@ pub use mounts::{
     FORBIDDEN_GUEST_PREFIXES, ResolvedMount, ResolvedMounts, normalize_guest_path, resolve_mounts,
     validate_mount_target,
 };
+pub use pins::{
+    EffectivePin, PINS_DIR_ENV, PinOrigin, PinSource, PinStore, TemplatePin, default_pins_dir,
+    effective_pin,
+};
 pub use policy::{
     NetworkConfig, NetworkPolicy, PortSpec, PublishedPort, ResourceOverrides, SecretSource,
     SecretSpec, UserSpec,
@@ -47,7 +52,7 @@ pub use sandbox::{DEFAULT_TTL_SECS, SandboxConfig, SandboxId};
 pub use template::{
     ImageArch, ImageVerifier, PinStatus, ResourceLimits, Template, TemplateManifest, TemplateMeta,
     TemplateNetwork, TemplateRegistry, ToolConfig, WorkspaceDefaults, check_digest,
-    verify_template_image, verify_template_image_for,
+    verify_image_pin,
 };
 pub use timings::{LifecyclePhase, LifecycleTimings, PhaseOffset, TimingMarks, TimingReport};
 pub use tunnel::{ForwarderConfig, PortForwarder};

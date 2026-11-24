@@ -15,10 +15,12 @@ use bollard::errors::Error as DockerError;
 use bollard::query_parameters::{
     CreateContainerOptionsBuilder, RemoveContainerOptionsBuilder, StopContainerOptionsBuilder,
 };
+use sandcrab_core::template::ImageArch;
 use sandcrab_core::{
     BackendCapabilities, BackendKind, Connector, Endpoint, ImageVerifier, LifecyclePhase,
     LifecycleTimings, NetworkConfig, NetworkPolicy, PinStatus, PublishedPort, ResolvedSpec, Result,
-    RuntimeBackend, SandboxError, SandboxHandle, SandboxId, UserSpec, verify_template_image,
+    RuntimeBackend, SandboxError, SandboxHandle, SandboxId, TemplateManifest, UserSpec,
+    verify_image_pin,
 };
 
 use crate::spec::{
@@ -136,43 +138,44 @@ impl DockerBackend {
         self.config.state_dir.join(id.to_string())
     }
 
-    /// Resolve the template image to its local ID and check it against the pin.
+    /// Resolve the template image to its local ID and check it against the host-local pin
+    /// the manager resolved (`spec.image_sha256`).
     async fn verify_image(&self, spec: &ResolvedSpec) -> Result<String> {
         let manifest = &spec.template.manifest;
-        let status = verify_template_image(&self.image_verifier(), manifest, false)
-            .await
-            .map_err(|e| match e {
-                SandboxError::DigestMismatch {
-                    image,
-                    expected,
-                    actual,
-                } => SandboxError::DigestMismatch {
-                    // Renders as: for `<image>` — re-pin with `templates/build.sh --pin <name>`
-                    image: format!(
-                        "{image}` — rebuild and re-pin with `templates/build.sh --pin {}",
-                        manifest.template.name
-                    ),
-                    expected,
-                    actual,
-                },
-                other => other,
-            })?;
+        let status = verify_image_pin(
+            &self.image_verifier(),
+            manifest.image(),
+            spec.image_sha256.as_deref(),
+        )
+        .await
+        .map_err(|e| match e {
+            SandboxError::DigestMismatch {
+                image,
+                expected,
+                actual,
+            } => SandboxError::DigestMismatch {
+                image,
+                expected,
+                // Renders as: … expected <pin>, got <id> (<hint>)
+                actual: format!(
+                    "{actual} ({})",
+                    sandcrab_core::pins::mismatch_hint(&manifest.template.name)
+                ),
+            },
+            other => other,
+        })?;
         match status {
             PinStatus::Verified { digest } => Ok(digest),
             PinStatus::Unpinned { digest } if self.config.allow_unpinned_images => {
                 tracing::warn!(
                     template = %manifest.template.name,
                     %digest,
-                    "running an unpinned template image (no sha256 in sandcrab.toml); \
+                    "running a template image with no host-local pin; \
                      allowed by DockerConfig::allow_unpinned_images"
                 );
                 Ok(digest)
             }
-            PinStatus::Unpinned { digest } => Err(unpinned_image(
-                &manifest.template.name,
-                manifest.image(),
-                &digest,
-            )),
+            PinStatus::Unpinned { digest } => Err(unpinned_image(manifest, &digest)),
         }
     }
 
@@ -291,12 +294,12 @@ impl DockerBackend {
     }
 }
 
-/// Spawn refusal for a template without a `sha256` pin (`UnpinnedImage`).
-pub(crate) fn unpinned_image(template: &str, image: &str, digest: &str) -> SandboxError {
+/// Spawn refusal for a template with no host-local pin (`UnpinnedImage`).
+pub(crate) fn unpinned_image(manifest: &TemplateManifest, digest: &str) -> SandboxError {
     SandboxError::Template(format!(
-        "UnpinnedImage: template `{template}` image `{image}` (local {digest}) has no `sha256` \
-         pin in sandcrab.toml; pin it with `templates/build.sh --pin {template}`, or opt out \
-         with `--allow-unpinned` (DockerConfig::allow_unpinned_images)"
+        "{}. Opt out (not recommended) with `--allow-unpinned` \
+         (DockerConfig::allow_unpinned_images)",
+        sandcrab_core::pins::unpinned_message(manifest, ImageArch::host(), Some(digest))
     ))
 }
 
@@ -565,9 +568,15 @@ mod tests {
 
     #[test]
     fn unpinned_image_error_names_the_fix() {
-        let e = unpinned_image("base", "sandcrab/base:0.1.0", "sha256:abc").to_string();
+        let m = TemplateManifest::from_toml_str(
+            "[template]\nname = \"base\"\nversion = \"0.1.0\"\nimage = \"sandcrab/base:0.1.0\"\n",
+        )
+        .unwrap();
+        let e = unpinned_image(&m, "sha256:abc").to_string();
         assert!(e.contains("UnpinnedImage"), "{e}");
-        assert!(e.contains("templates/build.sh --pin base"), "{e}");
+        assert!(e.contains("templates/build.sh base"), "{e}");
+        assert!(e.contains("sandcrab template pin base"), "{e}");
+        assert!(e.contains("not provenance"), "{e}");
         assert!(e.contains("--allow-unpinned"), "{e}");
     }
 

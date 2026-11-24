@@ -3,10 +3,9 @@ name = "ts-dev"
 version = "0.1.0"
 description = "Node.js 26 Active LTS + pnpm + bun + TypeScript + vitest + biome (+ python3) sandbox for JS/TS agents; no browser (use render)"
 image = "sandcrab/ts-dev:0.1.0"
-# Pins the locally built image ID (docker image inspect --format {{.Id}}); not
-# reproducible across rebuilds yet. Refresh with: templates/build.sh --pin
-sha256 = "sha256:e19b87bade1212d760613299b2a391283ab642d64137b966e92530343123df74"
-sha256_by_arch = { amd64 = "sha256:e19b87bade1212d760613299b2a391283ab642d64137b966e92530343123df74", arm64 = "sha256:86fff0aba9268cecbbbfabbf4e98ce0332ef9fd1e65d6dbc5ef40929ff515cb7" }
+# The built image ID is pinned per host, not here (local image IDs do not reproduce
+# across hosts): `templates/build.sh ts-dev` records it under ~/.sandcrab/template-pins.
+# The Dockerfile FROM base images are digest-pinned.
 
 [resources]
 vcpu = 2

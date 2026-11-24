@@ -263,6 +263,8 @@ daemon).
 - `sandcrab.toml` `sha256` pins a **locally built image ID**, which is arch-specific. Add
   `[template.sha256_by_arch] amd64 = "…", arm64 = "…"`. `sha256` stays as the fallback for single-arch hosts. The core
   `TemplateManifest` validates both. `templates/build.sh --platform linux/arm64 [--pin]` writes the right key.
+  *Superseded:* image IDs are now pinned host-locally, per arch, outside the manifests; see
+  [template-pins.md](../template-pins.md).
 - The rootfs `manifest.json` already records the rootfs sha. The per-arch image ID feeds the cache key.
 
 ## 6. Guest init and config

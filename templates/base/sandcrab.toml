@@ -3,10 +3,9 @@ name = "base"
 version = "0.1.0"
 description = "Minimal Debian 13 (trixie-slim) base image with core CLI utilities; crabd is injected at runtime"
 image = "sandcrab/base:0.1.0"
-# Pins the locally built image ID (docker image inspect --format {{.Id}}); not
-# reproducible across rebuilds yet. Refresh with: templates/build.sh --pin
-sha256 = "sha256:5dcb2f18b8a807cd3aa9f7db5abaa9fd89d06c65b2348d66e0153fd831ef0b5d"
-sha256_by_arch = { amd64 = "sha256:5dcb2f18b8a807cd3aa9f7db5abaa9fd89d06c65b2348d66e0153fd831ef0b5d", arm64 = "sha256:a4aed41dc0a9e74457cb563d7800d0d2c002ddd97281ce105fedd1e9dc348114" }
+# The built image ID is pinned per host, not here (local image IDs do not reproduce
+# across hosts): `templates/build.sh base` records it under ~/.sandcrab/template-pins.
+# The Dockerfile FROM base images are digest-pinned.
 
 [resources]
 vcpu = 1

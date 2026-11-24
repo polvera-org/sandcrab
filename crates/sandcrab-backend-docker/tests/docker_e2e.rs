@@ -2,7 +2,7 @@
 //! template images. All `#[ignore]`d; run with:
 //!
 //! ```text
-//! templates/build.sh --pin            # sandcrab/{base,ts-dev}:0.1.0 present + pinned
+//! templates/build.sh base ts-dev       # sandcrab/{base,ts-dev}:0.1.0 present + host-pinned
 //! cargo test -p sandcrab-backend-docker -- --ignored --nocapture
 //! ```
 //!
@@ -385,7 +385,14 @@ fn resolved_spec(env: &Env, template: &str) -> ResolvedSpec {
     ResolvedSpec {
         id: SandboxId::new(),
         image: manifest.image().to_owned(),
-        image_sha256: manifest.pinned_sha256_for_host().map(str::to_owned),
+        // The host-local pin, exactly as the manager resolves it.
+        image_sha256: sandcrab_core::effective_pin(
+            sandcrab_core::PinStore::open_default().ok().as_ref(),
+            manifest,
+            sandcrab_core::ImageArch::host(),
+        )
+        .unwrap()
+        .map(|p| p.digest),
         mounts: Vec::new(),
         default_cwd: manifest.workspace.workdir.clone(),
         env: Default::default(),

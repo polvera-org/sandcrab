@@ -89,7 +89,7 @@ opening them; crabagent prints that command for you ([crabagent.md](crabagent.md
 
 ```sh
 scripts/build-crabd.sh            # static musl crabd + its sha256
-templates/build.sh --pin          # build base, python-dev, ts-dev, render and pin their image IDs
+templates/build.sh                # build base, python-dev, ts-dev, render and pin them on this host
 cargo build --release -p sandcrab-cli
 target/release/sandcrab doctor
 ```
@@ -99,8 +99,8 @@ init as PID 1, PID / memory (no swap) / CPU limits, a size-limited
 `nosuid,nodev,noexec` tmpfs at `/tmp`, core dumps disabled, the host user's uid:gid,
 network `none` unless `unrestricted`, ports on `127.0.0.1` only, and `crabd` bind-mounted
 read-only. Template `disk_mb` is **not** enforced (overlay2 would need xfs with pquota).
-Images must match their `sha256` pin. It still shares the host kernel, so it is not
-hardware isolation.
+Images must match this host's pin ([template-pins.md](template-pins.md); local integrity, not
+provenance). It still shares the host kernel, so it is not hardware isolation.
 
 ## 2. KVM host (Firecracker)
 
@@ -171,7 +171,7 @@ Every artifact is verified on download and again on use.
 
 ```sh
 scripts/build-crabd.sh
-templates/build.sh --pin base ts-dev
+templates/build.sh base ts-dev
 sandcrab rootfs build base ts-dev     # template image → export → inject crabd → mke2fs
 sandcrab rootfs list
 ```

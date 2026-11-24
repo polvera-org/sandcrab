@@ -63,8 +63,9 @@ pub struct ResolvedSpec {
     pub template: Template,
     /// Template image reference.
     pub image: String,
-    /// Pinned digest from the template (`sha256:<hex>`), if any. Check with
-    /// [`crate::verify_template_image`].
+    /// Pin for the template image on this host (`sha256:<hex>`): the host-local pin, else a
+    /// deprecated in-manifest one ([`crate::pins::effective_pin`]); `None` = unpinned. Check
+    /// with [`crate::verify_image_pin`]; refuse `None` with [`crate::pins::unpinned_error`].
     pub image_sha256: Option<String>,
     /// Workspace mounts; `host_path` is the canonical path held by the lease.
     pub mounts: Vec<ResolvedMount>,

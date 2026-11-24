@@ -597,7 +597,7 @@ guard.kill(<span class="t">Signal</span>::KILL);</pre></figure>
 <circle cx="-5" cy="-12" r="1.9" fill="currentColor" stroke="none"/><circle cx="5" cy="-12" r="1.9" fill="currentColor" stroke="none"/>
 </g>
 </svg></span>Docker spawn</h4><ul>
-      <li><code>verify_image</code>: the image ID must match the template's <code>sha256</code> pin (unpinned images refused unless <code>allow_unpinned_images</code>).</li>
+      <li><code>verify_image</code>: the image ID must match this host's pin for the template (unpinned images refused unless <code>allow_unpinned_images</code>).</li>
       <li>Per-sandbox socket dir on the host, mounted at <code>/run/sandcrab</code>.</li>
       <li>Hardened container (§6), entrypoint pinned to <code>/opt/sandcrab/crabd serve --unix /run/sandcrab/crabd.sock</code>; <code>crabd</code> is bind-mounted read-only from the host, never baked into the image.</li>
       <li>Workspace roots are re-verified with <code>verify_workspace_root</code> before the bind mount is built.</li>
@@ -784,7 +784,7 @@ guard.kill(<span class="t">Signal</span>::KILL);</pre></figure>
       <tr><td><code>require_hardware_isolation</code> on Docker</td><td>SDK builder and <code>spawn</code></td><td><code>HardwareIsolationRequired</code></td></tr>
       <tr><td><code>egress_restricted</code> on Docker</td><td><a class="ref" href="../../crates/sandcrab-backend-docker/src/spec.rs">backend-docker/src/spec.rs:88</a></td><td><code>PolicyUnenforceable</code>: "docker cannot enforce network policy `egress_restricted`…"</td></tr>
       <tr><td>Any <code>secrets</code></td><td><code>spawn</code> + each backend's <code>reject_secrets</code></td><td><code>PolicyUnenforceable</code> (Phase 3)</td></tr>
-      <tr><td>Template image ID ≠ pinned <code>sha256</code></td><td>Docker <code>verify_image</code></td><td>refused unless <code>allow_unpinned_images</code> / <code>--allow-unpinned</code></td></tr>
+      <tr><td>Template image ID ≠ this host's pin</td><td>Docker <code>verify_image</code></td><td>refused unless <code>allow_unpinned_images</code> / <code>--allow-unpinned</code></td></tr>
       <tr><td>No <code>/dev/kvm</code></td><td><code>check_kvm</code> in <code>FirecrackerBackend::new</code></td><td>error; never a switch to Docker</td></tr>
     </tbody>
   </table></div>
@@ -862,9 +862,9 @@ guard.kill(<span class="t">Signal</span>::KILL);</pre></figure>
 name = <span class="s">"python-dev"</span>
 version = <span class="s">"0.1.0"</span>
 image = <span class="s">"sandcrab/python-dev:0.1.0"</span>
-<span class="c"># Pins the locally built image ID (docker image inspect --format {{.Id}}); not</span>
-<span class="c"># reproducible across rebuilds yet. Refresh with: templates/build.sh --pin</span>
-sha256 = <span class="s">"sha256:2b652e5ef776adca824ab33ce5b347ddc1b3ef0ca033dc58c3eea0e6947c2acd"</span>
+<span class="c"># The built image ID is pinned per host, not here (local image IDs do not reproduce</span>
+<span class="c"># across hosts): `templates/build.sh python-dev` records it under ~/.sandcrab/template-pins.</span>
+<span class="c"># The Dockerfile FROM base images are digest-pinned.</span>
 
 [resources]
 vcpu = <span class="s">2</span>
@@ -879,7 +879,7 @@ default_policy = <span class="s">"disabled"</span>
 
 [tools]
 tiers = [<span class="s">"core"</span>, <span class="s">"process"</span>]</pre></figure>
-  <p><strong>What the pin means:</strong> the <code>sha256</code> is the image ID of the <em>local</em> build. It pins integrity (a different image is refused), not bit-for-bit reproducibility, because apt packages are not pinned yet; re-run <code>templates/build.sh --pin</code> after every rebuild. Base images are pinned by digest in the Dockerfiles.</p>
+  <p><strong>What the pin means:</strong> <code>templates/build.sh</code> records each built image ID in a host-local pin file (<code>~/.sandcrab/template-pins/&lt;name&gt;/&lt;version&gt;/&lt;arch&gt;.json</code>), and spawns refuse an image that does not match it. That is local integrity (unchanged since this host built it), not provenance: image IDs do not reproduce across hosts yet, because apt packages are not pinned and image stores differ. <code>sandcrab template pin</code> adopts an image that is already present. Base images are pinned by digest in the Dockerfiles; reproducible template digests are a planned follow-up. See <a href="../../docs/template-pins.md">docs/template-pins.md</a>.</p>
 
   <h3>Rootfs pipeline (Firecracker)</h3>
   <figure class="code"><figcaption><span><a href="../../docs/design/firecracker-backend.md">docs/design/firecracker-backend.md</a> §2</span><span>pipeline</span></figcaption>
@@ -954,8 +954,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 <span class="c"># static musl crabd for injection (prints path + SHA-256)</span>
 scripts/build-crabd.sh            <span class="c"># or: scripts/build-crabd.sh aarch64</span>
-<span class="c"># build all four templates and write their image IDs into sandcrab.toml</span>
-templates/build.sh --pin
+<span class="c"># build all four templates and pin their image IDs on this host</span>
+templates/build.sh
 <span class="c"># check the host: crabd, Docker, template pins, Firecracker prerequisites</span>
 sandcrab doctor
 <span class="c"># one command in a throwaway sandbox (the backend is always chosen explicitly)</span>

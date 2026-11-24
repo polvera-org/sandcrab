@@ -72,7 +72,7 @@ rustup target add "$(uname -m)-unknown-linux-musl"
 sudo apt-get install -y musl-tools
 
 scripts/build-crabd.sh                 # static musl crabd, injected into every sandbox
-templates/build.sh --pin               # build the 4 template images and pin their IDs
+templates/build.sh                     # build the 4 template images and pin them on this host
 cargo build --release -p sandcrab-cli
 export PATH="$PWD/target/release:$PATH"
 
@@ -214,9 +214,11 @@ ffmpeg + ImageMagick + Typst).
   the `jailer` (chroot, cgroups, seccomp) is wired in, and it has not yet run on real KVM.
 - **Unenforceable policies fail.** `egress_restricted` network policies and `secrets` are
   refused at spawn time rather than ignored. The egress proxy is Phase 3.
-- **Pinned inputs.** Template images must match their `sha256` pin (`--allow-unpinned`
-  overrides on Docker); the Firecracker kernel and binaries are SHA-256 verified on
-  download and on every use.
+- **Pinned inputs.** Template images must match this host's pin, recorded when the host
+  built them ([docs/template-pins.md](docs/template-pins.md)). That is local integrity, not
+  provenance: image IDs do not reproduce across hosts yet, so only the `FROM` base images are
+  digest-pinned in the repo. `--allow-unpinned` overrides on Docker. The Firecracker kernel
+  and binaries are SHA-256 verified on download and on every use.
 - Known open items (Phase 2, MEDIUM): two registries with different `SANDCRAB_HOME` can
   still nest workspace roots, and the Docker / Firecracker pack paths resolve the bind
   path after verification (a narrow race). See [docs/ROADMAP.md](docs/ROADMAP.md#v1-status).

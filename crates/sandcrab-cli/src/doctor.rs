@@ -155,6 +155,7 @@ fn state_dir(g: &Global, r: &mut Report, fix: bool) {
 
 #[cfg(feature = "docker")]
 async fn docker(g: &Global, r: &mut Report, reap: Reap) {
+    use sandcrab_sdk::core::{ImageArch, PinOrigin, PinStore, effective_pin, verify_image_pin};
     use sandcrab_sdk::docker::{
         DockerBackend, DockerConfig, DockerImageVerifier, check_static_crabd,
     };
@@ -232,28 +233,70 @@ async fn docker(g: &Global, r: &mut Report, reap: Reap) {
         Some(b) => Some(b.image_verifier()),
         None => DockerImageVerifier::connect(None).ok(),
     };
+    let store = match PinStore::open_default() {
+        Ok(s) => {
+            r.add(
+                "template-pins",
+                Status::Info,
+                format!(
+                    "{} (host-local image pins: local integrity, i.e. unchanged since this host \
+                     built or adopted them; not provenance)",
+                    s.root().display()
+                ),
+            );
+            Some(s)
+        }
+        Err(e) => {
+            r.add("template-pins", Status::Warn, e.to_string());
+            None
+        }
+    };
     for t in &all {
         let name = format!("template:{}", t.name());
         let Some(v) = &verifier else {
             r.add(name, Status::Info, "skipped (no Docker connection)");
             continue;
         };
-        match sandcrab_sdk::core::verify_template_image(v, &t.manifest, false).await {
+        let pin = match effective_pin(store.as_ref(), &t.manifest, ImageArch::host()) {
+            Ok(p) => p,
+            Err(e) => {
+                r.add(name, Status::Fail, e.to_string());
+                continue;
+            }
+        };
+        let legacy = pin
+            .as_ref()
+            .is_some_and(|p| p.origin == PinOrigin::LegacyManifest);
+        match verify_image_pin(v, t.image(), pin.as_ref().map(|p| p.digest.as_str())).await {
+            Ok(PinStatus::Verified { .. }) if legacy => r.add(
+                name,
+                Status::Warn,
+                format!(
+                    "{} present, matches the deprecated in-manifest pin; record a host-local \
+                     pin with `sandcrab template pin {}`",
+                    t.image(),
+                    t.name()
+                ),
+            ),
             Ok(PinStatus::Verified { .. }) => {
                 r.add(
                     name,
                     Status::Ok,
-                    format!("{} present, pin matches", t.image()),
+                    format!(
+                        "{} present, matches this host's pin (local integrity)",
+                        t.image()
+                    ),
                 );
             }
             Ok(PinStatus::Unpinned { digest }) => r.add(
                 name,
                 Status::Warn,
                 format!(
-                    "{} present ({digest}) but unpinned: spawns are refused without \
-                     --allow-unpinned; `sandcrab template build {}` pins it",
+                    "{} present ({digest}) but not pinned on this host: spawns are refused; \
+                     `sandcrab template build {n}` rebuilds and pins it, \
+                     `sandcrab template pin {n}` adopts the existing image",
                     t.image(),
-                    t.name()
+                    n = t.name()
                 ),
             ),
             Err(SandboxError::DigestMismatch {
@@ -262,10 +305,9 @@ async fn docker(g: &Global, r: &mut Report, reap: Reap) {
                 name,
                 Status::Fail,
                 format!(
-                    "{}: pin {expected} != local image {actual}; rebuild + re-pin with \
-                     `sandcrab template build {}`",
+                    "{}: this host's pin {expected} != local image {actual}; {}",
                     t.image(),
-                    t.name()
+                    sandcrab_sdk::core::pins::mismatch_hint(t.name())
                 ),
             ),
             Err(SandboxError::NotFound { .. }) => r.add(

@@ -396,8 +396,8 @@ export PATH="$PWD/target/release:$PATH"
 <span class="c"># the static musl crabd that runs in every sandbox</span>
 scripts/build-crabd.sh
 
-<span class="c"># build the templates and pin their image IDs</span>
-templates/build.sh --pin
+<span class="c"># build the templates and pin them on this host</span>
+templates/build.sh
 
 <span class="c"># pick the backend once, then check the host</span>
 export SANDCRAB_BACKEND=docker
