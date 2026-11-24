@@ -9,6 +9,11 @@ use crate::helper_proto::{MAX_LOG_LEVEL, MAX_SOCKET_PATH, VirtiofsSemantics};
 
 /// File name of the helper binary (`src/bin/sandcrab-krun.rs`).
 pub const HELPER_BIN_NAME: &str = "sandcrab-krun";
+/// The helper's entitlements (`entitlements.plist`: only `com.apple.security.hypervisor`),
+/// embedded so installers can sign the helper without a source checkout (design §4).
+pub const ENTITLEMENTS_PLIST: &str = include_str!("../entitlements.plist");
+/// The entitlement the helper needs on macOS to create VMs.
+pub const HYPERVISOR_ENTITLEMENT: &str = "com.apple.security.hypervisor";
 /// Control socket name inside a sandbox run dir (guest vsock port 1).
 pub const CONTROL_SOCKET_NAME: &str = "ctl.sock";
 /// Tools socket name inside a sandbox run dir (guest vsock port 1024).
