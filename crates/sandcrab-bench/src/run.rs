@@ -998,13 +998,12 @@ async fn resources_iter(ctx: &Ctx<'_>, bi: usize, spec: &CellSpec) -> IterOut {
         }
     };
     let probe = b.probe(&sb).await;
-    out.skip(
-        "mem.vmm_overhead",
-        format!(
-            "guest RAM vs VMM split not measured for {} (Firecracker-only metric)",
-            b.id.label()
-        ),
-    );
+    // Guest RAM vs VMM split: only VMM backends have one; Docker shares the host kernel.
+    let why = match b.id {
+        BackendId::Docker => "docker has no VMM (shared kernel): no guest RAM vs VMM split",
+        _ => "VMM process probe not implemented for this backend yet",
+    };
+    out.skip("mem.vmm_overhead", why);
     // libkrun without a cgroup leaf (always on macOS): helper RSS, under its own metric ids.
     if let Some(pid) = probe
         .as_ref()
