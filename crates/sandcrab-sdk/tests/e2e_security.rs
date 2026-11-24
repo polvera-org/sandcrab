@@ -4,9 +4,11 @@
 
 mod common;
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
-use common::{E2eBackend, docker_config, docker_ps, host_uid, run, run_exclusive, sh};
+use common::{
+    E2eBackend, bash_t, docker_config, docker_ps, host_uid, run, run_exclusive, sh, wait_for,
+};
 use sandcrab_sdk::{
     BackendKind, MountMode, NetworkConfig, NetworkPolicy, SandboxConfig, SandboxError,
 };
@@ -170,6 +172,115 @@ async fn sandbox_hardening_network_user_capabilities() {
             let meta = std::fs::metadata(root.join("owned.txt")).unwrap();
             assert_eq!(meta.uid(), host_uid());
         }
+    })
+    .await;
+}
+
+/// Docker's `cap_drop: ALL`, `pids_limit` and `/tmp` tmpfs, reproduced by `crabd init` in
+/// the microVM guests: every backend must show the same baseline.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "e2e: needs a sandbox backend (SANDCRAB_E2E_BACKEND, default docker)"]
+async fn hardening_parity_capbnd_pids_tmp() {
+    run("hardening-parity", |h| async move {
+        let sb =
+            h.sc.spawn(SandboxConfig::from_template("base"))
+                .await
+                .unwrap();
+
+        // Capability bounding set empty (Docker: cap_drop ALL; microVMs: dropped by PID 1
+        // before it forks `crabd serve`), so not even an exec as uid 0 could regain one.
+        let status = sh(&sb, "cat /proc/self/status").await;
+        for cap in ["CapBnd:", "CapEff:", "CapPrm:", "CapInh:", "CapAmb:"] {
+            let v = status
+                .lines()
+                .find_map(|l| l.strip_prefix(cap))
+                .unwrap_or_else(|| panic!("{cap} missing"));
+            assert_eq!(u64::from_str_radix(v.trim(), 16).unwrap(), 0, "{cap}");
+        }
+
+        // pids cap: the tool process sits in a cgroup with `pids.max` = Docker's
+        // `pids_limit`. Docker shows the container cgroup as the namespace root `/`; the
+        // microVM guests put `crabd serve` and its children in `/sandbox` (PID 1 outside).
+        let cgroup = sh(&sb, "cut -d: -f3- /proc/self/cgroup").await;
+        let expected_cgroup = if h.is_docker() { "/" } else { "/sandbox" };
+        assert_eq!(cgroup.trim(), expected_cgroup);
+        let max = sh(
+            &sb,
+            "cg=$(cut -d: -f3- /proc/self/cgroup); cat /sys/fs/cgroup${cg%/}/pids.max",
+        )
+        .await;
+        assert_eq!(max.trim(), "1024");
+        // Read-only cgroupfs: the sandbox cannot raise its own cap.
+        let raise = sb
+            .bash("cg=$(cut -d: -f3- /proc/self/cgroup); echo max > /sys/fs/cgroup${cg%/}/pids.max")
+            .await
+            .unwrap();
+        assert_ne!(raise.exit_code, Some(0), "pids.max writable: {raise:?}");
+
+        // ...and it bites: background `sleep`s until fork fails (dash does not retry
+        // EAGAIN), then kill them with builtins only.
+        let bomb = bash_t(
+            &sb,
+            r#"P=$(mktemp)
+sh -c 'n=0; while [ $n -lt 1100 ]; do sleep 120 & echo $! >> "$1"; n=$((n+1)); done' sh "$P"
+rc=$?
+mapfile -t pids < "$P"
+kill -9 "${pids[@]}" 2>/dev/null
+echo "rc=$rc spawned=${#pids[@]}""#,
+            120_000,
+        )
+        .await;
+        assert_eq!(bomb.exit_code, Some(0), "{bomb:?}");
+        let out = bomb.stdout.trim();
+        let spawned: usize = out
+            .rsplit_once("spawned=")
+            .and_then(|(_, n)| n.parse().ok())
+            .unwrap_or_else(|| panic!("{bomb:?}"));
+        assert!(out.starts_with("rc=2 "), "fork never failed: {bomb:?}");
+        assert!(bomb.stderr.contains("fork"), "{bomb:?}");
+        // The cap counts the tool's own processes (and crabd's threads) too.
+        assert!(
+            (900..1024).contains(&spawned),
+            "spawned {spawned}: {bomb:?}"
+        );
+        // The sandbox recovers once the processes are gone.
+        wait_for("fork recovery", Duration::from_secs(30), || async {
+            let r = sb.bash("true").await.ok()?;
+            (r.exit_code == Some(0)).then_some(())
+        })
+        .await;
+
+        // `/tmp`: Docker's size-limited `nosuid,nodev,noexec` tmpfs on every backend.
+        let mi = sh(&sb, "grep ' /tmp ' /proc/self/mountinfo | tail -n 1").await;
+        let (mount_part, super_part) = mi
+            .trim()
+            .split_once(" - ")
+            .unwrap_or_else(|| panic!("{mi}"));
+        let opts: Vec<&str> = mount_part
+            .split_whitespace()
+            .nth(5)
+            .unwrap()
+            .split(',')
+            .collect();
+        for o in ["rw", "nosuid", "nodev", "noexec"] {
+            assert!(opts.contains(&o), "/tmp lacks {o}: {mi}");
+        }
+        let mut sup = super_part.split_whitespace();
+        assert_eq!(sup.next(), Some("tmpfs"), "{mi}");
+        let super_opts = sup.nth(1).unwrap();
+        assert!(
+            super_opts.split(',').any(|o| o == "size=262144k"),
+            "/tmp not 256 MiB: {mi}"
+        );
+        assert_eq!(sh(&sb, "stat -c %a /tmp").await.trim(), "1777");
+        let exec = sb
+            .bash("printf '#!/bin/sh\\necho ran\\n' > /tmp/x.sh && chmod +x /tmp/x.sh && /tmp/x.sh")
+            .await
+            .unwrap();
+        assert_eq!(exec.exit_code, Some(126), "exec from /tmp: {exec:?}");
+        assert!(!exec.stdout.contains("ran"), "{exec:?}");
+
+        sb.destroy().await.unwrap();
     })
     .await;
 }
