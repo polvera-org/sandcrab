@@ -102,15 +102,39 @@ async fn http_get(addr: std::net::SocketAddr, path: &str) -> Option<String> {
         .await
         .ok()?
         .ok()?;
-    let req = format!("GET {path} HTTP/1.0\r\nHost: localhost\r\n\r\n");
+    // HTTP/1.1 framed by Content-Length, like browsers and curl: the response is complete
+    // without waiting for the server's close (on Firecracker the guest's FIN does not reach the
+    // host while the tunnel is open; docs/protocol.md).
+    let req = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n");
     s.write_all(req.as_bytes()).await.ok()?;
     let mut buf = Vec::new();
-    tokio::time::timeout(Duration::from_secs(3), s.read_to_end(&mut buf))
-        .await
-        .ok()?
-        .ok()?;
-    let text = String::from_utf8_lossy(&buf).into_owned();
-    text.starts_with("HTTP/1.").then_some(text)
+    let mut chunk = [0u8; 4096];
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let text = String::from_utf8_lossy(&buf).into_owned();
+        if let Some(end) = text.find("\r\n\r\n") {
+            let len = text[..end]
+                .lines()
+                .find_map(|l| {
+                    l.to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                        .map(|v| v.trim().to_owned())
+                })
+                .and_then(|v| v.parse::<usize>().ok())?;
+            if buf.len() >= end + 4 + len {
+                return text.starts_with("HTTP/1.").then_some(text);
+            }
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        let n = tokio::time::timeout(left, s.read(&mut chunk))
+            .await
+            .ok()?
+            .ok()?;
+        if n == 0 {
+            return None;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
