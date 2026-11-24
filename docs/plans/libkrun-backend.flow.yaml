@@ -141,7 +141,7 @@ steps:
     title: "crabd: set no_new_privs for sandbox processes; fix PID-1 zombie reaping (SIGCHLD reaper not firing) — found by SDK e2e on Firecracker"
     depends_on: [fc-e2e-kvm]
     artifacts: [crates/sandcrab-guest/]
-    status: doing
+    status: done
 
   - id: lk-e2e-macos
     phase: implement
