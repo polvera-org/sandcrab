@@ -99,7 +99,7 @@ steps:
     title: "tunnel.open in protocol + crabd serve + core port forwarder (127.0.0.1); shared by FC and libkrun"
     depends_on: [guest-virtiofs]
     artifacts: [crates/sandcrab-protocol/src/, crates/sandcrab-guest/src/server.rs, crates/sandcrab-core/src/client.rs]
-    status: doing
+    status: done
 
   # ---- frontier 4
   - id: lk-fake-tests
