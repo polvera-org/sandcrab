@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1
 # sandcrab/base:0.1.0 — minimal Debian 13 (trixie) sandbox root.
 #
-# Pinning: base image is pinned by dated tag + multi-arch index digest.
+# Pinning: base image is pinned by dated tag + multi-arch index digest
+# (linux/amd64 and linux/arm64; build with templates/build.sh --platform).
 # apt packages are NOT pinned yet; future work: build against
 # snapshot.debian.org (e.g. deb http://snapshot.debian.org/archive/debian/20261104T000000Z trixie main)
 # for byte-reproducible package sets.

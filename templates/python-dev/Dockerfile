@@ -8,9 +8,16 @@
 # entry points are linked into /usr/local/bin. Agents install deps into a
 # project venv (`uv venv && uv pip install ...` / `uv sync`); the uv cache
 # goes to $HOME/.cache/uv (HOME=/home/sandcrab, 1777, from base).
+#
+# Multi-arch (linux/amd64, linux/arm64): the uv digest is an OCI index digest,
+# so `COPY --from=uv-bin` takes the target arch's binary. CPython comes from
+# `uv python install`, which picks the target arch's python-build-standalone
+# build and verifies it against the sha256 table embedded in the pinned uv.
+# BASE_IMAGE is set by templates/build.sh to the arch-suffixed base tag.
+ARG BASE_IMAGE=sandcrab/base:0.1.0
 FROM ghcr.io/astral-sh/uv:0.13.9@sha256:d3b601f0c7b118bc1753febf7c41cc80981df678445e0254284eecf84db79a7d AS uv-bin
 
-FROM sandcrab/base:0.1.0
+FROM ${BASE_IMAGE}
 
 ARG PYTHON_VERSION=3.15.2
 ARG RUFF_VERSION=0.17.6

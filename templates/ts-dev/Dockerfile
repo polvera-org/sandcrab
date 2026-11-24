@@ -26,10 +26,15 @@
 #
 # /tmp is a noexec tmpfs under Docker: installers that unpack and run binaries from
 # a temp dir need TMPDIR elsewhere, e.g. `mkdir -p ~/.tmp && export TMPDIR=~/.tmp`.
+#
+# Multi-arch (linux/amd64, linux/arm64): the node and bun digests are OCI index
+# digests, so each COPY --from takes the target arch's binaries. BASE_IMAGE is
+# set by templates/build.sh to the arch-suffixed base tag.
+ARG BASE_IMAGE=sandcrab/base:0.1.0
 FROM node:26.13.1-trixie-slim@sha256:e6bedef217677b276c591795e169840edd9096dbf13f29df8ef8d1856b8820bc AS node-runtime
 FROM oven/bun:1.4.5-slim@sha256:b780593f3e10918cbdaec3d5a08d52224b9198069a65eb47812085c2ec007643 AS bun-bin
 
-FROM sandcrab/base:0.1.0
+FROM ${BASE_IMAGE}
 
 ARG PNPM_VERSION=12.21.0
 ARG TYPESCRIPT_VERSION=7.0.2
