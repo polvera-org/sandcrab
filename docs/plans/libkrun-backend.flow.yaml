@@ -232,7 +232,7 @@ steps:
     title: "fc-net-setup.sh: block outbound SMTP (25/465/587) and the remaining reserved ranges (0/8, 192.0.0/24, 198.18/15, multicast); survive Docker restarts; re-apply on kvm-dedicated"
     depends_on: [kvm-net]
     artifacts: [scripts/fc-net-setup.sh, docs/hosting.md]
-    status: doing
+    status: done
 
   - id: guest-hardening-2
     phase: implement
@@ -242,11 +242,19 @@ steps:
     artifacts: [crates/sandcrab-guest/]
     status: doing
 
+  - id: small-fixes
+    phase: implement
+    agent: ada
+    title: "Host-wide tap-pool lock dir (two Sandcrab processes with different run dirs can grab the same tap); build-crabd.sh honours CARGO_TARGET_DIR; unused-mut warning in sdk tests (firecracker-only build)"
+    depends_on: [fc-net-egress]
+    artifacts: [crates/sandcrab-backend-firecracker/src/net.rs, scripts/build-crabd.sh, crates/sandcrab-sdk/tests/common/mod.rs]
+    status: todo
+
   - id: lk-review
     phase: verify
     agent: nebula
     title: "QA + security review (helper unsafe island, TSI exposure, virtio-fs traversal/identity race, capability honesty, lifeline); decide: per-spawn root-disk hash, Linux lib-hash cost (~187 ms w/o SHA-NI)"
-    depends_on: [bench-report, fc-net-egress, guest-hardening-2]
+    depends_on: [bench-report, fc-net-egress, guest-hardening-2, small-fixes]
     status: todo
 
   - id: lk-live
