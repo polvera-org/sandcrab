@@ -1,7 +1,7 @@
 //! CLI tests. The Docker smoke tests are `#[ignore]`d; run them with:
 //!
 //! ```text
-//! templates/build.sh --pin        # sandcrab/base:0.1.0 present
+//! templates/build.sh base         # sandcrab/base:0.1.0 present and pinned on this host
 //! cargo test -p sandcrab-cli -- --ignored --nocapture
 //! ```
 //!
@@ -375,7 +375,8 @@ fn rootfs_commands_parse() {
     assert_eq!(v, Value::Array(vec![]));
 }
 
-/// A template without a `sha256` pin is refused by default; `--allow-unpinned` opts out.
+/// A template with no host-local pin is refused by default; `template pin` adopts the local
+/// image; `--allow-unpinned` opts out.
 #[test]
 #[ignore = "needs Docker, sandcrab/base:0.1.0 and a static crabd"]
 fn docker_unpinned_template_is_refused_by_default() {
@@ -410,7 +411,38 @@ fn docker_unpinned_template_is_refused_by_default() {
     assert_eq!(out.status.code(), Some(1));
     let err = stderr(&out);
     assert!(err.contains("UnpinnedImage"), "{err}");
-    assert!(err.contains("templates/build.sh --pin unpinned"), "{err}");
+    assert!(err.contains("templates/build.sh unpinned"), "{err}");
+    assert!(err.contains("sandcrab template pin unpinned"), "{err}");
+
+    // Adopting the existing image (into a scratch pin store) makes the spawn pass.
+    let pins = cli.state.path().join("pins");
+    let with_pins = |args: &[&str]| {
+        let out = cli
+            .cmd(args)
+            .env("SANDCRAB_TEMPLATE_PINS", &pins)
+            .output()
+            .unwrap();
+        eprintln!("$ {args:?} -> {:?}\n{}", out.status.code(), stderr(&out));
+        out
+    };
+    let out = with_pins(&["--templates-dir", tpl, "template", "pin", "unpinned"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(stderr(&out).contains("not provenance"), "{}", stderr(&out));
+    let arch = match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        _ => "amd64",
+    };
+    assert!(pins.join(format!("unpinned/0.1.0/{arch}.json")).is_file());
+    let out = with_pins(&[
+        "--templates-dir",
+        tpl,
+        "run",
+        "-t",
+        "unpinned",
+        "--",
+        "true",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
 
     let out = cli.run(&[
         "--templates-dir",

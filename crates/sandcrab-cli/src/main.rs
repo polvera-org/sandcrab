@@ -69,8 +69,8 @@ pub struct Global {
     #[arg(long, global = true, hide = true)]
     pub allow_insecure: bool,
 
-    /// docker backend: run template images that have no `sha256` pin in sandcrab.toml
-    /// (refused by default; pin with `templates/build.sh --pin <name>`).
+    /// docker backend: run template images that have no host-local pin (refused by default;
+    /// pin with `templates/build.sh <name>` or adopt with `sandcrab template pin <name>`).
     #[arg(long, global = true)]
     pub allow_unpinned: bool,
 
@@ -124,7 +124,7 @@ pub enum Commands {
         action: workspace::WorkspaceCmd,
     },
 
-    /// List or build templates.
+    /// List, build or pin templates (pins are host-local integrity checks, not provenance).
     Template {
         #[command(subcommand)]
         action: workspace::TemplateCmd,
@@ -238,7 +238,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<u8> {
             doctor::doctor(g, fix, reap).await
         }
         Commands::Workspace { action } => workspace::workspace(g, action),
-        Commands::Template { action } => workspace::template(g, action),
+        Commands::Template { action } => workspace::template(g, action).await,
         #[cfg(all(feature = "firecracker", target_os = "linux"))]
         Commands::Rootfs { action } => firecracker::rootfs_cmd(g, action),
         #[cfg(all(
