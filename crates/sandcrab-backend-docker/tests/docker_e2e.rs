@@ -160,7 +160,10 @@ async fn assert_gone(env: &Env, id: SandboxId) {
         "relay left behind"
     );
     assert!(
-        !matches!(docker().inspect_volume(&sock_volume_name(id)).await, Ok(_)),
+        docker()
+            .inspect_volume(&sock_volume_name(id))
+            .await
+            .is_err(),
         "socket volume left behind"
     );
 }
