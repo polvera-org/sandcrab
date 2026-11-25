@@ -1,15 +1,15 @@
 # Benchmark results
 
-One JSON file per `sandcrab-bench run` (schema: `schema.json`). Summarise with `sandcrab-bench summarize <file>`.
+One JSON file per `sandcrab-bench run` (schema: `schema.json`). Summarise with `sandcrab-bench summarize <file>`. Every file records its `tier` and `valid_for_tier` (`sandcrab-bench recheck`).
 
-| File | Host | Commit | Valid | Status |
+| File | Host | Commit | Validity (`valid` = Full) | Status |
 |---|---|---|---|---|
 | `20261123T091401Z-dev-vps.json` | dev-vps (VPS, 2 vCPU EPYC 9354P, KVM guest, no nested virt) | 0d85b83 | false: 1-min load 0.89 > 0.5 at start | **canonical** (Docker V1). Drift -8.7% (pass), 0 failures, host quiet during the run |
 | `20261123T103824Z-dev-vps.json` | dev-vps | 0d85b83 | false: drift +61.5% | rerun from a quieter start (load 0.12); external interference during the run (p50s 10-40% higher, density spawns up to 1.91 s). Kept for transparency, not canonical |
 | `20261124T183907Z-kvm-dedicated.json` | kvm-dedicated (bare metal, Xeon D-2141I 8C/16T, 32 GB, **2x HDD RAID1**) | 65f4a2c | false: drift -11.9% (Docker got faster) | **first Docker vs Firecracker run** on real KVM. 0 failures, load 0.42 at start. Docker numbers are HDD-bound; see below |
 | `20261124T222350Z-mac-m2.json` | mac-m2 (Apple M2 8C, 16 GB, macOS 26.2, arm64, internal SSD/APFS; developer laptop) | 18aa046 | false: 1-min load 4.37 > 0.5 at start | **first libkrun run** (Hypervisor.framework). libkrun only: Docker cannot run on macOS (see below). Drift -2.1%, 0 failures. Its density section is void (budget clamped to 0); use the next file |
 | `20261125T020230Z-mac-m2.json` | mac-m2 | 18aa046 | false: 1-min load 1.22 > 0.5 at start | density-only rerun, same settings (75% budget, cap 16), after desktop memory pressure eased |
-| `20261125T014108Z-kvm-dedicated.json` | kvm-dedicated | 97d116c | false: resource n 10 < 30 (Standard tier, by design) | **libkrun on Linux KVM**, Standard tier. Combine with `20261124T183907Z` for Docker/Firecracker on the same host (separate run, not interleaved) |
+| `20261125T014108Z-kvm-dedicated.json` | kvm-dedicated | 97d116c | **valid for Standard**; false for Full: resource n 10 < 30 (by design) | **libkrun on Linux KVM**, Standard tier. Combine with `20261124T183907Z` for Docker/Firecracker on the same host (separate run, not interleaved) |
 
 The report (`docs/site/bench-report.html`) shows all of these, grouped by host; see
 [`../README.md`](../README.md#the-bench-report-docssitebench-reporthtml).
@@ -53,7 +53,7 @@ built from 97d116c. Docker and Firecracker were not rerun: reuse `20261124T18390
 
 - **Not interleaved with Docker/Firecracker.** Same host, same n=30 per latency cell, but a different run, commit
   and tier (resource n 10 vs 30). libkrun-vs-Docker on this host is a cross-run comparison: indicative only.
-- `valid: false` by design (resource n < 30). Drift +0.6%, 0 failures, load 0.38 at start.
+- **Valid for Standard** (`valid_for_tier: true`); `valid: false` (Full) by design, resource n < 30. Drift +0.6%, 0 failures, load 0.38 at start.
 - **Memory is real PSS and cgroup** (the helper ran in a delegated cgroup leaf): `base` ~66 MiB PSS idle, ~139 MiB
   post. The guest-RAM / VMM-overhead split (`mem.vmm_guest_pss_*`, `mem.vmm_overhead*`) is `not_measured`: the bench
   did not find the guest-RAM mapping in the helper's `smaps`. `disk.*` is not implemented for libkrun.

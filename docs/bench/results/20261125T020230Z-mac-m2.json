@@ -931,6 +931,11 @@
   "invalid_reasons": [
     "host busy: 1-min load 1.22 > 0.5 at start"
   ],
+  "tier": "full",
+  "valid_for_tier": false,
+  "tier_invalid_reasons": [
+    "host busy: 1-min load 1.22 > 0.5 at start"
+  ],
   "notes": [
     "density capped at 16 sandboxes (spec: 500) to keep this host safe",
     "network policy: `disabled` on every backend (egress_restricted is unenforceable in V1)",

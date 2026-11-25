@@ -83,6 +83,17 @@
         "type": "string"
       }
     },
+    "preflight": {
+      "description": "The preflight that ran before this run (absent with `--no-preflight` and in older files).",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Preflight"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "run_id": {
       "type": "string"
     },
@@ -113,8 +124,36 @@
         "$ref": "#/definitions/TemplateInfo"
       }
     },
+    "tier": {
+      "description": "Tier derived from the config (`smoke` | `standard` | `full`). Absent in files written before tiers were recorded; `sandcrab-bench recheck` derives it.",
+      "default": null,
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Tier"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "tier_invalid_reasons": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
     "valid": {
+      "description": "Valid for the Full tier (the spec rules): publishable.",
       "type": "boolean"
+    },
+    "valid_for_tier": {
+      "description": "Valid against the rules of `tier` (Smoke: never).",
+      "default": null,
+      "type": [
+        "boolean",
+        "null"
+      ]
     }
   },
   "definitions": {
@@ -474,6 +513,79 @@
         }
       }
     },
+    "DriftProbe": {
+      "type": "object",
+      "required": [
+        "backend",
+        "end_ns",
+        "start_ns",
+        "template",
+        "window_s"
+      ],
+      "properties": {
+        "backend": {
+          "type": "string"
+        },
+        "cv_pct": {
+          "description": "Coefficient of variation of all samples, %.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "drift_pct": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "end_ns": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "end_p50_ns": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "start_ns": {
+          "description": "`spawn_ready` samples (ns) before and after the idle window.",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "start_p50_ns": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "template": {
+          "type": "string"
+        },
+        "window_s": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
     "Failure": {
       "type": "object",
       "required": [
@@ -492,6 +604,33 @@
         },
         "metric": {
           "type": "string"
+        }
+      }
+    },
+    "Finding": {
+      "type": "object",
+      "required": [
+        "check",
+        "message",
+        "severity"
+      ],
+      "properties": {
+        "check": {
+          "description": "`load` | `storage` | `memory` | `density` | `disk` | `backends` | `drift`.",
+          "type": "string"
+        },
+        "fix": {
+          "description": "What to do about it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "severity": {
+          "$ref": "#/definitions/Severity"
         }
       }
     },
@@ -822,6 +961,150 @@
         }
       }
     },
+    "Preflight": {
+      "description": "Preflight (`sandcrab-bench preflight`, and the start of `run`): predicts whether a run at `tier` would come out valid. It sees the host now; it cannot see what happens over hours.",
+      "type": "object",
+      "required": [
+        "at",
+        "backends",
+        "drift_probe",
+        "duration_s",
+        "findings",
+        "forced",
+        "load",
+        "max_load",
+        "mem_available_bytes",
+        "mem_total_bytes",
+        "storage",
+        "tier",
+        "would_be_valid"
+      ],
+      "properties": {
+        "at": {
+          "description": "RFC 3339, UTC.",
+          "type": "string"
+        },
+        "backends": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/BackendStatus"
+          }
+        },
+        "density_budget": {
+          "description": "`--density-budget` as given; `None` when the density scenario is not requested.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "density_budget_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "density_sandbox_bytes": {
+          "description": "Upper bound of one sandbox's memory (template `memory_mb`).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "drift_probe": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/DriftProbe"
+          }
+        },
+        "duration_s": {
+          "type": "number",
+          "format": "double"
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/Finding"
+          }
+        },
+        "forced": {
+          "description": "The run went ahead despite `fail` findings (`--force`).",
+          "type": "boolean"
+        },
+        "load": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        },
+        "max_load": {
+          "type": "number",
+          "format": "double"
+        },
+        "mem_available_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "mem_total_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "storage": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/PreflightStorage"
+          }
+        },
+        "tier": {
+          "$ref": "#/definitions/Tier"
+        },
+        "would_be_valid": {
+          "description": "No `fail` finding for `tier` (Smoke: no finding that would break the run).",
+          "type": "boolean"
+        }
+      }
+    },
+    "PreflightStorage": {
+      "type": "object",
+      "required": [
+        "device",
+        "mount",
+        "role",
+        "type"
+      ],
+      "properties": {
+        "device": {
+          "type": "string"
+        },
+        "free_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "mount": {
+          "type": "string"
+        },
+        "role": {
+          "description": "What lives there: `work-dir` (fixtures, per-run state), `sandcrab-home` (rootfs cache, pinned VMM artifacts) or `docker-root`.",
+          "type": "string"
+        },
+        "type": {
+          "description": "`nvme` | `ssd` | `ssd (internal)` | `hdd` | `unknown`.",
+          "type": "string"
+        }
+      }
+    },
     "RunConfig": {
       "type": "object",
       "required": [
@@ -946,6 +1229,25 @@
           }
         }
       }
+    },
+    "Severity": {
+      "description": "Severity of a preflight finding.",
+      "oneOf": [
+        {
+          "description": "The run would be marked invalid for the tier, or produce void data: `run` refuses (Standard/Full) unless `--force`.",
+          "type": "string",
+          "enum": [
+            "fail"
+          ]
+        },
+        {
+          "description": "A risk or a degraded measurement that does not by itself invalidate the run.",
+          "type": "string",
+          "enum": [
+            "warn"
+          ]
+        }
+      ]
     },
     "Stats": {
       "type": "object",
@@ -1081,6 +1383,32 @@
           "minimum": 0.0
         }
       }
+    },
+    "Tier": {
+      "description": "Benchmark tier, derived from the run's arguments.",
+      "oneOf": [
+        {
+          "description": "`--quick`, or anything below Standard's N: correctness only, never published.",
+          "type": "string",
+          "enum": [
+            "smoke"
+          ]
+        },
+        {
+          "description": "N ≥ 30 per latency cell, 10 ≤ `resource_runs` < 30.",
+          "type": "string",
+          "enum": [
+            "standard"
+          ]
+        },
+        {
+          "description": "N ≥ 30 everywhere: the canonical, publishable run.",
+          "type": "string",
+          "enum": [
+            "full"
+          ]
+        }
+      ]
     },
     "Unit": {
       "type": "string",
