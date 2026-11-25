@@ -727,24 +727,29 @@ pub fn wait_ready(
     }
 }
 
-/// Spawn `binary` (already hash-verified by the caller) as `kind` with an empty environment,
-/// its stdin (gvproxy: also stdout) on a fresh socketpair, stderr inherited; start the two
-/// filter threads, then wait (bounded by [`READY_TIMEOUT`]) until the netstack answers
-/// ([`wait_ready`]), so the VM never boots before its network is served. The netstack exits
-/// when the helper's end closes (EOF), i.e. when the helper process dies for any reason. It
-/// inherits the helper's process group (torn down with it) and, on Linux, its cgroup leaf.
+/// Spawn `binary` (already verified by the caller; on Linux the `/proc/self/fd/<n>` of the
+/// verified fd) as `kind`, with `argv0` (the pinned path: passt picks its mode from the
+/// name) and an empty environment, its stdin (gvproxy: also stdout) on a fresh socketpair,
+/// stderr inherited; start the two filter threads, then wait (bounded by [`READY_TIMEOUT`])
+/// until the netstack answers ([`wait_ready`]), so the VM never boots before its network is
+/// served. The netstack exits when the helper's end closes (EOF), i.e. when the helper
+/// process dies for any reason. It inherits the helper's process group (torn down with it)
+/// and, on Linux, its cgroup leaf.
 pub fn start(
     kind: NetstackKind,
     binary: &Path,
+    argv0: &Path,
     policy: EgressPolicy,
     log: Arc<dyn Fn(String) + Send + Sync>,
 ) -> io::Result<Started> {
+    use std::os::unix::process::CommandExt;
     // `UnixStream::pair` sets CLOEXEC on both ends: only the dup'd stdio reaches the child.
     let (guest_vm_end, guest_helper_end) = UnixStream::pair()?;
     let (ns_helper_end, ns_child_end) = UnixStream::pair()?;
 
     let mut cmd = Command::new(binary);
-    cmd.args(kind.args())
+    cmd.arg0(argv0)
+        .args(kind.args())
         .env_clear()
         .current_dir("/")
         .stdin(Stdio::from(OwnedFd::from(ns_child_end.try_clone()?)));

@@ -19,14 +19,19 @@
 #   <SANDCRAB_HOME>/artifacts/libkrun-net/<kind>-<version>/ with its own manifest.json:
 #   macOS: the pinned gvproxy release asset (SHA-256 checked, installed byte for byte);
 #   Linux: passt built statically (`make static`) from the pinned tag (commit-checked; needs
-#   gcc, make and the static glibc from libc6-dev). --no-netstack skips it, --netstack-only
-#   installs only it.
+#   gcc, make and the static glibc from libc6-dev), plus its `passt.avx2` build on x86_64
+#   (pinned too: passt re-execs that sibling by path on AVX2 CPUs, so the helper executes the
+#   pinned variant itself). --no-netstack skips it, --netstack-only installs only it.
 # --dry-run prints every mutating/build step instead of running it.
 #
 # Pins mirror crates/sandcrab-backend-libkrun/src/artifacts.rs and netstack_pins.rs (unit
 # tests keep them in sync).
 # Writes manifest.json last; `Artifacts::resolve` checks it against the compiled-in pins.
 set -euo pipefail
+# Private state tree (review R18): every directory and file this creates is 0700/0600 whatever
+# the caller's umask (a 0002 umask made <home>/artifacts group-writable). Installed libraries
+# and binaries get their modes (0444/0555) explicitly below.
+umask 077
 
 LIBKRUN_VERSION="1.19.8"
 LIBKRUNFW_VERSION="5.6.4"
@@ -148,7 +153,7 @@ if [ -z "$home" ]; then home="${SANDCRAB_HOME:-${HOME:?HOME unset}/.sandcrab}"; 
 
 # ---- userspace netstack (gvproxy on macOS, passt on Linux)
 install_netstack() {
-  local kind version file origin osha commit nparent ndest nstage src
+  local kind version file origin osha commit nparent ndest nstage src avx2_src="" avx2_json=""
   if [ "$plat" = macos ]; then
     kind=gvproxy version="$GVPROXY_VERSION" origin=release osha="\"$GVPROXY_SHA256\"" commit=null
   else
@@ -170,6 +175,10 @@ install_netstack() {
     # installed (passt sandboxes itself: namespaces, seccomp, dropped capabilities).
     run make -C "$workdir/passt" -j"$( (nproc || echo 4) 2>/dev/null)" static
     src="$workdir/passt/passt"
+    if [ "$rarch" = x86_64 ]; then
+      avx2_src="$workdir/passt/passt.avx2"
+      [ "$dry" = 1 ] || [ -f "$avx2_src" ] || die "passt.avx2 was not built"
+    fi
   fi
   if [ "$dry" = 1 ]; then say "(dry-run) would install $src into $ndest"; return; fi
   rm -rf "$nstage"
@@ -177,9 +186,15 @@ install_netstack() {
   cp "$src" "$nstage/$file"
   chmod 0555 "$nstage/$file"
   [ "$origin" != release ] || [ "\"$(sha256 "$nstage/$file")\"" = "$osha" ] || die "$kind copy differs from its verified download"
-  printf '{\n  "schema": %s,\n  "os": "%s",\n  "arch": "%s",\n  "kind": "%s",\n  "version": "%s",\n  "file": "%s",\n  "origin": "%s",\n  "origin_sha256": %s,\n  "git_commit": %s,\n  "sha256": "%s"\n}\n' \
+  if [ -n "$avx2_src" ]; then
+    cp "$avx2_src" "$nstage/$file.avx2"
+    chmod 0555 "$nstage/$file.avx2"
+    avx2_json="$(printf ',\n  "avx2": {\n    "file": "%s",\n    "sha256": "%s"\n  }' "$file.avx2" "$(sha256 "$nstage/$file.avx2")")"
+  fi
+  # No stat stamps here: the backend records them on first use (after hashing once).
+  printf '{\n  "schema": %s,\n  "os": "%s",\n  "arch": "%s",\n  "kind": "%s",\n  "version": "%s",\n  "file": "%s",\n  "origin": "%s",\n  "origin_sha256": %s,\n  "git_commit": %s,\n  "sha256": "%s"%s\n}\n' \
     "$NETSTACK_MANIFEST_SCHEMA" "$plat" "$rarch" "$kind" "$version" "$file" "$origin" "$osha" "$commit" \
-    "$(sha256 "$nstage/$file")" > "$nstage/manifest.json"
+    "$(sha256 "$nstage/$file")" "$avx2_json" > "$nstage/manifest.json"
   local nold="$nparent/.$kind-$version.old.$$"
   [ -e "$ndest" ] && mv "$ndest" "$nold"
   mv "$nstage" "$ndest"

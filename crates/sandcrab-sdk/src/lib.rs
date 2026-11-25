@@ -143,13 +143,11 @@ pub use sandcrab_backend_libkrun::{self as libkrun, KrunLibs, LibkrunBackend, Li
 ))]
 pub fn libkrun_libs(config: &LibkrunConfig) -> Result<KrunLibs> {
     let a = libkrun::artifacts::Artifacts::resolve(config)?;
-    let pin = |p: libkrun::artifacts::PinnedPath| libkrun::helper_proto::PinnedFile {
-        path: p.path,
-        sha256: p.sha256,
-    };
+    // The stamps verified by `resolve` travel with the digests: the backend and the helper
+    // then check each library with one `fstat` (design §12.4).
     Ok(KrunLibs {
-        libkrun: pin(a.libkrun),
-        libkrunfw: pin(a.libkrunfw),
+        libkrun: a.libkrun.into(),
+        libkrunfw: a.libkrunfw.into(),
         netstack: libkrun::netstack_pins::resolve_config(config)?,
     })
 }
@@ -741,6 +739,7 @@ mod tests {
         let pinned = |name: &str| libkrun::helper_proto::PinnedFile {
             path: home.join(name),
             sha256: "0".repeat(64),
+            stamp: None,
         };
         let libs = KrunLibs {
             libkrun: pinned("libkrun"),

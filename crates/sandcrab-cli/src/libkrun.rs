@@ -14,7 +14,10 @@ use clap::Subcommand;
 use sandcrab_sdk::libkrun::artifacts::{self, Artifacts, ResolvedArtifacts};
 use sandcrab_sdk::libkrun::config::HELPER_BIN_NAME;
 #[cfg(target_os = "macos")]
-use sandcrab_sdk::libkrun::config::{ENTITLEMENTS_PLIST, HYPERVISOR_ENTITLEMENT};
+use sandcrab_sdk::libkrun::config::{
+    ENTITLEMENTS_HARDENED_PLIST, ENTITLEMENTS_PLIST, HYPERVISOR_ENTITLEMENT, SIGN_RUNTIME_ENV,
+};
+use sandcrab_sdk::libkrun::verified::HelperRecord;
 use sandcrab_sdk::libkrun::{RootfsSource, netstack_pins, reap};
 use sandcrab_sdk::{LibkrunConfig, WorkspaceBacking};
 use serde_json::json;
@@ -118,13 +121,29 @@ fn helper_check(helper: &Path) -> Result<String, String> {
             helper.display()
         ));
     }
+    // The install record (sha256 + stat stamp) the backend checks before every launch.
+    let record = match HelperRecord::load(helper).map_err(|e| e.to_string())? {
+        Some(r) => match sandcrab_sdk::libkrun::verified::open_pinned(&r.pinned(helper)) {
+            Ok(_) => format!("install record ok, sha256 {}", short(&r.sha256)),
+            Err(e) => {
+                return Err(format!(
+                    "{} does not match its install record ({e}); re-run `sandcrab libkrun \
+                     install` if you replaced it on purpose",
+                    helper.display()
+                ));
+            }
+        },
+        None => "no install record: trusted on first use per process; `sandcrab libkrun \
+                 install` records it"
+            .to_owned(),
+    };
     #[cfg(target_os = "macos")]
     return Ok(format!(
-        "{} (signed, {HYPERVISOR_ENTITLEMENT})",
+        "{} (signed, {HYPERVISOR_ENTITLEMENT}; {record})",
         helper.display()
     ));
     #[cfg(not(target_os = "macos"))]
-    Ok(format!("{} (executable)", helper.display()))
+    Ok(format!("{} (executable; {record})", helper.display()))
 }
 
 fn short(sha: &str) -> &str {
@@ -738,17 +757,23 @@ fn helper_source(arg: Option<&Path>) -> anyhow::Result<PathBuf> {
     )
 }
 
-/// Copy `src` to a temp file beside `dst`, sign it (macOS), then rename it into place.
+/// Copy `src` to a temp file beside `dst`, sign it (macOS), rename it into place, then write
+/// its install record (sha256 + stat stamp, `<helper>.pin.json`) that the backend checks before
+/// every launch. The record is taken after the rename: renaming a file changes its ctime.
 fn install_helper(src: &Path, dst: &Path) -> anyhow::Result<String> {
     let bin = dst.parent().context("helper path has no parent")?;
-    fs::create_dir_all(bin).with_context(|| format!("creating {}", bin.display()))?;
+    // 0700 whatever the umask (review R18): whoever can write here can replace the helper.
+    artifacts::create_private_dir_all(bin)
+        .with_context(|| format!("creating {}", bin.display()))?;
     let tmp = bin.join(format!(".{HELPER_BIN_NAME}.{}.tmp", std::process::id()));
     let result = (|| {
         fs::copy(src, &tmp).with_context(|| format!("copying {}", src.display()))?;
         fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755))?;
         let signed = sign(&tmp)?;
         fs::rename(&tmp, dst).with_context(|| format!("installing {}", dst.display()))?;
-        Ok(signed)
+        let record =
+            HelperRecord::record(dst).with_context(|| format!("recording {}", dst.display()))?;
+        Ok(format!("{signed}; sha256 {}", short(&record.sha256)))
     })();
     if result.is_err() {
         let _ = fs::remove_file(&tmp);
@@ -765,13 +790,26 @@ fn sign(bin: &Path) -> anyhow::Result<String> {
         .ok()
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| "-".into());
+    // Hardened runtime for a Developer ID (or on request): it then needs
+    // disable-library-validation to load libkrun at all (review R10, config.rs).
+    let runtime = identity != "-" || std::env::var(SIGN_RUNTIME_ENV).is_ok_and(|v| v == "1");
     let plist = bin.with_extension("entitlements.plist");
-    fs::write(&plist, ENTITLEMENTS_PLIST)?;
+    fs::write(
+        &plist,
+        if runtime {
+            ENTITLEMENTS_HARDENED_PLIST
+        } else {
+            ENTITLEMENTS_PLIST
+        },
+    )?;
     let mut cmd = Command::new("/usr/bin/codesign");
     cmd.args(["--force", "--sign", &identity, "--entitlements"])
         .arg(&plist);
+    if runtime {
+        cmd.args(["--options", "runtime"]);
+    }
     if identity != "-" {
-        cmd.args(["--options", "runtime", "--timestamp"]);
+        cmd.arg("--timestamp");
     }
     let out = cmd.arg(bin).output();
     let _ = fs::remove_file(&plist);
@@ -799,10 +837,17 @@ fn sign(bin: &Path) -> anyhow::Result<String> {
             bin.display()
         );
     }
-    Ok(if identity == "-" {
-        format!("ad-hoc signed with {HYPERVISOR_ENTITLEMENT}")
+    let who = if identity == "-" {
+        "ad-hoc signed".to_owned()
     } else {
-        format!("signed by {identity} (hardened runtime) with {HYPERVISOR_ENTITLEMENT}")
+        format!("signed by {identity}")
+    };
+    Ok(if runtime {
+        format!(
+            "{who} (hardened runtime) with {HYPERVISOR_ENTITLEMENT} + disable-library-validation"
+        )
+    } else {
+        format!("{who} with {HYPERVISOR_ENTITLEMENT}")
     })
 }
 

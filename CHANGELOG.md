@@ -22,6 +22,38 @@ All notable changes to Sandcrab. The format follows [Keep a Changelog](https://k
   (hardware isolation, multi-tenant safety, live host-dir mounts or copy-in) next to the `disk_mb` warning. New
   ignored test `libkrun_e2e` (fake LLM, live host-dir edit in a microVM).
 
+### Security
+- Pinned files are verified through the fd that is then used, per spawn, at the cost of an `fstat` (design
+  [§12.4](docs/design/libkrun-backend.md)). The rootfs cache makes images `0444` and records a stat stamp (dev, inode,
+  size, mtime, ctime) next to each SHA-256 (`rootfs_stamp`); libkrun/libkrunfw and the netstack get the same
+  (`stamp`, recorded at install or on first use). A stamp mismatch re-hashes through the same fd, then re-stamps or
+  refuses. libkrun hands the helper the stamped root disk, which `krun_add_disk`s it by fd; Firecracker gets
+  `/proc/<pid>/fd/<n>` for the root drive. Before, the root disk was trusted unchecked (`sha256: None`).
+- libkrun helper: loads libkrunfw/libkrun with `dlopen("/proc/self/fd/<n>")` (macOS `/dev/fd/<n>`) after
+  checking that fd, and binds libkrun's leaf-name lookup of libkrunfw to that copy (`RTLD_NOLOAD`). Removes the
+  ~190 ms per-spawn library hash and the check-then-load path race (review R4/R5).
+- libkrun netstack: on Linux executed through its verified fd; passt's AVX2 build is installed and pinned
+  (`avx2` in the netstack manifest) and executed by the helper itself on AVX2 CPUs; an unpinned `passt.avx2` next to
+  the binary is refused.
+- libkrun helper binary: `sandcrab libkrun install` records it (`<helper>.pin.json`, SHA-256 + stamp); the backend
+  checks it before every launch and on Linux executes it through the verified fd (without a record: trusted on first
+  use per process, with a warning) (review R18).
+- State directories (`artifacts/`, `bin/`, the netstack tree, `scripts/fetch-libkrun.sh` output) are created `0700`
+  whatever the umask (review R18).
+
+### Fixed
+- libkrun helper: dropped `PR_SET_PDEATHSIG`, which fired when the *thread* that spawned the helper exited (tokio
+  blocking threads retire after 10 s idle) and could kill healthy VMs; the stdin lifeline alone ties the helper to
+  its owner (review R8).
+- libkrun on macOS with the hardened runtime (Developer ID, review R10): signing with the runtime now uses
+  `entitlements-hardened.plist` (adds `com.apple.security.cs.disable-library-validation`), and libkrunfw no longer
+  depends on `DYLD_FALLBACK_LIBRARY_PATH`, which the hardened runtime strips. `SANDCRAB_SIGN_RUNTIME=1` tests it ad
+  hoc.
+
+### Changed (helper protocol)
+- `HELPER_PROTO_VERSION` 2: `PinnedFile` and `DiskSpec` gain `stamp`, `NetstackSpec` gains `avx2`. A helper and a
+  backend from different builds refuse each other (reinstall the helper).
+
 ### Deprecated
 - libkrun TSI opt-in (`LibkrunConfig::allow_tsi_unrestricted`, CLI `--libkrun-tsi`): still explicit and still exposes
   host loopback; use the userspace netstack instead.

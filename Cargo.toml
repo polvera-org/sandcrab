@@ -86,6 +86,11 @@ unsafe_code = "forbid"
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
 
+# SHA-256 is on the spawn path when a pin's stat stamp misses (and in tests that hash their
+# own binary): unoptimized, it is ~20x slower.
+[profile.dev.package.sha2]
+opt-level = 3
+
 [profile.release]
 lto = true
 codegen-units = 1

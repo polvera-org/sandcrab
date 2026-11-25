@@ -19,6 +19,8 @@
 //! - [`artifacts`] — libkrun / libkrunfw pins and resolution.
 //! - [`netstack`] — Phase B `unrestricted` networking: pinned passt / gvproxy behind the
 //!   helper's egress filter.
+//! - [`verified`] — pinned files opened once, checked by stat stamp / SHA-256 and used
+//!   through that fd; the helper's install record.
 //! - [`control`], [`workspace`], [`net`], [`reap`], [`ports`]: backend internals, see each module.
 
 // Module layout (design §15). Each later flow step owns its own file(s), so they can land in
@@ -37,6 +39,7 @@ pub mod netstack;
 pub mod netstack_pins;
 pub mod ports;
 pub mod reap;
+pub mod verified;
 mod vm;
 pub mod workspace;
 

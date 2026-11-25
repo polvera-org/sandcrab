@@ -310,7 +310,7 @@ steps:
     title: "Decisions (a)+(b): verified-fd loading (inode/size/mtime/ctime record, re-hash on mismatch) for root disk, libkrun/libkrunfw, netstack, helper; R4, R5, R8, R10 signing, R18 umask"
     depends_on: [lk-review]
     artifacts: [crates/sandcrab-backend-libkrun/src/ffi.rs, crates/sandcrab-backend-libkrun/src/artifacts.rs, crates/sandcrab-rootfs/, crates/sandcrab-cli/src/libkrun.rs, scripts/sign-krun-helper.sh]
-    status: doing
+    status: done
 
   - id: lk-rereview
     phase: verify

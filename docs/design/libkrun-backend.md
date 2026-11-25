@@ -104,10 +104,10 @@ process. One VMM per process is also libkrun's model.
 ```
 SDK process (no entitlement)                         sandcrab-krun (signed, entitled)
 LibkrunBackend::spawn                                  read HelperConfig (stdin, ≤64 KiB, deny_unknown_fields)
-  mkdir run/<id> 0700                                  verify pins: libkrun + libkrunfw sha-256, rootfs sha-256
+  mkdir run/<id> 0700                                  open each pin once, check stamp (else sha-256) via the fd
   write meta.json (owner pid+start, helper pid)        verify workspace roots (dev, ino) == lease identity
-  Command::new(helper)                                 libloading::Library::new(<pinned abs path>)
-    .stdin(piped)  ── HelperConfig JSON + keep open    krun_create_ctx / set_vm_config / add_disk(root, ro)
+  open+verify helper (record), exec it via its fd     dlopen("/proc/self/fd/<n>") libkrunfw, then libkrun (§12.4)
+    .stdin(piped)  ── HelperConfig JSON + keep open    krun_create_ctx / set_vm_config / add_disk(<root fd>, ro)
     .stdout/stderr → run/<id>/vmm.log                  add_disk(scratch) / set_root_disk_remount(/dev/vda, ext4, "ro")
     .env_clear() + DYLD_FALLBACK_LIBRARY_PATH|         add_virtiofs3(ws<N>, path, 0, ro) …
          LD_LIBRARY_PATH = <pinned libkrunfw dir>      disable_implicit_vsock + add_vsock(0) + set_port_map([])
@@ -121,8 +121,10 @@ LibkrunBackend::spawn                                  read HelperConfig (stdin,
   The config holds host paths, which we keep out of `ps`, and argv parsing would duplicate validation.
 - **Lifeline instead of `PDEATHSIG`:** after reading the config, the helper starts a thread that blocks on `read(stdin)`.
   When the owning process dies, for any reason including SIGKILL, the pipe hits EOF and the helper SIGKILLs itself.
-  This works on macOS, which has no `PR_SET_PDEATHSIG`, and on Linux, with safe std APIs only. On Linux it is
-  belt-and-braces with `rustix::process::set_parent_process_death_signal`.
+  This works on macOS, which has no `PR_SET_PDEATHSIG`, and on Linux, with safe std APIs only. **No
+  `PR_SET_PDEATHSIG`** (review R8, dropped in `lk-verified-fd`): Linux delivers it when the *thread* that forked the
+  helper exits, and tokio's `spawn_blocking` threads exit after 10 s idle, which would kill a healthy VM. The lifeline
+  follows the owning *process* (the pipe's write end lives in the backend until the VM is stopped).
 - **Crash detection:** a tokio task `wait()`s the helper. Exit status ≠ 0 before ready → `SandboxError::Backend` with
   the tail of `vmm.log`. libkrun's documented codes 125, 126 and 127 map to "guest init failed". The helper reserves
   `70..=79` for pre-start failures (pin mismatch 71, workspace identity mismatch 72, libkrun config error 73, …).
@@ -160,8 +162,11 @@ pub struct Ctx<'k>(&'k Krun, u32);  // safe wrapper: CString conversion, NUL/ASC
 
 Rationale:
 - **Runtime loading** lets the crate, its unit tests and CI build on any host with **no libkrun installed**. We can
-  **hash the exact file before loading it**, and load from an **absolute pinned path**, which avoids the leaf-name
-  lookup we hit with libkrunfw. It also means no `build.rs` and no `pkg-config` at build time.
+  **verify the exact file we load**: each library is opened once, checked through that fd, and `dlopen`ed through
+  it (`/proc/self/fd/<n>`, macOS `/dev/fd/<n>`), so no path is re-resolved between check and load (§12.4).
+  libkrunfw is loaded first; libkrun later asks for it by its leaf name, and `dlopen(<leaf>, RTLD_NOLOAD)` must
+  return the handle we loaded, so that lookup is bound to the verified copy without `DYLD_*` / `LD_*` help. It also
+  means no `build.rs` and no `pkg-config` at build time.
 - **We validate every string we pass to libkrun** (printable ASCII, no NUL/newline, length caps), because
   libkrun aborts on bad cmdline input **[spike]**. argv and env are fixed by us anyway (§6).
 - **Rejected:** bindgen (a libclang build dep, and a 1,457-line header full of GPU/display/TEE APIs we don't want
@@ -201,8 +206,15 @@ works there, but libkrunfw for x86 macOS is not shipped by Homebrew) → "not co
 
 - The entitlement is required by the **process that creates the VM**, which is only `sandcrab-krun`. The SDK, CLI,
   `crabagent`, `cargo test` binaries and the bench need no signature beyond the linker's ad-hoc one.
-- `crates/sandcrab-backend-libkrun/entitlements.plist` contains only `com.apple.security.hypervisor`. We add no
-  `disable-library-validation`: an ad-hoc-signed binary without hardened runtime already loads Homebrew-signed dylibs **[spike]**.
+- `crates/sandcrab-backend-libkrun/entitlements.plist` contains only `com.apple.security.hypervisor`. An
+  ad-hoc-signed binary without hardened runtime already loads Homebrew-signed dylibs **[spike]**.
+- **Hardened runtime** (Developer ID, review R10) uses `entitlements-hardened.plist`, which adds
+  `com.apple.security.cs.disable-library-validation`. Without it the hardened runtime refuses libkrun/libkrunfw
+  ("mapping process and mapped file have different Team IDs"; ad-hoc dylibs have none). It also strips `DYLD_*` from
+  the helper's environment, which is why libkrunfw is bound by `RTLD_NOLOAD` (§3) and not by
+  `DYLD_FALLBACK_LIBRARY_PATH`. Library validation adds nothing the helper relies on: it verifies both libraries
+  itself (pinned SHA-256, fd-loaded). `SANDCRAB_SIGN_RUNTIME=1` signs ad hoc with the hardened runtime to test this
+  configuration without a Developer ID.
 - `scripts/sign-krun-helper.sh <path>`: on macOS it runs `codesign --force -s - --entitlements … <path>` and verifies with
   `codesign -d --entitlements -`. On Linux it is a no-op. It is idempotent.
 - **Dev:** `cargo build -p sandcrab-backend-libkrun --bin sandcrab-krun && scripts/sign-krun-helper.sh target/debug/sandcrab-krun`.
@@ -215,10 +227,17 @@ works there, but libkrunfw for x86 macOS is not shipped by Homebrew) → "not co
   `krun_start_enter` still returns `-EINVAL` with `VmCreate`, it maps to the same hint **[spike]**.
 - **Release signing (decided 2026-11-24: ad-hoc now, Developer ID later).** Design for it from the start:
   `scripts/sign-krun-helper.sh` takes an optional identity (`SANDCRAB_SIGN_IDENTITY`, default `-` = ad-hoc). With a
-  Developer ID it signs with `--options runtime --timestamp` (hardened runtime), and the same `entitlements.plist` gains
-  `com.apple.security.cs.disable-library-validation` only if the release build still dlopens third-party dylibs (prefer
-  bundling pinned, re-signed dylibs in the release so it is not needed). Notarization (`xcrun notarytool submit --wait`,
-  then `stapler`) is a separate release-pipeline step, documented in `docs/hosting.md` and not run in dev or CI.
+  Developer ID it signs with `--options runtime --timestamp` (hardened runtime) and `entitlements-hardened.plist`
+  (above). Exact steps:
+  1. `cargo build --release -p sandcrab-backend-libkrun --bin sandcrab-krun`
+  2. `SANDCRAB_SIGN_IDENTITY="Developer ID Application: <Name> (<TEAMID>)" sandcrab libkrun install --helper
+     target/release/sandcrab-krun` (signs, verifies, installs and records the helper; `scripts/sign-krun-helper.sh`
+     does the signing alone, after which `sandcrab libkrun install --helper` must re-record it).
+  3. `codesign --verify --strict --verbose=2 ~/.sandcrab/bin/sandcrab-krun` and
+     `codesign -d --entitlements - ~/.sandcrab/bin/sandcrab-krun` (both entitlements, `flags=0x10000(runtime)`).
+  4. `sandcrab --backend libkrun doctor`, then one `sandcrab --backend libkrun run -t base -- true`.
+  Notarization (`xcrun notarytool submit --wait`, then `stapler`) is a separate release-pipeline step, not run in dev
+  or CI.
 
 ## 5. Guest artifacts
 
@@ -566,14 +585,84 @@ Findings:
   `add_vsock(0)` → `set_port_map([])` → `add_net_unixstream`.
 - **passt under Ubuntu's userns restriction:** the pinned static binary (no AppArmor profile, which only attaches to
   `/usr/bin/passt`) starts, runs its own sandbox and exits on socket EOF. No sudo, sysctl or profile change was needed.
-- **passt re-execs `<its path>.avx2`** when the CPU has AVX2 and that file exists. The installer installs only `passt`
-  (passt logs "Can't run AVX2 build, using non-AVX2 version" and continues), so nothing unpinned is executed. The
-  install dir is the user's own (`0555` binary), the same trust as the helper.
+- **passt re-execs `<its path>.avx2`** when the CPU has AVX2 and that file exists. Superseded in `lk-verified-fd`
+  (§12.4): the installer now pins `passt.avx2` too and the helper executes the variant itself, through its verified
+  fd, on AVX2 CPUs (passt then sees its own name ending in `.avx2` and does not re-exec); an *unpinned* sibling is
+  refused.
 - **Host deny list:** on a host with a Firecracker tap pool, `getifaddrs` yields 128 `/30` + `/32` entries in
   `172.30/16`. They are dropped as already covered by `172.16/12`, so the list stays small (`netstack::host_prefixes`);
   more than 256 remaining prefixes fail validation (never truncated).
 - **Netstack lifetime:** the socketpair is the lifeline (EOF → exit, verified after `SIGKILL` of the helper); the
   netstack is also in the helper's process group (killed with it on destroy) and, on Linux, in its cgroup leaf.
+
+### 12.4 Pins and verification (step `lk-verified-fd`, 2026-11-25)
+
+Review R4, R5, R8, R10, R18 and its decisions (a) and (b). Every pinned input is **opened once, checked through that
+fd, and used through the same fd**; the full SHA-256 is paid only when the file's stat stamp changed.
+
+**The stat stamp** (`sandcrab_rootfs::stamp`). Next to each pinned SHA-256 we record `(dev, ino, size, mtime_ns,
+ctime_ns)` of the file that was hashed. Each use opens the file, `fstat`s the fd and compares: equal → the content is
+the hashed content, at the cost of one `fstat`. Different → the content is re-hashed **through the same fd** (`pread`):
+a match re-records the stamp (a benign `chmod`, `touch` or copy), a mismatch refuses. The stamp is recorded only when
+the file's ctime is at least 100 ms older than the start of the hash and a second `fstat` after the hash equals the first
+(git's "racy" rule), so a write during or right after the hash cannot hide behind a stamp taken in the same clock tick.
+
+**Why a same-user attacker cannot forge it.** The attacker we defend against can write the user's files but is not
+root. Changing a file's bytes in place updates its ctime, and **no unprivileged API sets ctime**: `utimensat` sets
+atime/mtime only, and any metadata change (including the `utimensat` that puts mtime back) bumps ctime to "now".
+Replacing the file under the same name gives a different inode (and the new inode's ctime is "now"). So equal stamps
+mean the same inode, unchanged since it was hashed. **Limits:** root can change the clock or write the block device,
+and some filesystems keep ctime poorly (network filesystems with client-side caching, FUSE filesystems that report
+what they like, FAT/exFAT which have no ctime). The state directory belongs on a local POSIX filesystem; on anything
+else, a stamp is only as good as its ctime. A same-*inode* rewrite that also restores ctime needs root (or a raw
+device write), which is out of scope.
+
+| Input | Recorded | Checked per spawn | Used through |
+|---|---|---|---|
+| Rootfs image (`cache/rootfs/<key>/rootfs.ext4`, now `0444`) | `rootfs_stamp` in its `manifest.json`, at build (an older entry: made `0444`, hashed and stamped on first use) | backend `open_image` (fstat; re-hash on mismatch, then re-stamp or `DigestMismatch`), then the helper again on its own fd | libkrun: `krun_add_disk("/proc/self/fd/<n>")` (macOS `/dev/fd/<n>`). Firecracker: `PUT /drives` with `/proc/<backend pid>/fd/<n>`, the fd held until the VM is configured |
+| libkrun, libkrunfw | `stamp` in the artifact `manifest.json` (Rust installer at install; the shell installer's manifests on first use) | backend at construction; helper before load | `dlopen` of the fd path, libkrunfw first; libkrun's leaf-name lookup of libkrunfw bound to it by `RTLD_NOLOAD` (§3) |
+| Netstack (passt / gvproxy) and passt's `.avx2` build | `stamp`, `avx2 {file, sha256, stamp}` in the netstack `manifest.json` | backend at construction; helper before exec | Linux: `execve("/proc/self/fd/<n>")`; macOS: the path (window below) |
+| The helper `sandcrab-krun` | `<helper>.pin.json` (`sha256`, `stamp`), written by `sandcrab libkrun install` after sign + rename (a rename changes the file's ctime) | backend before every launch (no record: hashed once per process, with a warning) | Linux: `execve("/proc/self/fd/<n>")` with `argv[0]` = the installed path; macOS: the path |
+| An explicit `RootfsSource::Image` | nothing (no digest) | its stamp taken by the backend at spawn, compared by the helper | the helper's fd |
+
+**passt's AVX2 re-exec.** On x86_64, passt `readlink`s `/proc/self/exe` and, if that does not end in `.avx2` and the
+CPU has AVX2, `execv`s `<exe>.avx2` **by path**. The installer now also installs the `passt.avx2` that `make static`
+builds from the same commit, and pins it. On AVX2 CPUs the helper executes the pinned variant itself through its
+verified fd; its `/proc/self/exe` ends in `.avx2`, so passt does not re-exec. With no pinned variant, an existing
+`<passt>.avx2` makes the helper refuse (exit 71) rather than let passt exec an unverified file.
+
+**Exec through an fd.** `execve("/proc/self/fd/<n>")` with a `CLOEXEC` fd works: the kernel resolves the path before
+it closes `CLOEXEC` fds. It does not work for `#!` scripts (the interpreter gets a path that no longer exists), so only
+the real ELF helper is executed that way. After an fd exec the kernel names the process after the fd number (`comm` =
+`3`), so the helper sets its name back (`PR_SET_NAME "sandcrab-krun"`); `argv[0]` is set to the installed path, so
+`ps`, orphan reaping and the tests see the same command line as before.
+
+**Residual windows.**
+
+| | Linux | macOS |
+|---|---|---|
+| Rootfs, libraries | none (fd used) | none (`/dev/fd/<n>` works for both `krun_add_disk` and `dlopen`, even after a swap of the path [tested]) |
+| Netstack | none (fd exec) | path exec after the fd check: `posix_spawn` and `execve` of `/dev/fd/<n>` fail (`EBADF`). A same-user writer can swap the file between check and exec |
+| Helper | none (fd exec) | path exec after the fd check, as the netstack |
+| Root / ctime-less filesystems | stamps trust ctime (above) | same |
+
+The macOS windows need write access to the user's own `0700` state directory, which already holds the helper; closing
+them would take a `posix_spawn` from an fd, which macOS does not offer. Directories that hold pinned files are created
+`0700` whatever the umask (R18: under Ubuntu's default `0002` they came out group-writable); the backend refuses
+nothing based on directory modes yet (follow-up).
+
+**Cost.** Measured on `kvm-dedicated` (bench smoke: `lifecycle`, `base`, `W0`, warm, 12 runs; p50 `spawn_ready`):
+
+| Host | libkrun `spawn_ready` p50 before → after | Firecracker `spawn_ready` p50 before → after |
+|---|---|---|
+| `kvm-dedicated` (Xeon D-2141I, no SHA-NI; bench smoke, 12 runs) | 427.9 ms → **238.0 ms** (the per-spawn library hash, ~190 ms, is gone) | 714.9 ms → 726.9 ms (unchanged within noise; another workload shared the host) |
+| Mac (M2; `spawn_timing_breakdown`, warm) | ~165 ms (§12.1) → ~160 ms (137–172 ms; the ~20 ms SHA2-instruction hash is gone) | n/a |
+
+The first spawn after an install, or after a stamp went stale (a copied cache, a `chmod`), pays one full hash of that
+file, then records the new stamp.
+
+**fs-verity** (kernel-enforced, constant-time) stays a follow-up: it needs `tune2fs -O verity` (root) and ext4/f2fs/btrfs,
+and macOS has no equivalent.
 
 ## 13. Bench
 

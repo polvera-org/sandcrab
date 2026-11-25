@@ -16,6 +16,15 @@ pub const CGROUP_ENV: &str = "SANDCRAB_LIBKRUN_CGROUP";
 /// The helper's entitlements (`entitlements.plist`: only `com.apple.security.hypervisor`),
 /// embedded so installers can sign the helper without a source checkout (design §4).
 pub const ENTITLEMENTS_PLIST: &str = include_str!("../entitlements.plist");
+/// Entitlements for a hardened-runtime signature (Developer ID, review R10):
+/// `entitlements-hardened.plist` adds `com.apple.security.cs.disable-library-validation`,
+/// without which the hardened runtime refuses to load libkrun/libkrunfw (signed by another
+/// team, or ad hoc). The helper verifies both libraries itself (pinned SHA-256, loaded through
+/// the verified fd), so library validation adds nothing it relies on.
+pub const ENTITLEMENTS_HARDENED_PLIST: &str = include_str!("../entitlements-hardened.plist");
+/// `$SANDCRAB_SIGN_RUNTIME=1`: sign with the hardened runtime even ad hoc (tests the Developer
+/// ID configuration locally; a Developer ID identity always gets it).
+pub const SIGN_RUNTIME_ENV: &str = "SANDCRAB_SIGN_RUNTIME";
 /// The entitlement the helper needs on macOS to create VMs.
 pub const HYPERVISOR_ENTITLEMENT: &str = "com.apple.security.hypervisor";
 /// Control socket name inside a sandbox run dir (guest vsock port 1).
