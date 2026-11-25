@@ -394,9 +394,16 @@ fn harness() -> ExitCode {
         .enable_all()
         .build()
         .unwrap();
-    if !have("mke2fs") {
+    // Needs `mke2fs` on PATH (blank scratch drives) and a working workspace-image strategy: an
+    // `mke2fs` can be too old or lack libarchive (CI macOS runners, which also lack docker and
+    // fakeroot).
+    let strategy = sandcrab_backend_firecracker::rootfs::mkfs::detect(&std::env::temp_dir());
+    if !have("mke2fs") || strategy.is_err() {
         println!(
-            "fake_vmm: mke2fs not installed; skipping {} tests",
+            "fake_vmm: no usable mke2fs ({}); skipping {} tests",
+            strategy
+                .err()
+                .map_or_else(|| "not on PATH".to_string(), |e| e.to_string()),
             tests.len()
         );
         return ExitCode::SUCCESS;

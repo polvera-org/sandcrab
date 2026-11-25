@@ -103,6 +103,14 @@ Stop every running `sandcrab`, `crabagent` and bench process before upgrading, t
   `sandcrab-bench recheck` (`--write` adds the tier fields to older files).
 - Phase 1 (V1): `crabd` guest tools over length-prefixed JSON-RPC 2.0, persistent workspaces, the Docker backend,
   the Firecracker backend, SDK, CLI, `crabagent`, and the benchmark harness.
+- CI (GitHub Actions, hosted runners only; [docs/ci.md](docs/ci.md)): `ci.yml` runs fmt, clippy and unit tests on
+  Linux x86_64, Linux arm64 and macOS arm64 plus the static musl `crabd` build, behind one always-reporting `ci-ok`
+  check (docs-only PRs skip the heavy jobs). `release.yml` builds per-target tarballs and `SHA256SUMS` on a `v*` tag
+  and opens a draft GitHub release (no build cache). `e2e.yml` runs the Docker and Firecracker (hosted `/dev/kvm`)
+  e2e suites nightly and on demand; libkrun e2e stays a local run on a Mac.
+- `scripts/package-release.sh <target> [--out] [--expect-version] [--dry-run]`: builds one release archive
+  (`sandcrab`, `crabagent`, `sandcrab-krun`, static `crabd`, templates, a generated `INSTALL.md`) natively, the same
+  way CI does.
 
 ### Changed
 - Template image pins are **host-local** ([docs/template-pins.md](docs/template-pins.md)). Image IDs do not reproduce
@@ -217,3 +225,5 @@ Stop every running `sandcrab`, `crabagent` and bench process before upgrading, t
 
 ### Docs
 - README hero is a 3D crab-in-jar render (was a photo).
+- [docs/ci.md](docs/ci.md): the CI, release and e2e workflows, how to cut a release, runners and cost, platform
+  notes (glibc 2.39+, macOS quarantine, Windows through WSL2). README gains an Install section.

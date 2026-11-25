@@ -1,0 +1,166 @@
+# Release: prebuilt binaries for macOS arm64 and Linux x86_64/arm64.
+#
+# - Tag push `v*`: build every target natively, then publish a DRAFT GitHub release (generated
+#   notes) with one tar.gz per target, its .sha256 and a combined SHA256SUMS. A human reviews
+#   and publishes the draft.
+# - workflow_dispatch: build + upload workflow artifacts only. Never creates a release.
+#
+# Packaging is scripts/package-release.sh, so the same archive can be built locally.
+# macOS signing is ad hoc (scripts/sign-krun-helper.sh default identity); Developer ID and
+# notarization are review item R10. GitHub-hosted runners only.
+#
+# No build cache on purpose: release binaries are built clean. A tag ref can restore caches
+# saved by the default branch (cache-poisoning surface for shipped binaries), and caches saved
+# by one tag are never visible to the next tag, so saving them buys nothing.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read # checkout only; publish elevates itself
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-26
+            crabd_target: aarch64-unknown-linux-musl
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-24.04
+            crabd_target: x86_64-unknown-linux-musl
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            crabd_target: aarch64-unknown-linux-musl
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install musl-tools (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools
+
+      - name: Install Rust toolchain and targets
+        env:
+          TARGET: ${{ matrix.target }}
+          CRABD_TARGET: ${{ matrix.crabd_target }}
+        run: |
+          # Toolchain from rust-toolchain.toml (rustup >= 1.28 installs it with no argument).
+          rustup toolchain install || rustup show
+          rustup target add "$TARGET" "$CRABD_TARGET"
+          rustc -vV
+
+      - name: Build and package
+        env:
+          TARGET: ${{ matrix.target }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          args=("$TARGET" --out dist)
+          if [ "$REF_TYPE" = tag ]; then
+            # The tag must match the workspace version (v0.1.0 <-> 0.1.0).
+            args+=(--expect-version "${REF_NAME#v}")
+          fi
+          scripts/package-release.sh "${args[@]}"
+          ls -l dist
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: publish draft release
+    needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write # create the draft release and upload its assets
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist
+
+      - name: Verify checksums and write SHA256SUMS
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          ls -l
+          sha256sum -c ./*.tar.gz.sha256
+          sha256sum ./*.tar.gz | sed 's#  \./#  #' > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create draft release and upload assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          # Idempotent for re-runs, but never touch a release that is already published.
+          if state="$(gh release view "$TAG" --repo "$REPO" --json isDraft --jq .isDraft 2>/dev/null)"; then
+            if [ "$state" != true ]; then
+              echo "release $TAG is already published; refusing to change its assets" >&2
+              exit 1
+            fi
+          else
+            flags=(--draft --generate-notes --verify-tag --title "$TAG")
+            case "$TAG" in *-*) flags+=(--prerelease) ;; esac
+            gh release create "$TAG" --repo "$REPO" "${flags[@]}"
+            # Let the new release's upload URL propagate.
+            sleep 3
+          fi
+
+          shopt -s nullglob
+          files=(dist/*.tar.gz dist/*.tar.gz.sha256 dist/SHA256SUMS)
+          if [ "${#files[@]}" -lt 3 ]; then
+            echo "no release assets found" >&2
+            exit 1
+          fi
+          for file in "${files[@]}"; do
+            echo "uploading $(basename "$file")"
+            ok=0
+            for attempt in 1 2 3 4 5; do
+              if gh release upload "$TAG" "$file" --repo "$REPO" --clobber; then
+                ok=1
+                break
+              fi
+              echo "upload failed (attempt $attempt), retrying" >&2
+              sleep $((attempt * 2))
+            done
+            if [ "$ok" -ne 1 ]; then
+              echo "failed to upload $file after retries" >&2
+              exit 1
+            fi
+          done

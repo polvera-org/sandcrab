@@ -772,7 +772,9 @@ mod tests {
     fn capabilities_report_shared_kernel() {
         let backend = DockerBackend {
             config: DockerConfig::default(),
-            docker: connect_docker(None).unwrap(),
+            // A TCP client connects lazily, so this needs no Docker daemon (CI macOS runners
+            // have none; the unix-socket default fails when the socket file is missing).
+            docker: connect_docker(Some("tcp://127.0.0.1:2375")).unwrap(),
             crabd: PathBuf::from("/opt/sandcrab/crabd"),
             host_user: UserSpec::new(1000, 1000),
         };
