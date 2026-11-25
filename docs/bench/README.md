@@ -104,8 +104,8 @@ invalid), `--calls`/`--call-warmups` (steady-state calls per sandbox), `--resour
 `--idle-window-s` (default 60), `--settle-s` (default 5), `--density-cap`/`--density-reps`/
 `--density-floor-mib`, `--touch-mib` (default 64), `--host-kind` (overrides bare-metal/vm
 detection), `--max-load` (default 0.5), `--no-preflight`, `--force` (run despite a preflight
-that predicts the result invalid; recorded as `preflight.forced`), `--probe-samples` (default 5)
-and `--probe-window-s` (default 30).
+that predicts the result invalid; recorded as `preflight.forced`), `--probe-samples` (default and
+minimum 5) and `--probe-window-s` (default 30).
 
 `--quick` sets N=3, 1 warmup, 3 calls per metric, 1 resource run, a 2 s idle window, a 1 s
 settle, density capped at 3 with 1 rep, and an 8 MiB touch.
@@ -124,10 +124,10 @@ refuse.
 | load | 1-min load > `--max-load` (the run's own start rule) | 5- or 15-min load > `--max-load` (busy recently) |
 | memory | `MemAvailable` < `--density-floor-mib` | |
 | density | the density budget fits fewer than 2 sandboxes of the template's `memory_mb` (e.g. `75%` on a desktop already using > 75% of RAM: the budget clamps to 0 and density measures the desktop) | the budget is below `--density-cap` sandboxes |
-| storage | Docker's root is on an HDD and the tier is Full with Docker (the kvm-dedicated Full run drifted −11.9% over 3 h) | the work dir, Sandcrab home or Docker root is on an HDD (Linux: `lsblk`/`/sys/block/*/queue/rotational`; macOS: `diskutil`) |
+| storage | Docker's root is on an HDD and the tier is Full with Docker (the kvm-dedicated Full run drifted −11.9% over 3 h; Standard only warns, since its ~1 h run gives the drift less time to build and the run's own drift check still applies) | the work dir, Sandcrab home or Docker root is on an HDD (Linux: `lsblk`/`/sys/block/*/queue/rotational`; macOS: `diskutil`) |
 | disk | < 5 GiB free where the run writes (at any tier) | < 15 GiB free |
 | backends | no requested backend opens | a requested backend is unavailable |
-| drift probe | the first backend's `spawn_ready` p50 moves > 10% between 5 spawns and 5 more spawns 30 s later **and** the two groups do not overlap (< 1% chance with 5 + 5 samples), or a probe spawn fails | a shift > 5%, or a coefficient of variation > 25% |
+| drift probe | the first backend's `spawn_ready` p50 moves > 10% between 5 spawns and 5 more spawns 30 s later **and** the two groups do not overlap (< 1% chance with 5 + 5 samples; `--probe-samples` below 5 is raised to 5), or a probe spawn fails twice in a row | a shift > 5%, a coefficient of variation > 25%, or a probe spawn that failed once and succeeded on retry |
 
 Fixes it suggests: close apps and wait for the load to settle; free memory or pass an absolute
 `--density-budget` (e.g. `2GiB`) or drop `density`; use an SSD/NVMe host (or the microVM backends

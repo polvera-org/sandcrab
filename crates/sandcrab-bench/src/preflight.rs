@@ -33,6 +33,10 @@ pub const DISK_WARN_BYTES: u64 = 15 << 30;
 pub const PROBE_CV_WARN_PCT: f64 = 25.0;
 /// Probe drift above which it warns (half the run's threshold).
 pub const PROBE_DRIFT_WARN_PCT: f64 = DRIFT_PCT / 2.0;
+/// Fewest timed spawns per probe group. Two groups of n exchangeable samples fail to overlap
+/// by chance with probability 2/C(2n, n): 2/252 (< 1%) at n = 5, 1/3 at n = 2, certain at
+/// n = 1. `--probe-samples` is clamped up to this so a separated shift stays a real one.
+pub const PROBE_MIN_SAMPLES: usize = 5;
 
 /// What the preflight checks against.
 #[derive(Debug, Clone)]
@@ -96,10 +100,34 @@ async fn spawn_once(b: &LiveBackend, template: &str) -> Result<f64, String> {
     Ok(ns)
 }
 
-async fn samples(b: &LiveBackend, template: &str, n: usize) -> Result<Vec<f64>, String> {
+/// One spawn, retried once: a single transient failure is recorded in `flaky` (a warning),
+/// two in a row are returned as the error (the backend cannot spawn).
+async fn spawn_retry(
+    b: &LiveBackend,
+    template: &str,
+    flaky: &mut Vec<String>,
+) -> Result<f64, String> {
+    match spawn_once(b, template).await {
+        Ok(ns) => Ok(ns),
+        Err(first) => {
+            let ns = spawn_once(b, template)
+                .await
+                .map_err(|e| format!("{e} (also on retry; first: {first})"))?;
+            flaky.push(first);
+            Ok(ns)
+        }
+    }
+}
+
+async fn samples(
+    b: &LiveBackend,
+    template: &str,
+    n: usize,
+    flaky: &mut Vec<String>,
+) -> Result<Vec<f64>, String> {
     let mut xs = Vec::with_capacity(n);
     for _ in 0..n {
-        xs.push(spawn_once(b, template).await?);
+        xs.push(spawn_retry(b, template, flaky).await?);
     }
     Ok(xs)
 }
@@ -121,7 +149,8 @@ fn cv_pct(xs: &[f64]) -> Option<f64> {
 }
 
 /// The two groups do not overlap at all: with 5 + 5 samples that happens by chance with
-/// probability 2/252 (< 1%), so a separated shift is a real one, not sampling noise.
+/// probability 2/252 (< 1%), so a separated shift is a real one, not sampling noise
+/// (see [`PROBE_MIN_SAMPLES`] for smaller groups).
 fn separated(a: &[f64], z: &[f64]) -> bool {
     let max = |v: &[f64]| v.iter().copied().fold(f64::MIN, f64::max);
     let min = |v: &[f64]| v.iter().copied().fold(f64::MAX, f64::min);
@@ -129,17 +158,19 @@ fn separated(a: &[f64], z: &[f64]) -> bool {
 }
 
 /// Drift probe: one discarded warmup spawn, `n` timed spawns per backend, an idle window,
-/// then `n` more. Same metric as the run's drift check (`spawn_ready` p50).
-async fn drift_probe(o: &Opts, live: &[LiveBackend]) -> Vec<DriftProbe> {
+/// then `n` more. Same metric as the run's drift check (`spawn_ready` p50). Also returns,
+/// per backend, the spawn errors that a retry recovered from.
+async fn drift_probe(o: &Opts, live: &[LiveBackend]) -> (Vec<DriftProbe>, Vec<Vec<String>>) {
     let mut probes: Vec<DriftProbe> = Vec::new();
-    for b in live {
+    let mut flaky: Vec<Vec<String>> = vec![Vec::new(); live.len()];
+    for (b, fl) in live.iter().zip(flaky.iter_mut()) {
         eprintln!(
             "[preflight] drift probe {}: {} spawns",
             b.id.label(),
             o.probe_samples
         );
-        let start = match spawn_once(b, &o.template).await {
-            Ok(_) => samples(b, &o.template, o.probe_samples).await,
+        let start = match spawn_retry(b, &o.template, fl).await {
+            Ok(_) => samples(b, &o.template, o.probe_samples, fl).await,
             Err(e) => Err(e),
         };
         let (start_ns, error) = match start {
@@ -166,11 +197,11 @@ async fn drift_probe(o: &Opts, live: &[LiveBackend]) -> Vec<DriftProbe> {
         );
         tokio::time::sleep(o.probe_window).await;
     }
-    for (b, p) in live.iter().zip(probes.iter_mut()) {
+    for ((b, p), fl) in live.iter().zip(probes.iter_mut()).zip(flaky.iter_mut()) {
         if p.error.is_some() {
             continue;
         }
-        match samples(b, &o.template, o.probe_samples).await {
+        match samples(b, &o.template, o.probe_samples, fl).await {
             Ok(v) => {
                 p.end_p50_ns = p50(&v);
                 p.end_ns = v;
@@ -183,7 +214,7 @@ async fn drift_probe(o: &Opts, live: &[LiveBackend]) -> Vec<DriftProbe> {
             Err(e) => p.error = Some(e),
         }
     }
-    probes
+    (probes, flaky)
 }
 
 /// Run every check. `load` is the host load sampled before any of the bench's own activity
@@ -202,7 +233,13 @@ pub async fn check(
     };
 
     // load: the run's validity rule is the 1-min value at start; 5/15-min show a recent past.
-    if load[0] > o.max_load {
+    if !load[0].is_finite() {
+        c.tiered(
+            "load",
+            "1-min load could not be read: the start-load rule cannot be checked".into(),
+            "check /proc/loadavg (Linux) or `sysctl vm.loadavg` (macOS)",
+        );
+    } else if load[0] > o.max_load {
         c.tiered(
             "load",
             format!(
@@ -395,26 +432,44 @@ pub async fn check(
     }
 
     // drift probe
-    let drift_probe = if o.probe && !live.is_empty() {
+    let (drift_probe, flaky) = if o.probe && !live.is_empty() {
         drift_probe(o, live).await
     } else {
-        Vec::new()
+        (Vec::new(), Vec::new())
     };
     for (i, p) in drift_probe.iter().enumerate() {
         // The run's drift check measures the first available backend; others only warn.
         let gating = i == 0;
+        if let Some(e) = flaky.get(i).and_then(|f| f.first()) {
+            let n = flaky[i].len();
+            c.push(
+                "drift",
+                Severity::Warn,
+                format!(
+                    "{}: {n} probe spawn{} failed and succeeded on retry (flaky): {e}",
+                    p.backend,
+                    if n == 1 { "" } else { "s" }
+                ),
+                Some("a run tolerates ≤ 1% failed samples per cell; rerun the preflight if unsure"),
+            );
+        }
         if let Some(e) = &p.error {
             c.push(
                 "drift",
                 Severity::Fail,
-                format!("{}: probe spawn failed: {e}", p.backend),
-                Some("fix the backend first (`sandcrab doctor`); every cell would fail"),
+                format!("{}: cannot spawn (failed twice in a row): {e}", p.backend),
+                Some(
+                    "fix the backend first (`sandcrab doctor`); with spawns failing, the run's \
+                     cells would be unreliable",
+                ),
             );
             continue;
         }
         let Some(pct) = p.drift_pct else { continue };
+        // Below PROBE_MIN_SAMPLES non-overlap is likely by chance: never FAIL on it.
+        let enough = p.start_ns.len().min(p.end_ns.len()) >= PROBE_MIN_SAMPLES;
         let sep = separated(&p.start_ns, &p.end_ns);
-        if pct.abs() > DRIFT_PCT && sep && gating {
+        if pct.abs() > DRIFT_PCT && sep && enough && gating {
             c.tiered(
                 "drift",
                 format!(
@@ -650,6 +705,15 @@ mod tests {
         assert!(cv_pct(&[1.0]).is_none());
         assert!(cv_pct(&[10.0, 10.0, 10.0]).unwrap().abs() < 1e-9);
         assert_eq!(p50(&[3.0, 1.0, 2.0]), Some(2.0));
+    }
+
+    #[test]
+    fn min_samples_keep_chance_separation_under_one_percent() {
+        // P(two groups of n exchangeable samples do not overlap) = 2 / C(2n, n).
+        let chance = |n: u64| 2.0 / (1..=n).fold(1.0, |c, k| c * (n + k) as f64 / k as f64);
+        let n = PROBE_MIN_SAMPLES as u64;
+        assert!(chance(n) < 0.01, "{}", chance(n));
+        assert!(chance(n - 1) >= 0.01);
     }
 
     fn pf(tier: Tier, findings: Vec<Finding>) -> Preflight {

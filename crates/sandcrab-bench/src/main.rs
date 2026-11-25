@@ -73,7 +73,8 @@ enum Command {
 /// Drift-probe knobs shared by `run` and `preflight`.
 #[derive(Debug, Clone, Args)]
 struct ProbeArgs {
-    /// Timed spawns per backend before and after the probe window.
+    /// Timed spawns per backend before and after the probe window (at least 5: smaller
+    /// groups make the non-overlap test meaningless; lower values are raised to 5).
     #[arg(long, default_value_t = 5)]
     probe_samples: usize,
     /// Idle seconds between the two probe groups.
@@ -326,7 +327,7 @@ fn plan(a: RunArgs, work_dir: PathBuf) -> anyhow::Result<Plan> {
             .unwrap_or_else(|| backend::default_crabd(&repo_root)),
         preflight: !a.no_preflight,
         force: a.force,
-        probe_samples: a.probe.probe_samples.max(1),
+        probe_samples: a.probe.probe_samples.max(preflight::PROBE_MIN_SAMPLES),
         probe_window: Duration::from_secs(a.probe.probe_window_s),
     })
 }
@@ -380,7 +381,7 @@ async fn preflight_cmd(a: PreflightArgs, work_dir: PathBuf) -> anyhow::Result<()
         density_cap: a.density_cap,
         density_floor: a.density_floor_mib << 20,
         probe: !a.no_probe,
-        probe_samples: a.probe.probe_samples.max(1),
+        probe_samples: a.probe.probe_samples.max(preflight::PROBE_MIN_SAMPLES),
         probe_window: Duration::from_secs(a.probe.probe_window_s),
         template: a
             .templates
