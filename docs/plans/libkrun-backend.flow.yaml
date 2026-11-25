@@ -294,7 +294,7 @@ steps:
     agent: nova
     title: Live crabagent session on --backend libkrun (Mac) with a host-dir workspace
     depends_on: [bench-report, crabagent-backends]
-    status: doing
+    status: done
 
   - id: lk-docs
     phase: document
