@@ -214,9 +214,11 @@ The first spawn of a template builds its rootfs (seconds for `base`, about a min
   `SANDCRAB_HOME` is refused with a hint to shorten it (never truncated).
 - **Netstack quarantine.** The netstack (gvproxy) is the upstream release, which is not
   notarized. A file carrying `com.apple.quarantine` would be blocked by Gatekeeper behind a
-  dialog. When the backend starts and the netstack matches its pinned SHA-256, it removes that
-  attribute from the file (downloads by `sandcrab libkrun install` are normally not quarantined
-  in the first place). A quarantined file that does not match its pin is refused.
+  dialog. `sandcrab libkrun install`, and the backend when it starts, remove that attribute once
+  the netstack matches its pinned SHA-256, through the file descriptor that was verified (its
+  downloads are normally not quarantined in the first place). `sandcrab doctor` warns
+  (`lk:netstack`) while the attribute is present. A quarantined file that does not match its pin
+  is refused.
 
 ### 2.3 Docker on macOS (Docker Desktop)
 

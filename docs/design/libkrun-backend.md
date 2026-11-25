@@ -413,9 +413,12 @@ netstack: passt `--fd 0` (BE32 frames) | gvproxy `-listen-stdio accept` (LE16 fr
   every 250 ms) and waits up to 10 s for the netstack's first frame. A netstack that exits or stays silent fails the
   spawn with exit 76 and a clear error, never a guest with a dead NIC. Cause seen on macOS: a freshly written gvproxy
   is scanned on first exec, and a file carrying `com.apple.quarantine` is blocked by Gatekeeper behind a dialog (the
-  upstream release is not notarized). At backend construction, after the netstack matched its pinned SHA-256, the
-  quarantine attribute is removed from that exact file; without pin verification such a file is refused with the
-  fix. The pinned hash is of the original file and is never changed.
+  upstream release is not notarized). At backend construction, and in `sandcrab libkrun install`, once the netstack
+  matched its pinned SHA-256 the quarantine attribute is removed with `fremovexattr` on **the fd that was verified**
+  (review N3: no path is resolved again; the owner write bit is added and restored on that fd, since macOS refuses
+  to remove an xattr from a `0555` file), then the file is re-hashed and re-stamped (both change its ctime). Without
+  pin verification such a file is refused with the fix; `doctor` warns (`lk:netstack`) while it is present. The
+  pinned hash is of the original file and is never changed.
 - **Pins** (`netstack_pins.rs`, `<home>/artifacts/libkrun-net/<kind>-<version>/manifest.json`): gvproxy `v0.9.0`
   release asset `gvproxy-darwin` (universal, ad hoc signed; sha `e2a6825b…`, installed byte for byte); passt
   `2026_10_02.cba3570` (commit `cba35706…`), built `make static` from the pinned tag by `scripts/fetch-libkrun.sh`
@@ -647,9 +650,28 @@ the real ELF helper is executed that way. After an fd exec the kernel names the 
 | Root / ctime-less filesystems | stamps trust ctime (above) | same |
 
 The macOS windows need write access to the user's own `0700` state directory, which already holds the helper; closing
-them would take a `posix_spawn` from an fd, which macOS does not offer. Directories that hold pinned files are created
-`0700` whatever the umask (R18: under Ubuntu's default `0002` they came out group-writable); the backend refuses
-nothing based on directory modes yet (follow-up).
+them would take a `posix_spawn` from an fd, which macOS does not offer.
+
+**Stamps vouch for one digest (review N2).** A stamp also records the SHA-256 it was proven against
+(`FileStamp::sha256`), and a stamp hit counts only when that digest equals the one expected: the compiled-in pin for
+libkrun, libkrunfw (unmodified installs) and the netstack, the manifest digest for the rootfs and the helper record.
+So a genuine stamp of some other file cannot be pasted next to a pin to stand in for it; the file is hashed and
+refused. Stamps written before this rule carry no digest: they never hit, the file is hashed once and re-stamped.
+Someone who can write the manifest *and* forge a stamp claiming the expected digest for another inode is not stopped
+(there is no secret to sign with), but that needs write access to the private state tree below. Helper protocol v3.
+
+**Private state tree (review R18).** Directories that hold pinned files are created `0700` whatever the umask (under
+Ubuntu's default `0002` they came out group-writable). At construction the libkrun and Firecracker backends, and
+`sandcrab libkrun install`, also secure what already exists (`sandcrab_core::private_dir`): the state root
+(`state_root`, set by `with_home`) and every directory from it down to the helper, library, netstack, kernel,
+`firecracker`, cache, run and recovery dirs. A symlinked root, a non-directory, or a directory owned by another uid is
+refused with the fix. A directory owned by the user and writable by group or world is **tightened to `0700`** and
+logged at `warn`, with a hint to reinstall if group members are not trusted. Tightening rather than refusing keeps an
+existing single-user install (such as a `0775` `~/.sandcrab` made under umask `0002`) working, and closes the window
+for every later spawn; refusing would only make the user run the same `chmod`. Symlinks below the root (a cache moved
+to another disk) are followed and their target checked the same way. Directories outside the state root (explicit
+overrides) are never changed: they must be owned by the user or root and not group/world-writable, else refused. Each
+check opens the directory (`O_NOFOLLOW` for the root), `fstat`s and `fchmod`s that fd, parents before children.
 
 **Cost.** Measured on `kvm-dedicated` (bench smoke: `lifecycle`, `base`, `W0`, warm, 12 runs; p50 `spawn_ready`):
 
