@@ -111,7 +111,6 @@ pub fn other_guests() -> Vec<String> {
     out
 }
 
-#[must_use]
 /// Replace the recorded hostname with `label` (`--host-label`). The hostname is the only
 /// host-identifying name [`HostInfo`] carries, so after this the label is the only name in
 /// the result.
@@ -121,6 +120,7 @@ pub fn apply_label(info: &mut HostInfo, label: Option<&str>) {
     }
 }
 
+#[must_use]
 pub fn hostname() -> String {
     read_trim("/proc/sys/kernel/hostname")
         .or_else(|| cmd("hostname", &[]))
