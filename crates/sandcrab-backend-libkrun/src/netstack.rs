@@ -624,7 +624,45 @@ pub struct Started {
     pub stats: Arc<Stats>,
 }
 
-/// How long [`start`] waits for the netstack to answer before the VM starts anyway.
+/// macOS download-quarantine attribute. On an unnotarized binary such as the upstream gvproxy
+/// it makes Gatekeeper block `exec` behind a user dialog.
+pub const QUARANTINE_XATTR: &str = "com.apple.quarantine";
+
+/// Whether `path` carries [`QUARANTINE_XATTR`] (always `false` off macOS).
+pub fn quarantined(path: &Path) -> io::Result<bool> {
+    #[cfg(target_os = "macos")]
+    {
+        match rustix::fs::getxattr_query(path, QUARANTINE_XATTR) {
+            Ok(_) => Ok(true),
+            Err(rustix::io::Errno::NOATTR) => Ok(false),
+            Err(e) => Err(e.into()),
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = path;
+        Ok(false)
+    }
+}
+
+/// Remove [`QUARANTINE_XATTR`] from exactly `path` (no-op when absent or off macOS). Call it
+/// only after the file matched its pinned SHA-256: it tells macOS to trust the file.
+pub fn clear_quarantine(path: &Path) -> io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        match rustix::fs::removexattr(path, QUARANTINE_XATTR) {
+            Ok(()) | Err(rustix::io::Errno::NOATTR) => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = path;
+        Ok(())
+    }
+}
+
+/// How long [`start`] waits for the netstack to answer; then the helper fails (exit 76).
 pub const READY_TIMEOUT: Duration = Duration::from_secs(10);
 /// Interval between readiness probes.
 const READY_PROBE_EVERY: Duration = Duration::from_millis(250);
@@ -747,10 +785,21 @@ pub fn start(
     }
     match wait_ready(&probe_end, framing, &stats, &mut child, READY_TIMEOUT) {
         Ok(d) => log(format!("net: {kind} ready after {} ms", d.as_millis())),
-        // Not fatal: the guest may still get its network late; the reason is in vmm.log.
-        Err(e) => log(format!(
-            "net: {kind} not ready ({e}); starting the VM anyway"
-        )),
+        Err(e) => {
+            // Fail fast and loudly instead of booting a guest with a dead NIC.
+            let _ = child.kill();
+            let _ = child.wait();
+            let hint = if kind == NetstackKind::Gvproxy {
+                " (on macOS a `com.apple.quarantine` attribute makes Gatekeeper block the \
+                 unnotarized gvproxy behind a dialog; `sandcrab libkrun install` clears it)"
+            } else {
+                ""
+            };
+            return Err(io::Error::new(
+                e.kind(),
+                format!("{kind} netstack not ready: {e}{hint}"),
+            ));
+        }
     }
     drop(probe_end);
     Ok(Started {
@@ -950,6 +999,27 @@ mod tests {
         assert!(matches!(p.check(&f), Err(Denial::Smtp { port: 25, .. })));
     }
 
+    /// xattr presence only (never executes the file, so no Gatekeeper dialog).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn quarantine_is_detected_and_cleared() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("gvproxy");
+        std::fs::write(&f, b"not a binary").unwrap();
+        assert!(!quarantined(&f).unwrap());
+        rustix::fs::setxattr(
+            &f,
+            QUARANTINE_XATTR,
+            b"0081;00000000;curl;",
+            rustix::fs::XattrFlags::empty(),
+        )
+        .unwrap();
+        assert!(quarantined(&f).unwrap());
+        clear_quarantine(&f).unwrap();
+        assert!(!quarantined(&f).unwrap());
+        clear_quarantine(&f).unwrap(); // absent: no-op
+    }
+
     #[test]
     fn arp_probe_passes_the_filter_and_asks_for_the_gateway() {
         let f = arp_probe();
@@ -999,7 +1069,8 @@ mod tests {
             let _ = child.wait();
             assert_eq!(res.is_ok(), ok, "{res:?}");
             if ok {
-                assert!(res.unwrap() >= delay);
+                // Measured from inside `wait_ready`, which starts just after the fake.
+                assert!(res.unwrap() + Duration::from_millis(200) >= delay);
             }
         }
         // A netstack that dies is reported at once, not after the timeout.

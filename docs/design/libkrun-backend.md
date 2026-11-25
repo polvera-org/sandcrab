@@ -390,6 +390,13 @@ netstack: passt `--fd 0` (BE32 frames) | gvproxy `-listen-stdio accept` (LE16 fr
   (Linux) cgroup leaf. It **listens on nothing**: its only channel is the socketpair, so when the helper dies — however
   it dies — the netstack reads EOF and exits (passt `--fd` is one-shot; gvproxy exits on stdio EOF). No sockets on
   disk, so no socket dir to protect. A watcher thread reaps it and logs the frame counters. Spawn failure → exit 76.
+- **Netstack readiness and quarantine:** before the VM boots, the helper sends an ARP probe for the gateway (re-sent
+  every 250 ms) and waits up to 10 s for the netstack's first frame. A netstack that exits or stays silent fails the
+  spawn with exit 76 and a clear error, never a guest with a dead NIC. Cause seen on macOS: a freshly written gvproxy
+  is scanned on first exec, and a file carrying `com.apple.quarantine` is blocked by Gatekeeper behind a dialog (the
+  upstream release is not notarized). At backend construction, after the netstack matched its pinned SHA-256, the
+  quarantine attribute is removed from that exact file; without pin verification such a file is refused with the
+  fix. The pinned hash is of the original file and is never changed.
 - **Pins** (`netstack_pins.rs`, `<home>/artifacts/libkrun-net/<kind>-<version>/manifest.json`): gvproxy `v0.9.0`
   release asset `gvproxy-darwin` (universal, ad hoc signed; sha `e2a6825b…`, installed byte for byte); passt
   `2026_10_02.cba3570` (commit `cba35706…`), built `make static` from the pinned tag by `scripts/fetch-libkrun.sh`
