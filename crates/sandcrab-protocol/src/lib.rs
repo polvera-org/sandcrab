@@ -13,7 +13,9 @@
 //! <- {"jsonrpc":"2.0","id":2,"error":{"code":-32004,"message":"not found: ...","data":{...}}}
 //! ```
 //!
-//! `method` is a tool name ([`TOOL_NAMES`]) or [`METHOD_HELLO`] / [`METHOD_PING`].
+//! `method` is a tool name ([`TOOL_NAMES`]) or [`METHOD_HELLO`] / [`METHOD_PING`]; the
+//! connection-level verbs [`METHOD_AUTH`] ([`auth`]) and [`METHOD_TUNNEL_OPEN`] ([`tunnel`])
+//! may only open a connection.
 //! Typed layers: [`Call`] / [`Reply`] (all methods), [`ToolCall`] / [`ToolResult`] (tools).
 //!
 //! # Host flow
@@ -37,6 +39,7 @@
 //! assert_eq!(Call::from_request(&req).unwrap(), call);
 //! ```
 
+pub mod auth;
 mod error;
 mod framing;
 pub mod init;
@@ -47,6 +50,7 @@ mod schema;
 mod tools;
 pub mod tunnel;
 
+pub use auth::{AUTH_TOKEN_BYTES, AUTH_TOKEN_HEX_LEN, AuthAck, AuthParams, AuthToken, METHOD_AUTH};
 pub use error::{ProtocolError, RpcError, codes};
 pub use framing::{
     FrameDecoder, FrameError, HEADER_LEN, MAX_FRAME_LEN, decode_frame, encode_frame, parse_header,
@@ -63,7 +67,11 @@ pub use tools::{TOOL_NAMES, ToolCall, ToolResult, tool_definitions};
 pub use tunnel::{METHOD_TUNNEL_OPEN, TunnelOpenAck, TunnelOpenParams};
 
 /// Version of this wire protocol, reported by `hello`.
-pub const PROTOCOL_VERSION: &str = "0.1";
+///
+/// History: `0.1` initial; `0.2` adds the connection-level [`METHOD_AUTH`] frame and the
+/// `UNAUTHORIZED` (`-32008`) error code. A `0.2` `crabd` started without a token behaves
+/// exactly like `0.1`.
+pub const PROTOCOL_VERSION: &str = "0.2";
 
 /// Default limits referenced by tool descriptions. `crabd` enforces them.
 pub mod limits {

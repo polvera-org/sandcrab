@@ -30,6 +30,8 @@ pub mod codes {
     pub const TOO_LARGE: i64 = -32006;
     /// The tool is not implemented by this daemon / backend.
     pub const UNIMPLEMENTED: i64 = -32007;
+    /// The connection did not authenticate (missing, wrong or late `auth` frame).
+    pub const UNAUTHORIZED: i64 = -32008;
 }
 
 /// JSON-RPC 2.0 error object (`{"code", "message", "data"?}`).
@@ -86,6 +88,10 @@ pub enum ProtocolError {
     #[error("not implemented: {0}")]
     Unimplemented(String),
 
+    /// The connection was not authenticated; `crabd` closes it after this frame.
+    #[error("unauthorized: {0}")]
+    Unauthorized(String),
+
     /// Any error code this crate does not model; preserved verbatim.
     #[error("error {code}: {message}")]
     Other {
@@ -112,6 +118,7 @@ impl ProtocolError {
             Self::AmbiguousEdit { .. } => codes::AMBIGUOUS_EDIT,
             Self::TooLarge { .. } => codes::TOO_LARGE,
             Self::Unimplemented(_) => codes::UNIMPLEMENTED,
+            Self::Unauthorized(_) => codes::UNAUTHORIZED,
             Self::Other { code, .. } => *code,
         }
     }
@@ -128,7 +135,8 @@ impl ProtocolError {
             | Self::ExecutionFailed(d)
             | Self::PathNotAllowed(d)
             | Self::NotFound(d)
-            | Self::Unimplemented(d) => Some(json!({ "detail": d })),
+            | Self::Unimplemented(d)
+            | Self::Unauthorized(d) => Some(json!({ "detail": d })),
             Self::TimedOut { timeout_ms } => Some(json!({ "timeout_ms": timeout_ms })),
             Self::AmbiguousEdit { path, occurrences } => {
                 Some(json!({ "path": path, "occurrences": occurrences }))
@@ -175,6 +183,7 @@ impl ProtocolError {
             codes::PATH_NOT_ALLOWED => Some(Self::PathNotAllowed(detail())),
             codes::NOT_FOUND => Some(Self::NotFound(detail())),
             codes::UNIMPLEMENTED => Some(Self::Unimplemented(detail())),
+            codes::UNAUTHORIZED => Some(Self::Unauthorized(detail())),
             codes::TIMED_OUT => {
                 u64_field("timeout_ms").map(|timeout_ms| Self::TimedOut { timeout_ms })
             }
