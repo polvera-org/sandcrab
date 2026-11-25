@@ -1,0 +1,121 @@
+# CI for the Rust workspace: fmt, clippy + unit tests on Linux x86_64 / Linux arm64 / macOS arm64,
+# and the static musl `crabd` build. GitHub-hosted runners only (free for public repos).
+#
+# `cargo test` here runs the non-ignored tests only. The `#[ignore]`d e2e tests need Docker images,
+# a static crabd, KVM or libkrun and belong in a separate e2e workflow.
+name: CI
+
+on:
+  pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+  push:
+    branches: [main]
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Cancel superseded PR runs; let every push to main finish.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # rustup ships on GitHub-hosted runners; `rustup toolchain install` with no argument installs
+      # what rust-toolchain.toml pins (stable + rustfmt + clippy).
+      - name: Install Rust toolchain
+        run: rustup toolchain install && rustc --version
+      - run: cargo fmt --all -- --check
+
+  check:
+    name: clippy + test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # rustup ships on GitHub-hosted runners; `rustup toolchain install` with no argument installs
+      # what rust-toolchain.toml pins (stable + rustfmt + clippy).
+      - name: Install Rust toolchain
+        run: rustup toolchain install && rustc --version
+      # e2fsprogs (mke2fs, debugfs) and fakeroot: the rootfs / Firecracker workspace image tests and
+      # the fake-VMM suite skip themselves without them, so install them to actually run those tests.
+      - name: Install system tools (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends e2fsprogs fakeroot
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: check-${{ matrix.os }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
+
+  crabd-musl:
+    name: crabd static musl (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # rustup ships on GitHub-hosted runners; `rustup toolchain install` with no argument installs
+      # what rust-toolchain.toml pins (stable + rustfmt + clippy).
+      - name: Install Rust toolchain
+        run: rustup toolchain install && rustc --version
+      - name: Add musl target
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: rustup target add "$ARCH-unknown-linux-musl"
+      - name: Install musl-tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: crabd-musl-${{ matrix.arch }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Build static crabd
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: scripts/build-crabd.sh "$ARCH"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: crabd-${{ matrix.arch }}-linux-musl
+          path: |
+            target/${{ matrix.arch }}-unknown-linux-musl/release/crabd
+            target/${{ matrix.arch }}-unknown-linux-musl/release/crabd.sha256
+          retention-days: 3
+          if-no-files-found: error
