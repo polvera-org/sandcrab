@@ -18,6 +18,9 @@
 //! `$CARGO_TARGET_DIR/<arch>-unknown-linux-musl/release/crabd`, else the repo's `target/`.
 //! The helper, libraries and rootfs cache are the real `$SANDCRAB_HOME` ones (slow to build);
 //! run dirs and workspaces are private to each test.
+//!
+//! The `userspace_*` network tests also need the pinned netstack (`sandcrab libkrun install`:
+//! gvproxy on macOS, passt on Linux via `scripts/fetch-libkrun.sh`) and internet access.
 
 use std::io::Read;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
@@ -59,7 +62,7 @@ struct Env {
     docs: PathBuf,
 }
 
-fn config(tmp: &Path, tsi: bool) -> (LibkrunConfig, KrunLibs) {
+fn config(tmp: &Path, tsi: bool, netstack: bool) -> (LibkrunConfig, KrunLibs) {
     let home = sandcrab_rootfs::sandcrab_home().unwrap();
     let mut cfg = LibkrunConfig::with_home(&home, crabd());
     cfg.run_dir = tmp.join("run");
@@ -70,9 +73,15 @@ fn config(tmp: &Path, tsi: bool) -> (LibkrunConfig, KrunLibs) {
         path: p.path,
         sha256: p.sha256,
     };
+    let netstack = netstack.then(|| {
+        sandcrab_backend_libkrun::netstack_pins::resolve_config(&cfg)
+            .expect("netstack install verifies")
+            .expect("pinned netstack (`sandcrab libkrun install`)")
+    });
     let libs = KrunLibs {
         libkrun: pin(a.libkrun),
         libkrunfw: pin(a.libkrunfw),
+        netstack,
     };
     (cfg, libs)
 }
@@ -86,12 +95,21 @@ fn env_with(tsi: bool) -> Env {
 }
 
 fn env_cfg(tsi: bool, tweak: impl FnOnce(&mut LibkrunConfig)) -> Env {
+    env_full(tsi, false, tweak)
+}
+
+/// With the pinned userspace netstack (network `unrestricted` → `userspace`).
+fn env_net() -> Env {
+    env_full(false, true, |_| {})
+}
+
+fn env_full(tsi: bool, netstack: bool, tweak: impl FnOnce(&mut LibkrunConfig)) -> Env {
     // Keep the run dir short: socket paths must fit in 104 bytes on macOS.
     let tmp = tempfile::Builder::new()
         .prefix("sclk")
         .tempdir_in("/tmp")
         .unwrap();
-    let (mut cfg, libs) = config(tmp.path(), tsi);
+    let (mut cfg, libs) = config(tmp.path(), tsi, netstack);
     tweak(&mut cfg);
     let backend = Arc::new(LibkrunBackend::new(cfg, libs).unwrap());
     let workspaces = WorkspaceRegistry::open(tmp.path().join("state")).unwrap();
@@ -626,7 +644,7 @@ async fn policy_rejections_leave_nothing_behind() {
         .await
         .unwrap_err();
     assert!(matches!(err, SandboxError::PolicyUnenforceable(_)), "{err}");
-    assert!(err.to_string().contains("allow_tsi_unrestricted"), "{err}");
+    assert!(err.to_string().contains("libkrun install"), "{err}");
     let err = env
         .manager
         .spawn(
@@ -656,6 +674,260 @@ async fn policy_rejections_leave_nothing_behind() {
         .unwrap();
     sb.destroy().await.unwrap();
     assert!(leftovers(&env).is_empty());
+}
+
+/// No netstack (passt / gvproxy) process of this user is left.
+/// Matches only this test home's netstack install (other users of the host have their own).
+fn netstack_pattern() -> String {
+    let home = sandcrab_rootfs::sandcrab_home().unwrap();
+    let dir = LibkrunConfig::with_home(&home, crabd())
+        .netstack_dir
+        .expect("a netstack pin for this host");
+    let escaped: String = dir
+        .to_string_lossy()
+        .chars()
+        .flat_map(|c| {
+            let esc = "\\.^$*+?()[]{}|".contains(c);
+            esc.then_some('\\').into_iter().chain(std::iter::once(c))
+        })
+        .collect();
+    format!("^{escaped}/")
+}
+
+fn netstacks_now() -> String {
+    let out = std::process::Command::new("pgrep")
+        .args(["-f", "-U"])
+        .arg(rustix::process::getuid().as_raw().to_string())
+        .arg(netstack_pattern())
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+fn no_netstack_left() -> bool {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let out = netstacks_now();
+        if out.is_empty() {
+            return true;
+        }
+        if Instant::now() > deadline {
+            eprintln!("netstacks left: {out}");
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Nonblocking TCP listener; `None` if the address cannot be bound (e.g. no IPv6).
+fn listen(ip: IpAddr) -> Option<TcpListener> {
+    let l = TcpListener::bind((ip, 0)).ok()?;
+    l.set_nonblocking(true).unwrap();
+    Some(l)
+}
+
+/// Every connection the listeners accepted so far (and drains them).
+fn accepted(listeners: &[&TcpListener]) -> Vec<String> {
+    let mut hits = Vec::new();
+    for l in listeners {
+        while let Ok((mut s, peer)) = l.accept() {
+            let mut b = Vec::new();
+            let _ = s.read_to_end(&mut b);
+            hits.push(format!(
+                "{} <- {peer}: {:?}",
+                l.local_addr().unwrap(),
+                String::from_utf8_lossy(&b)
+            ));
+        }
+    }
+    hits
+}
+
+/// Network `unrestricted` on the userspace netstack (design §9 Phase B):
+/// - the guest has `eth0` (DHCP) and reaches the internet (DNS + TCP 443);
+/// - regression: host loopback is unreachable — a listener bound only to 127.0.0.1 (and
+///   ::1), probed at every address a netstack maps to the host (gvproxy's NAT alias
+///   192.168.127.254, the gateway 192.168.127.1), the host's own LAN address and a 0.0.0.0
+///   listener there; the gateway serves nothing but DNS (gvproxy's HTTP API on :80 is
+///   filtered); metadata and SMTP are denied;
+/// - the netstack dies with the VM.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "real libkrun + pinned netstack + internet: signed helper, pinned sandcrab/base:0.1.0, static crabd"]
+async fn userspace_network_reaches_internet_not_the_host() {
+    let env = env_net();
+    let lo4 = listen(IpAddr::V4(Ipv4Addr::LOCALHOST)).unwrap();
+    let lo6 = listen(IpAddr::V6(std::net::Ipv6Addr::LOCALHOST));
+    let any = listen(IpAddr::V4(Ipv4Addr::UNSPECIFIED)).unwrap();
+    let lan = host_lan_ip();
+    let lan_l = lan.and_then(listen);
+    let lo4_port = lo4.local_addr().unwrap().port();
+    let any_port = any.local_addr().unwrap().port();
+
+    let t = Instant::now();
+    let sb = env
+        .manager
+        .spawn(SandboxConfig::from_template("base").network(NetworkConfig::unrestricted()))
+        .await
+        .unwrap();
+    println!(
+        "TIMING userspace spawn {:.0} ms",
+        t.elapsed().as_secs_f64() * 1e3
+    );
+
+    // eth0 is up with the DHCP lease, default route via the gateway, DNS at the gateway.
+    let r = bash(&sb, &format!("{NET_STATE}; cat /etc/resolv.conf")).await;
+    println!("NET_STATE userspace:\n{}", r.stdout);
+    assert!(r.stdout.contains("addr 192.168.127.2"), "{}", r.stdout);
+    assert!(r.stdout.contains("route eth0"), "{}", r.stdout);
+    assert!(
+        r.stdout.contains("nameserver 192.168.127.1"),
+        "{}",
+        r.stdout
+    );
+    // IPv6: at most the kernel's link-local address; the egress filter drops every IPv6
+    // frame, so no global address or route ever appears.
+    let v6 = bash(
+        &sb,
+        "awk '$6 == \"eth0\" && $1 !~ /^fe80/' /proc/net/if_inet6; \
+         awk '$10 == \"eth0\" && $1 !~ /^(fe80|ff)/' /proc/net/ipv6_route",
+    )
+    .await;
+    assert_eq!(v6.stdout.trim(), "", "IPv6 beyond link-local on eth0");
+
+    // (a) Internet: DNS + HTTPS.
+    let r = bash_t(
+        &sb,
+        "getent hosts example.com && curl -sS -o /dev/null -w 'HTTP %{http_code}\\n' \
+         --max-time 20 https://example.com/; echo rc=$?",
+        Some(40_000),
+    )
+    .await;
+    println!("PROBE internet: {}", r.stdout.trim());
+    assert!(
+        r.stdout.contains("HTTP 200") && r.stdout.contains("rc=0"),
+        "{r:?}"
+    );
+
+    // (b) Host loopback, the host itself, the gateway's other services, metadata, SMTP.
+    let mut probes: Vec<(String, u16)> = Vec::new();
+    for ip in ["192.168.127.254", "192.168.127.1", "10.0.2.2", "127.0.0.1"] {
+        probes.push((ip.into(), lo4_port));
+        probes.push((ip.into(), any_port));
+    }
+    probes.push(("192.168.127.1".into(), 80)); // gvproxy's API
+    probes.push(("192.168.127.1".into(), 22)); // gvproxy SSH forward (disabled anyway)
+    probes.push(("169.254.169.254".into(), 80)); // cloud metadata
+    if let Some(ip) = lan {
+        probes.push((ip.to_string(), any_port));
+        if let Some(l) = &lan_l {
+            probes.push((ip.to_string(), l.local_addr().unwrap().port()));
+        }
+    } else {
+        println!("PROBE no LAN address on this host: LAN checks skipped");
+    }
+    let script: String = probes
+        .iter()
+        .map(|(ip, port)| {
+            format!(
+                "(timeout 3 bash -c 'echo probe > /dev/tcp/{ip}/{port}' 2>/dev/null \
+                 && echo 'OPEN {ip}:{port}' || echo 'closed {ip}:{port}') & "
+            )
+        })
+        .collect::<String>()
+        + "wait";
+    let r = bash_t(&sb, &script, Some(30_000)).await;
+    println!("PROBE host isolation:\n{}", r.stdout.trim());
+    // 127.0.0.1 inside the guest is the guest's own loopback: nothing listens there.
+    assert!(
+        !r.stdout.contains("OPEN"),
+        "guest reached a host service:\n{}",
+        r.stdout
+    );
+    assert_eq!(
+        r.stdout.lines().filter(|l| l.starts_with("closed")).count(),
+        probes.len()
+    );
+    // DNS on the gateway is the one service it offers.
+    let r = bash(
+        &sb,
+        "timeout 5 getent hosts example.org >/dev/null; echo rc=$?",
+    )
+    .await;
+    assert!(r.stdout.contains("rc=0"), "{r:?}");
+    // SMTP submission is denied even to the public internet.
+    let r = bash(
+        &sb,
+        "timeout 5 bash -c 'echo > /dev/tcp/smtp.gmail.com/587' 2>/dev/null; echo rc=$?",
+    )
+    .await;
+    println!("PROBE smtp: {}", r.stdout.trim());
+    assert!(!r.stdout.contains("rc=0"), "SMTP reachable: {r:?}");
+
+    let mut ls = vec![&lo4, &any];
+    ls.extend(lo6.as_ref());
+    ls.extend(lan_l.as_ref());
+    let hits = accepted(&ls);
+    assert!(hits.is_empty(), "host listeners were reached: {hits:#?}");
+    println!(
+        "PROBE host listeners untouched: 127.0.0.1:{lo4_port}, 0.0.0.0:{any_port}{}{}",
+        lo6.as_ref()
+            .map(|l| format!(", {}", l.local_addr().unwrap()))
+            .unwrap_or_default(),
+        lan_l
+            .as_ref()
+            .map(|l| format!(", {}", l.local_addr().unwrap()))
+            .unwrap_or_default()
+    );
+
+    sb.destroy().await.unwrap();
+    assert!(leftovers(&env).is_empty());
+    assert!(no_helper_left());
+    assert!(no_netstack_left(), "the netstack outlived its VM");
+}
+
+/// (c) With the netstack installed, network `disabled` still has no NIC and spawns no
+/// netstack; killing the helper takes the netstack down with it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "real libkrun + pinned netstack: signed helper, pinned sandcrab/base:0.1.0, static crabd"]
+async fn userspace_disabled_has_no_nic_and_netstack_dies_with_helper() {
+    let env = env_net();
+    let sb = env
+        .manager
+        .spawn(SandboxConfig::from_template("base"))
+        .await
+        .unwrap();
+    assert_loopback_only(&sb).await;
+    assert!(no_netstack_left(), "`disabled` spawned a netstack");
+    sb.destroy().await.unwrap();
+
+    let sb = env
+        .manager
+        .spawn(SandboxConfig::from_template("base").network(NetworkConfig::unrestricted()))
+        .await
+        .unwrap();
+    assert!(!no_netstack_left_now(), "no netstack for `unrestricted`");
+    // SIGKILL this sandbox's helper only (its pid from the run dir's meta.json; never a
+    // pattern kill on a shared host): no cleanup code runs, the netstack must exit on its own.
+    let meta = sandcrab_backend_libkrun::reap::RunMeta::load(
+        &env.tmp.path().join("run").join(sb.id().to_string()),
+    )
+    .unwrap();
+    let helper = meta.helper.expect("helper pid in meta.json").pid;
+    rustix::process::kill_process(
+        rustix::process::Pid::from_raw(helper as i32).unwrap(),
+        rustix::process::Signal::KILL,
+    )
+    .unwrap();
+    assert!(
+        no_netstack_left(),
+        "the netstack outlived a SIGKILLed helper"
+    );
+    let _ = sb.destroy().await;
+    assert!(no_helper_left());
+}
+
+fn no_netstack_left_now() -> bool {
+    netstacks_now().is_empty()
 }
 
 /// Linux: with `$SANDCRAB_LIBKRUN_CGROUP` (a delegated cgroup v2 parent; the test process must

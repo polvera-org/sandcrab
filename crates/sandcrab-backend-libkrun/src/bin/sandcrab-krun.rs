@@ -14,6 +14,8 @@
 //!    verify → open race (§8).
 //!    Stale sockets at the vsock UDS paths (from a SIGKILLed run) are removed (70 if the
 //!    path is something else).
+//!    Network `userspace`: verify the pinned netstack's SHA-256 (71), spawn it on a
+//!    socketpair behind the egress filter threads ([`netstack`]; 76 if it cannot start).
 //! 4. Apply the [`ffi::plan`] (each `krun_*` call is logged to stderr first; 73 on failure).
 //! 5. `krun_start_enter`: never returns on success (libkrun `exit()`s with the guest's
 //!    status); returning is 75.
@@ -21,13 +23,18 @@
 //! stdout/stderr belong to the caller (the backend points them at `vmm.log`).
 
 use std::io::{ErrorKind, Read};
-use std::os::fd::{AsFd, AsRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, IntoRawFd, OwnedFd};
 use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use sandcrab_backend_libkrun::ffi::{self, FfiError, Krun, KrunCall};
-use sandcrab_backend_libkrun::helper_proto::{HelperConfig, VirtioFsShare, exit_code};
+use sandcrab_backend_libkrun::helper_proto::{
+    HelperConfig, HelperNetwork, VirtioFsShare, exit_code,
+};
+use sandcrab_backend_libkrun::netstack::{self, EgressPolicy};
 
 fn log(msg: impl std::fmt::Display) {
     eprintln!("sandcrab-krun: {msg}");
@@ -90,6 +97,12 @@ fn run() -> Fail {
         Ok(r) => r,
         Err(f) => return f,
     };
+    // `userspace` networking: the pinned netstack behind the egress filter. Its socket goes
+    // to libkrun in the `krun_add_net_unixstream` call below.
+    let mut nic = match start_netstack(&cfg, &krun) {
+        Ok(fd) => fd,
+        Err(f) => return f,
+    };
 
     let config_err = |e: FfiError| Fail::new(exit_code::LIBKRUN_CONFIG, e);
     log(format_args!("krun_set_log_level({})", cfg.log_level));
@@ -120,6 +133,13 @@ fn run() -> Fail {
                 return Fail::new(exit_code::LIBKRUN_CONFIG, "virtio-fs plan/config mismatch");
             };
             *path = root.share_path();
+        }
+        if let KrunCall::AddNetUnixstream { fd, .. } = &mut call {
+            let Some(sock) = nic.take() else {
+                return Fail::new(exit_code::LIBKRUN_CONFIG, "NIC planned without a netstack");
+            };
+            // libkrun owns the socket from here on (it is never closed by us).
+            *fd = sock.into_raw_fd();
         }
         log(&call);
         if let Err(e) = ctx.apply(&call) {
@@ -318,6 +338,86 @@ fn clear_stale_sockets(cfg: &HelperConfig) -> Result<(), Fail> {
         }
     }
     Ok(())
+}
+
+/// `userspace` networking (design §9 Phase B): verify the pinned netstack, spawn it on a
+/// socketpair and start the egress filter threads. Returns the guest end of the NIC socket
+/// (for `krun_add_net_unixstream`), or `None` for any other network mode.
+///
+/// The netstack runs as this (unprivileged) user, with an empty environment, in our process
+/// group (and, on Linux, our cgroup leaf). It holds no listening socket: its only channel is
+/// the socketpair, so it exits on EOF when this process dies, however it dies. A watcher
+/// thread reaps it and logs its exit.
+fn start_netstack(cfg: &HelperConfig, krun: &Krun) -> Result<Option<OwnedFd>, Fail> {
+    if cfg.network != HelperNetwork::Userspace {
+        return Ok(None);
+    }
+    let Some(spec) = &cfg.netstack else {
+        return Err(Fail::new(
+            exit_code::CONFIG_INVALID,
+            "network `userspace` without a netstack",
+        ));
+    };
+    if !krun.has_net() {
+        return Err(Fail::new(
+            exit_code::LIBKRUN_LOAD,
+            format!(
+                "this libkrun lacks {} (built without the `net` feature): reinstall it with \
+                 scripts/fetch-libkrun.sh",
+                ffi::ADD_NET_UNIXSTREAM
+            ),
+        ));
+    }
+    let bin = &spec.binary;
+    let t = Instant::now();
+    match ffi::verify_sha256(&bin.path, &bin.sha256) {
+        Ok(()) => log(format_args!(
+            "{} sha256 ok ({} ms)",
+            spec.kind,
+            t.elapsed().as_millis()
+        )),
+        Err(e @ FfiError::ShaMismatch { .. }) => {
+            return Err(Fail::new(exit_code::PIN_MISMATCH, e));
+        }
+        Err(e) => return Err(Fail::new(exit_code::NETSTACK_START, e)),
+    }
+    let policy = EgressPolicy::new(&spec.deny);
+    let host: Vec<String> = spec.deny.iter().map(ToString::to_string).collect();
+    log(format_args!(
+        "net: guest {}/{} gw+dns {} via {}; egress denied to {} built-in ranges + host [{}], \
+         SMTP {:?}",
+        netstack::GUEST_IP,
+        netstack::SUBNET_PREFIX,
+        netstack::GATEWAY_IP,
+        spec.kind,
+        netstack::ALWAYS_DENIED.len(),
+        host.join(", "),
+        netstack::SMTP_PORTS
+    ));
+    let logger: Arc<dyn Fn(String) + Send + Sync> = Arc::new(|m: String| log(m));
+    let started = netstack::start(spec.kind, &bin.path, policy, logger).map_err(|e| {
+        Fail::new(
+            exit_code::NETSTACK_START,
+            format!("spawning {} `{}`: {e}", spec.kind, bin.path.display()),
+        )
+    })?;
+    let mut child = started.child;
+    log(format_args!("{} started (pid {})", spec.kind, child.id()));
+    let (kind, stats) = (spec.kind, started.stats);
+    std::thread::Builder::new()
+        .name("netstack-wait".into())
+        .spawn(move || {
+            let status = child.wait();
+            log(format_args!(
+                "net: {kind} exited ({}); frames to netstack {}, to guest {}, dropped {}",
+                status.map_or_else(|e| e.to_string(), |s| s.to_string()),
+                stats.to_netstack.load(Ordering::Relaxed),
+                stats.to_guest.load(Ordering::Relaxed),
+                stats.dropped.load(Ordering::Relaxed)
+            ));
+        })
+        .map_err(|e| Fail::new(exit_code::NETSTACK_START, e))?;
+    Ok(Some(started.guest_fd))
 }
 
 /// A workspace root opened `O_DIRECTORY | O_NOFOLLOW` and checked against its lease identity.

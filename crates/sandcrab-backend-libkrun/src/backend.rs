@@ -17,9 +17,10 @@ use sandcrab_protocol::init::{InitConfig, InitUser};
 use crate::config::{LibkrunConfig, RootfsSource};
 use crate::helper_proto::{
     DiskSpec, GuestExec, HELPER_PROTO_VERSION, HelperConfig, HelperNetwork, MAX_MEMORY_MIB,
-    MIN_MEMORY_MIB, PinnedFile, ROOT_DRIVE_ID, SCRATCH_DRIVE_ID, TOOLS_PORT,
+    MIN_MEMORY_MIB, NetstackSpec, PinnedFile, ROOT_DRIVE_ID, SCRATCH_DRIVE_ID, TOOLS_PORT,
 };
 use crate::net::{self, NetOptions};
+use crate::netstack::{self, NetstackKind};
 use crate::ports;
 use crate::reap::{self, ReapReport};
 use crate::vm::{BACKEND, KrunSandbox, KrunVm, Launch, SCRATCH_FILE, krun_err, scratch_disk};
@@ -47,13 +48,24 @@ pub const TSI_DNS: [IpAddr; 2] = [
     IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)),
 ];
 
-/// The libkrun + libkrunfw files handed to the helper, each pinned by SHA-256. The helper
-/// hashes both again before `dlopen`. Build it from the pinned artifacts (`artifacts.rs`) or,
-/// for a `lib_dir` override, with [`KrunLibs::hash_files`].
+/// The libkrun + libkrunfw files handed to the helper, each pinned by SHA-256, plus the
+/// optional pinned userspace netstack. The helper hashes them again before `dlopen` / spawn.
+/// Build it from the pinned artifacts (`artifacts.rs`) or, for a `lib_dir` override, with
+/// [`KrunLibs::hash_files`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KrunLibs {
     pub libkrun: PinnedFile,
     pub libkrunfw: PinnedFile,
+    /// passt (Linux) / gvproxy (macOS) for `network.policy = unrestricted` (design §9 Phase
+    /// B). `None` = not installed: `unrestricted` is then `PolicyUnenforceable`.
+    pub netstack: Option<NetstackBin>,
+}
+
+/// A pinned userspace netstack executable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetstackBin {
+    pub kind: NetstackKind,
+    pub binary: PinnedFile,
 }
 
 impl KrunLibs {
@@ -70,6 +82,7 @@ impl KrunLibs {
         Ok(Self {
             libkrun: pin(libkrun)?,
             libkrunfw: pin(libkrunfw)?,
+            netstack: None,
         })
     }
 
@@ -79,9 +92,10 @@ impl KrunLibs {
         self.libkrunfw.path.parent().unwrap_or(Path::new("/"))
     }
 
-    /// Both files exist; with `verify`, both match their pins.
+    /// Every file exists; with `verify`, each matches its pin.
     pub fn check(&self, verify: bool) -> Result<()> {
-        for f in [&self.libkrun, &self.libkrunfw] {
+        let netstack = self.netstack.as_ref().map(|n| &n.binary);
+        for f in [&self.libkrun, &self.libkrunfw].into_iter().chain(netstack) {
             if !f.path.is_absolute() || !f.path.is_file() {
                 return Err(SandboxError::InvalidConfig(format!(
                     "libkrun library `{}` not found (install the pinned artifacts with \
@@ -181,6 +195,7 @@ impl LibkrunBackend {
     fn net_options(&self) -> NetOptions {
         NetOptions {
             allow_tsi_unrestricted: self.config.allow_tsi_unrestricted,
+            userspace: self.libs.netstack.as_ref().map(|n| n.kind),
         }
     }
 
@@ -278,6 +293,17 @@ impl LibkrunBackend {
         let plan = workspace::plan_mounts(&spec.mounts)?;
         t.mark_custom("ws_attach_done");
 
+        let netstack = match (network, &self.libs.netstack) {
+            (HelperNetwork::Userspace, Some(ns)) => Some(NetstackSpec {
+                kind: ns.kind,
+                binary: ns.binary.clone(),
+                // The host's own addresses and on-link subnets, now (design §9).
+                deny: netstack::host_prefixes()
+                    .map_err(|e| krun_err("listing host addresses (getifaddrs)", e))?,
+            }),
+            _ => None,
+        };
+
         let helper_cfg = build_helper_config(&HelperInputs {
             libs: &self.libs,
             vcpus,
@@ -289,6 +315,7 @@ impl LibkrunBackend {
             control_socket: vm.control_socket(),
             tools_socket: vm.tools_socket(),
             network,
+            netstack,
         });
         let line = helper_cfg
             .to_line()
@@ -364,6 +391,7 @@ pub(crate) struct HelperInputs<'a> {
     pub control_socket: PathBuf,
     pub tools_socket: PathBuf,
     pub network: HelperNetwork,
+    pub netstack: Option<NetstackSpec>,
 }
 
 /// The helper's whole VM description. Validated by `HelperConfig::to_line` before it is sent.
@@ -387,6 +415,7 @@ pub(crate) fn build_helper_config(i: &HelperInputs<'_>) -> HelperConfig {
         control_socket: i.control_socket.clone(),
         tools_socket: i.tools_socket.clone(),
         network: i.network,
+        netstack: i.netstack.clone(),
         // Fixed `crabd init` argv/env: everything else goes over `init.configure` (design §6).
         exec: GuestExec::default(),
         log_level: i.config.log_level,
@@ -400,7 +429,12 @@ pub(crate) fn init_config(
     plan: &MountPlan,
     network: HelperNetwork,
 ) -> InitConfig {
-    let tsi = network == HelperNetwork::TsiUnrestricted;
+    let (nic, dns) = match network {
+        HelperNetwork::Disabled => (false, Vec::new()),
+        HelperNetwork::TsiUnrestricted => (true, TSI_DNS.to_vec()),
+        // eth0 is configured by `init.krun`'s DHCP client; the netstack resolves on the gateway.
+        HelperNetwork::Userspace => (true, vec![IpAddr::V4(netstack::GATEWAY_IP)]),
+    };
     InitConfig {
         sandbox_id: spec.id.to_string(),
         hostname: format!("sc-{}", &spec.id.to_string()[..8]),
@@ -413,8 +447,8 @@ pub(crate) fn init_config(
         env: spec.env.clone(),
         default_cwd: spec.default_cwd.clone(),
         mounts: plan.guest_mounts.clone(),
-        network: tsi,
-        dns: if tsi { TSI_DNS.to_vec() } else { Vec::new() },
+        network: nic,
+        dns,
         tools_port: TOOLS_PORT,
         host_time_unix_ms: crate::vm::unix_ms(),
     }
@@ -593,6 +627,20 @@ image = "sandcrab/base:0.1.0"
                 path: "/h/.sandcrab/artifacts/libkrun/1.19.8/libkrunfw.5.dylib".into(),
                 sha256: SHA.into(),
             },
+            netstack: None,
+        }
+    }
+
+    fn libs_with_netstack() -> KrunLibs {
+        KrunLibs {
+            netstack: Some(NetstackBin {
+                kind: NetstackKind::Gvproxy,
+                binary: PinnedFile {
+                    path: "/h/.sandcrab/artifacts/libkrun-net/gvproxy-0.9.0/gvproxy".into(),
+                    sha256: SHA.into(),
+                },
+            }),
+            ..libs()
         }
     }
 
@@ -659,11 +707,24 @@ image = "sandcrab/base:0.1.0"
     }
 
     #[test]
-    fn policy_matrix_follows_the_tsi_flag() {
+    fn policy_matrix_follows_the_netstack_and_the_tsi_flag() {
         let b = backend(config());
         assert!(b.enforces_network_policy(&NetworkConfig::disabled()));
         assert!(!b.enforces_network_policy(&NetworkConfig::unrestricted()));
+        let hint = b
+            .network_policy_hint(&NetworkConfig::unrestricted())
+            .unwrap();
+        assert!(hint.contains("libkrun install"), "{hint}");
         assert!(!b.enforces_network_policy(&NetworkConfig::egress_restricted(["a.com"])));
+
+        let b = LibkrunBackend::new_unchecked(config(), libs_with_netstack()).unwrap();
+        assert!(b.enforces_network_policy(&NetworkConfig::unrestricted()));
+        assert!(
+            b.network_policy_hint(&NetworkConfig::unrestricted())
+                .is_none()
+        );
+        assert!(!b.enforces_network_policy(&NetworkConfig::egress_restricted(["a.com"])));
+
         let mut cfg = config();
         cfg.allow_tsi_unrestricted = true;
         let b = backend(cfg);
@@ -747,6 +808,7 @@ image = "sandcrab/base:0.1.0"
             control_socket: run.join("ctl.sock"),
             tools_socket: run.join("v.sock"),
             network: HelperNetwork::Disabled,
+            netstack: None,
         }
     }
 
@@ -781,6 +843,28 @@ image = "sandcrab/base:0.1.0"
         i.network = HelperNetwork::TsiUnrestricted;
         let h = build_helper_config(&i);
         assert_eq!(h.network, HelperNetwork::TsiUnrestricted);
+        assert!(h.netstack.is_none());
+        h.validate().unwrap();
+    }
+
+    #[test]
+    fn helper_config_carries_the_netstack_for_userspace() {
+        let (cfg, libs, plan) = (config(), libs_with_netstack(), plan());
+        let mut i = inputs(&cfg, &libs, &plan);
+        i.network = HelperNetwork::Userspace;
+        i.netstack = Some(NetstackSpec {
+            kind: NetstackKind::Gvproxy,
+            binary: libs.netstack.clone().unwrap().binary,
+            deny: vec!["203.0.113.9/32".parse().unwrap()],
+        });
+        let h = build_helper_config(&i);
+        h.validate().unwrap();
+        let ns = h.netstack.as_ref().unwrap();
+        assert_eq!(ns.kind, NetstackKind::Gvproxy);
+        assert_eq!(ns.deny.len(), 1);
+        // `userspace` without a netstack never validates (no silent TSI, no NIC-less VM).
+        i.netstack = None;
+        assert!(build_helper_config(&i).validate().is_err());
     }
 
     #[test]
@@ -810,6 +894,9 @@ image = "sandcrab/base:0.1.0"
         let c = init_config(&s, user, &p, HelperNetwork::TsiUnrestricted);
         assert!(c.network);
         assert_eq!(c.dns, TSI_DNS);
+        let c = init_config(&s, user, &p, HelperNetwork::Userspace);
+        assert!(c.network);
+        assert_eq!(c.dns, [IpAddr::V4(netstack::GATEWAY_IP)]);
     }
 
     #[test]
@@ -821,8 +908,25 @@ image = "sandcrab/base:0.1.0"
         );
         std::fs::write(&a, "krun").unwrap();
         std::fs::write(&b, "krunfw").unwrap();
-        let libs = KrunLibs::hash_files(&a, &b).unwrap();
+        let mut libs = KrunLibs::hash_files(&a, &b).unwrap();
+        assert!(libs.netstack.is_none());
         libs.check(true).unwrap();
+        let ns = tmp.path().join("passt");
+        std::fs::write(&ns, "passt").unwrap();
+        libs.netstack = Some(NetstackBin {
+            kind: NetstackKind::Passt,
+            binary: PinnedFile {
+                path: ns.clone(),
+                sha256: sandcrab_rootfs::hash::sha256_file(&ns).unwrap(),
+            },
+        });
+        libs.check(true).unwrap();
+        std::fs::write(&ns, "evil").unwrap();
+        assert!(matches!(
+            libs.check(true).unwrap_err(),
+            SandboxError::DigestMismatch { .. }
+        ));
+        libs.netstack = None;
         assert_eq!(libs.libkrunfw_dir(), tmp.path());
         std::fs::write(&b, "tampered").unwrap();
         assert!(matches!(

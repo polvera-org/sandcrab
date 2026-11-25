@@ -1,4 +1,4 @@
-//! Network policy → vsock / TSI / port-map decisions (design §9).
+//! Network policy → vsock / TSI / NIC decisions (design §9).
 //!
 //! TSI is **never** enabled implicitly: it hands the guest the host's loopback and
 //! auto-publishes guest listeners on the host wildcard address. The helper always sets an
@@ -7,22 +7,28 @@
 //! | `network.policy` | outcome |
 //! |---|---|
 //! | `disabled` | [`HelperNetwork::Disabled`]: TSI off (`disable_implicit_vsock` + `add_vsock(0)`), no NIC |
-//! | `unrestricted` | `PolicyUnenforceable`, unless [`LibkrunConfig::allow_tsi_unrestricted`](crate::LibkrunConfig::allow_tsi_unrestricted) → [`HelperNetwork::TsiUnrestricted`] (**the guest can reach host loopback services**) |
+//! | `unrestricted` | [`HelperNetwork::Userspace`] when the pinned netstack is installed (passt / gvproxy behind the helper's egress filter, [`crate::netstack`]); [`HelperNetwork::TsiUnrestricted`] only with the deprecated [`LibkrunConfig::allow_tsi_unrestricted`](crate::LibkrunConfig::allow_tsi_unrestricted) (**the guest can reach host loopback services**); otherwise `PolicyUnenforceable` |
 //! | `egress_restricted` | `PolicyUnenforceable` (no egress proxy before Phase 3) |
+//!
+//! The TSI opt-in, when given, wins over the netstack: an explicit operator choice is never
+//! silently replaced. A missing netstack never falls back to TSI.
 //!
 //! A domain allow-list is only meaningful with `egress_restricted`; on any other policy it is
 //! rejected rather than ignored. Published ports do not depend on the policy: they go through
-//! `tunnel.open` over vsock ([`crate::ports`]); TSI port mapping is never used.
+//! `tunnel.open` over vsock ([`crate::ports`]); neither TSI nor netstack port mapping is used.
 
 use sandcrab_core::{NetworkConfig, NetworkPolicy, Result, SandboxError};
 
 use crate::helper_proto::HelperNetwork;
+use crate::netstack::NetstackKind;
 
-/// What the operator explicitly allowed.
+/// What the operator explicitly allowed and what is installed.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct NetOptions {
-    /// `LibkrunConfig::allow_tsi_unrestricted`.
+    /// `LibkrunConfig::allow_tsi_unrestricted` (deprecated).
     pub allow_tsi_unrestricted: bool,
+    /// The pinned userspace netstack, if installed (`KrunLibs::netstack`).
+    pub userspace: Option<NetstackKind>,
 }
 
 /// Map a network policy to the helper's network mode, or explain why it cannot be enforced.
@@ -40,16 +46,18 @@ pub fn plan(network: &NetworkConfig, opts: NetOptions) -> Result<HelperNetwork> 
         NetworkPolicy::Unrestricted if opts.allow_tsi_unrestricted => {
             Ok(HelperNetwork::TsiUnrestricted)
         }
-        NetworkPolicy::Unrestricted => Err(SandboxError::PolicyUnenforceable(
-            "network policy `unrestricted` on libkrun needs a userspace network stack (Phase B). \
-             The only option today is TSI, which lets the guest reach services bound to the \
-             host's loopback; opt in explicitly with `LibkrunConfig::allow_tsi_unrestricted` \
-             (CLI `--libkrun-tsi`) if that is acceptable"
-                .into(),
-        )),
+        NetworkPolicy::Unrestricted if opts.userspace.is_some() => Ok(HelperNetwork::Userspace),
+        NetworkPolicy::Unrestricted => Err(SandboxError::PolicyUnenforceable(format!(
+            "network policy `unrestricted` on libkrun needs the pinned userspace network stack \
+             ({}), which is not installed: run `sandcrab libkrun install` (or \
+             scripts/fetch-libkrun.sh). TSI is never used implicitly (it lets the guest reach \
+             services bound to the host's loopback)",
+            NetstackKind::for_host().map_or("passt / gvproxy", NetstackKind::as_str)
+        ))),
         NetworkPolicy::EgressRestricted => Err(SandboxError::PolicyUnenforceable(format!(
             "network policy `egress_restricted` (allow-list of {} domain(s)) cannot be enforced \
-             on libkrun: there is no egress proxy before Phase 3; use `disabled`",
+             on libkrun: there is no egress proxy before Phase 3; use `disabled` or \
+             `unrestricted`",
             network.allow_domains.len()
         ))),
     }
@@ -67,43 +75,63 @@ mod tests {
 
     const OFF: NetOptions = NetOptions {
         allow_tsi_unrestricted: false,
+        userspace: None,
     };
     const TSI: NetOptions = NetOptions {
         allow_tsi_unrestricted: true,
+        userspace: None,
+    };
+    const NETSTACK: NetOptions = NetOptions {
+        allow_tsi_unrestricted: false,
+        userspace: Some(NetstackKind::Passt),
+    };
+    const BOTH: NetOptions = NetOptions {
+        allow_tsi_unrestricted: true,
+        userspace: Some(NetstackKind::Gvproxy),
     };
 
     #[test]
-    fn disabled_is_tsi_off() {
-        for opts in [OFF, TSI] {
+    fn disabled_is_tsi_off_and_nic_free() {
+        for opts in [OFF, TSI, NETSTACK, BOTH] {
             assert_eq!(
                 plan(&NetworkConfig::disabled(), opts).unwrap(),
                 HelperNetwork::Disabled,
-                "the TSI opt-in never changes `disabled`"
+                "neither the TSI opt-in nor the netstack changes `disabled`"
             );
         }
     }
 
     #[test]
-    fn unrestricted_needs_explicit_opt_in() {
+    fn unrestricted_uses_the_netstack_and_never_falls_back_to_tsi() {
+        assert_eq!(
+            plan(&NetworkConfig::unrestricted(), NETSTACK).unwrap(),
+            HelperNetwork::Userspace
+        );
+        assert!(enforces(&NetworkConfig::unrestricted(), NETSTACK));
+
         let err = plan(&NetworkConfig::unrestricted(), OFF).unwrap_err();
         assert!(matches!(err, SandboxError::PolicyUnenforceable(_)), "{err}");
         let msg = err.to_string();
         assert!(
-            msg.contains("loopback") && msg.contains("allow_tsi_unrestricted"),
+            msg.contains("libkrun install") && msg.contains("loopback"),
             "{msg}"
         );
         assert!(!enforces(&NetworkConfig::unrestricted(), OFF));
+    }
 
-        assert_eq!(
-            plan(&NetworkConfig::unrestricted(), TSI).unwrap(),
-            HelperNetwork::TsiUnrestricted
-        );
-        assert!(enforces(&NetworkConfig::unrestricted(), TSI));
+    #[test]
+    fn explicit_tsi_opt_in_still_works_and_wins() {
+        for opts in [TSI, BOTH] {
+            assert_eq!(
+                plan(&NetworkConfig::unrestricted(), opts).unwrap(),
+                HelperNetwork::TsiUnrestricted
+            );
+        }
     }
 
     #[test]
     fn egress_allow_list_is_unenforceable() {
-        for opts in [OFF, TSI] {
+        for opts in [OFF, TSI, NETSTACK, BOTH] {
             let net = NetworkConfig::egress_restricted(["example.com"]);
             let err = plan(&net, opts).unwrap_err();
             assert!(matches!(err, SandboxError::PolicyUnenforceable(_)), "{err}");
@@ -119,7 +147,7 @@ mod tests {
                 policy,
                 allow_domains: vec!["example.com".into()],
             };
-            let err = plan(&net, TSI).unwrap_err();
+            let err = plan(&net, BOTH).unwrap_err();
             assert!(matches!(err, SandboxError::InvalidConfig(_)), "{err}");
         }
     }

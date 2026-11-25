@@ -3,6 +3,7 @@
 #
 #   scripts/fetch-libkrun.sh [--from-source] [--fw-from-source] [--home <dir>]
 #                            [--workdir <dir>] [--keep-workdir] [--dry-run]
+#                            [--no-netstack | --netstack-only]
 #
 # macOS arm64, Homebrew present (default): copy the `libkrun`/`libkrunfw` bottle dylibs, verify
 #   their pinned SHA-256s, rewrite the libkrunfw copy's install id to its leaf name and re-sign
@@ -14,9 +15,16 @@
 #   prebuilt release asset, or with --fw-from-source a full kernel build. Build prereqs: Rust
 #   (cargo), make, gcc, git, curl, patchelf; for --fw-from-source also bc, bison, flex,
 #   libelf-dev, libssl-dev, python3-pyelftools, cpio, rsync.
+# Netstack (network `unrestricted`, design §9 Phase B), into
+#   <SANDCRAB_HOME>/artifacts/libkrun-net/<kind>-<version>/ with its own manifest.json:
+#   macOS: the pinned gvproxy release asset (SHA-256 checked, installed byte for byte);
+#   Linux: passt built statically (`make static`) from the pinned tag (commit-checked; needs
+#   gcc, make and the static glibc from libc6-dev). --no-netstack skips it, --netstack-only
+#   installs only it.
 # --dry-run prints every mutating/build step instead of running it.
 #
-# Pins mirror crates/sandcrab-backend-libkrun/src/artifacts.rs (a unit test keeps them in sync).
+# Pins mirror crates/sandcrab-backend-libkrun/src/artifacts.rs and netstack_pins.rs (unit
+# tests keep them in sync).
 # Writes manifest.json last; `Artifacts::resolve` checks it against the compiled-in pins.
 set -euo pipefail
 
@@ -48,11 +56,21 @@ LINUX_FW_MEMBER_SHA256="5ec9c03e97e2f6df7817b702eb8bfbc090b36c14186b33ddef4a2e9b
 # libkrunfw kernel source (its Makefile would curl this unverified; we pre-seed it)
 FW_KERNEL_SRC_URL="https://github.com/libkrun/linux/archive/refs/tags/v5.6.4-6.12.115.tar.gz"
 FW_KERNEL_SRC_SHA256="050fcea96b607e49f135f270472bc95346c172c9d6df5f9256aeb6f7972675d5"
+# Userspace netstacks (netstack_pins.rs)
+NETSTACK_MANIFEST_SCHEMA="1"
+GVPROXY_VERSION="0.9.0"
+GVPROXY_COMMIT="6dbb5d4fa0033356c72a201346f8350594229868"
+GVPROXY_URL="https://github.com/containers/gvisor-tap-vsock/releases/download/v0.9.0/gvproxy-darwin"
+GVPROXY_SHA256="e2a6825ba789fe588828b418c09aaf16525dec6d8cb2d16c94e72535dd4606be"
+PASST_VERSION="2026_10_02.cba3570"
+PASST_REPO="https://passt.top/passt"
+PASST_TAG="2026_10_02.cba3570"
+PASST_COMMIT="cba357068dc586e7540971eb40bb56c5e62c4de1"
 
 die() { echo "fetch-libkrun: error: $*" >&2; exit 1; }
 say() { echo "fetch-libkrun: $*" >&2; }
 
-from_source=0 fw_from_source=0 dry=0 keep=0 home="" workdir=""
+from_source=0 fw_from_source=0 dry=0 keep=0 home="" workdir="" netstack=1 netstack_only=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --from-source) from_source=1 ;;
@@ -61,7 +79,9 @@ while [ $# -gt 0 ]; do
     --workdir) workdir="${2:?--workdir needs a dir}"; shift ;;
     --keep-workdir) keep=1 ;;
     --dry-run) dry=1 ;;
-    -h|--help) sed -n '2,21p' "$0"; exit 0 ;;
+    --no-netstack) netstack=0 ;;
+    --netstack-only) netstack_only=1 ;;
+    -h|--help) sed -n '2,28p' "$0"; exit 0 ;;
     *) die "unknown argument: $1 (see --help)" ;;
   esac
   shift
@@ -103,7 +123,7 @@ need() { for c in "$@"; do command -v "$c" >/dev/null || die "missing prerequisi
 REQUIRED_SYMBOLS="krun_set_log_level krun_create_ctx krun_free_ctx krun_set_vm_config
   krun_add_disk krun_set_root_disk_remount krun_add_virtiofs4 krun_disable_implicit_vsock
   krun_add_vsock krun_add_vsock_port2 krun_set_port_map krun_set_workdir krun_set_exec
-  krun_get_max_vcpus krun_start_enter"
+  krun_get_max_vcpus krun_start_enter krun_add_net_unixstream"
 
 check_symbols() { # <library>
   if [ "$dry" = 1 ]; then say "(dry-run) would check the exported symbols of $1"; return; fi
@@ -123,6 +143,57 @@ case "$os/$arch" in
   Linux/x86_64) plat=linux; rarch=x86_64; krun_file="$LINUX_LIBKRUN_FILE"; fw_file="$LINUX_LIBKRUNFW_FILE" ;;
   *) die "no pinned libkrun for $os/$arch (supported: macOS arm64, Linux x86_64)" ;;
 esac
+[ "$netstack" = 0 ] && [ "$netstack_only" = 1 ] && die "--no-netstack and --netstack-only conflict"
+if [ -z "$home" ]; then home="${SANDCRAB_HOME:-${HOME:?HOME unset}/.sandcrab}"; fi
+
+# ---- userspace netstack (gvproxy on macOS, passt on Linux)
+install_netstack() {
+  local kind version file origin osha commit nparent ndest nstage src
+  if [ "$plat" = macos ]; then
+    kind=gvproxy version="$GVPROXY_VERSION" origin=release osha="\"$GVPROXY_SHA256\"" commit=null
+  else
+    kind=passt version="$PASST_VERSION" origin=source osha=null commit="\"$PASST_COMMIT\""
+  fi
+  file="$kind"
+  nparent="$home/artifacts/libkrun-net"
+  ndest="$nparent/$kind-$version"
+  nstage="$nparent/.$kind-$version.staging.$$"
+  say "netstack: $kind $version → $ndest"
+  run mkdir -p "$workdir"
+  if [ "$plat" = macos ]; then
+    download "$GVPROXY_URL" "$workdir/gvproxy" "$GVPROXY_SHA256"
+    src="$workdir/gvproxy"
+  else
+    need git make gcc
+    clone_pinned "$PASST_REPO" "$PASST_TAG" "$PASST_COMMIT" "$workdir/passt"
+    # Static: no runtime dependency on the host's glibc; no seccomp/AppArmor profile is
+    # installed (passt sandboxes itself: namespaces, seccomp, dropped capabilities).
+    run make -C "$workdir/passt" -j"$( (nproc || echo 4) 2>/dev/null)" static
+    src="$workdir/passt/passt"
+  fi
+  if [ "$dry" = 1 ]; then say "(dry-run) would install $src into $ndest"; return; fi
+  rm -rf "$nstage"
+  mkdir -p "$nstage"
+  cp "$src" "$nstage/$file"
+  chmod 0555 "$nstage/$file"
+  [ "$origin" != release ] || [ "\"$(sha256 "$nstage/$file")\"" = "$osha" ] || die "$kind copy differs from its verified download"
+  printf '{\n  "schema": %s,\n  "os": "%s",\n  "arch": "%s",\n  "kind": "%s",\n  "version": "%s",\n  "file": "%s",\n  "origin": "%s",\n  "origin_sha256": %s,\n  "git_commit": %s,\n  "sha256": "%s"\n}\n' \
+    "$NETSTACK_MANIFEST_SCHEMA" "$plat" "$rarch" "$kind" "$version" "$file" "$origin" "$osha" "$commit" \
+    "$(sha256 "$nstage/$file")" > "$nstage/manifest.json"
+  local nold="$nparent/.$kind-$version.old.$$"
+  [ -e "$ndest" ] && mv "$ndest" "$nold"
+  mv "$nstage" "$ndest"
+  rm -rf "$nold"
+  say "netstack installed:"
+  cat "$ndest/manifest.json" >&2
+}
+
+if [ "$netstack_only" = 1 ]; then
+  if [ -z "$workdir" ]; then workdir="$(mktemp -d "${TMPDIR:-/tmp}/sandcrab-netstack.XXXXXX")"; fi
+  trap '[ "$keep" = 1 ] || rm -rf "$workdir"' EXIT
+  install_netstack
+  exit 0
+fi
 
 if [ "$plat" = macos ] && [ "$from_source" = 0 ]; then
   if ! command -v brew >/dev/null; then
@@ -138,7 +209,6 @@ else
 fi
 [ "$fw_from_source" = 1 ] && [ "$plat" != linux ] && die "--fw-from-source is Linux-only (macOS uses the pinned prebuilt kernel bundle)"
 
-if [ -z "$home" ]; then home="${SANDCRAB_HOME:-${HOME:?HOME unset}/.sandcrab}"; fi
 parent="$home/artifacts/libkrun"
 dest="$parent/$LIBKRUN_VERSION"
 say "$plat/$rarch, mode=$mode$([ "$fw_from_source" = 1 ] && echo ' (libkrunfw from source)'), dest=$dest"
@@ -223,9 +293,10 @@ else
   # libkrun
   clone_pinned "$LIBKRUN_REPO" "$LIBKRUN_TAG" "$LIBKRUN_COMMIT" "$workdir/libkrun"
   # Keep cargo's output inside the throwaway workdir (never a shared CARGO_TARGET_DIR).
-  # BLK=1: virtio-blk (`krun_add_disk`, `krun_set_root_disk_remount`) is a cargo feature that
-  # upstream's Makefile leaves off by default; the Homebrew bottle has it.
-  run env -u CARGO_TARGET_DIR make -C "$workdir/libkrun" -j"$jobs" BLK=1
+  # BLK=1 / NET=1: virtio-blk (`krun_add_disk`, `krun_set_root_disk_remount`) and virtio-net
+  # (`krun_add_net_unixstream`) are cargo features that upstream's Makefile leaves off by
+  # default; the Homebrew bottle has both.
+  run env -u CARGO_TARGET_DIR make -C "$workdir/libkrun" -j"$jobs" BLK=1 NET=1
   if [ "$plat" = macos ]; then
     stage "$workdir/libkrun/target/release/libkrun.$LIBKRUN_VERSION.dylib" "$krun_file"
   else
@@ -248,6 +319,7 @@ run chmod 0444 "$staging/$krun_file" "$staging/$fw_file"
 # ---- manifest + swap into place
 if [ "$dry" = 1 ]; then
   say "(dry-run) would write $dest/manifest.json and swap $staging → $dest"
+  [ "$netstack" = 0 ] || install_netstack
   exit 0
 fi
 lib_json() { # <version> <file> <origin> <origin_sha|null> <commit|null> <fixups> <path>
@@ -269,3 +341,4 @@ mv "$staging" "$dest"
 rm -rf "$old"
 say "installed:"
 cat "$dest/manifest.json"
+[ "$netstack" = 0 ] || install_netstack

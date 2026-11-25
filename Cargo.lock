@@ -1653,6 +1653,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "libloading",
+ "nix 0.31.4",
  "rustix",
  "sandcrab-core",
  "sandcrab-protocol",

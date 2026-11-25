@@ -37,6 +37,7 @@ use sandcrab_backend_libkrun::helper_proto::{
     CONTROL_PORT, GuestExec, HelperConfig, HelperNetwork, HostIdentity, ROOT_DRIVE_ID,
     SCRATCH_DRIVE_ID, TOOLS_PORT, exit_code,
 };
+use sandcrab_backend_libkrun::netstack::NetstackKind;
 use sandcrab_backend_libkrun::reap::{ProcId, RunMeta};
 use sandcrab_backend_libkrun::{KrunLibs, LibkrunBackend, LibkrunConfig, RootfsSource};
 use sandcrab_core::testing::MockCrabd;
@@ -375,6 +376,14 @@ fn base_template() -> Template {
 /// Backend config + libs rooted at `home` (short, under `/tmp`: the macOS `$TMPDIR` is too
 /// long for the 103-byte socket path budget). Idempotent, so an owner process can rebuild it.
 fn backend_at(home: &Path, tweak: impl FnOnce(&mut LibkrunConfig)) -> LibkrunBackend {
+    backend_libs_at(home, tweak, |_| {})
+}
+
+fn backend_libs_at(
+    home: &Path,
+    tweak: impl FnOnce(&mut LibkrunConfig),
+    tweak_libs: impl FnOnce(&mut KrunLibs),
+) -> LibkrunBackend {
     let bin = home.join("bin");
     let helper = bin.join(HELPER_NAME);
     if !helper.exists() {
@@ -409,7 +418,8 @@ fn backend_at(home: &Path, tweak: impl FnOnce(&mut LibkrunConfig)) -> LibkrunBac
     cfg.term_after = Duration::from_millis(300);
     cfg.kill_after = Duration::from_millis(2000);
     tweak(&mut cfg);
-    let libs = KrunLibs::hash_files(&libkrun, &libkrunfw).unwrap();
+    let mut libs = KrunLibs::hash_files(&libkrun, &libkrunfw).unwrap();
+    tweak_libs(&mut libs);
     LibkrunBackend::new_unchecked(cfg, libs).unwrap()
 }
 
@@ -569,12 +579,16 @@ impl Drop for Env {
 }
 
 fn env_with(tweak: impl FnOnce(&mut LibkrunConfig)) -> Env {
+    env_libs(tweak, |_| {})
+}
+
+fn env_libs(tweak: impl FnOnce(&mut LibkrunConfig), tweak_libs: impl FnOnce(&mut KrunLibs)) -> Env {
     let tmp = tempfile::Builder::new()
         .prefix("lkfh")
         .tempdir_in("/tmp")
         .unwrap();
     let home = tmp.path();
-    let backend = Arc::new(backend_at(home, tweak));
+    let backend = Arc::new(backend_libs_at(home, tweak, tweak_libs));
     let workspaces = WorkspaceRegistry::open(home.join("state")).unwrap();
     let project = home.join("project");
     let docs = home.join("docs");
@@ -1079,8 +1093,46 @@ async fn network_policies() {
         .await
         .unwrap();
     assert_eq!(e.config().network, HelperNetwork::TsiUnrestricted);
+    assert!(e.config().netstack.is_none());
     let init = e.init_config();
     assert!(init.network && !init.dns.is_empty());
+    sb.destroy().await.unwrap();
+
+    // With the pinned netstack installed, `unrestricted` is the userspace NIC: the helper
+    // gets the pinned binary and the host's own addresses to deny; `disabled` stays NIC-less.
+    let ns_bin = PathBuf::from("/usr/bin/true");
+    let ns = sandcrab_backend_libkrun::NetstackBin {
+        kind: NetstackKind::Passt,
+        binary: sandcrab_backend_libkrun::helper_proto::PinnedFile {
+            sha256: sandcrab_backend_libkrun::artifacts::sha256_file(&ns_bin).unwrap(),
+            path: ns_bin,
+        },
+    };
+    let e = env_libs(|_| {}, |l| l.netstack = Some(ns.clone()));
+    let sb = e
+        .m()
+        .spawn(SandboxConfig::from_template("base").network(NetworkConfig::unrestricted()))
+        .await
+        .unwrap();
+    let cfg = e.config();
+    assert_eq!(cfg.network, HelperNetwork::Userspace);
+    let spec = cfg.netstack.as_ref().expect("netstack spec");
+    assert_eq!((spec.kind, &spec.binary), (ns.kind, &ns.binary));
+    assert_eq!(
+        spec.deny,
+        sandcrab_backend_libkrun::netstack::host_prefixes().unwrap()
+    );
+    let init = e.init_config();
+    assert!(init.network);
+    assert_eq!(
+        init.dns,
+        ["192.168.127.1".parse::<std::net::IpAddr>().unwrap()]
+    );
+    sb.destroy().await.unwrap();
+    let e = env_libs(|_| {}, |l| l.netstack = Some(ns.clone()));
+    let sb = e.m().spawn(e.spawn_cfg()).await.unwrap();
+    assert_eq!(e.config().network, HelperNetwork::Disabled);
+    assert!(e.config().netstack.is_none());
     sb.destroy().await.unwrap();
 }
 
