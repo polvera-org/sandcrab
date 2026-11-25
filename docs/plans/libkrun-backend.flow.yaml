@@ -272,7 +272,7 @@ steps:
     title: "Docker on macOS: loopback TCP transport (127.0.0.1 ephemeral published port) with per-sandbox token auth in hello; Unix socket stays default on Linux"
     depends_on: [lk-w2-emfile]
     artifacts: [crates/sandcrab-backend-docker/, crates/sandcrab-guest/, crates/sandcrab-protocol/]
-    status: doing
+    status: done
 
   - id: lk-review
     phase: verify
