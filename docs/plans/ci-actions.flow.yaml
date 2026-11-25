@@ -32,7 +32,7 @@ steps:
     title: "ci.yml on pull_request + push main: fmt + clippy -D warnings + cargo test --workspace on ubuntu-24.04, ubuntu-24.04-arm, macos-latest (arm64); musl crabd build check (x86_64 + aarch64); paths-ignore docs/**, concurrency cancel-in-progress, Swatinem/rust-cache, permissions: contents: read, actions pinned by SHA, GitHub-hosted runners only (free for public repos)"
     depends_on: [ci-research]
     artifacts: [.github/workflows/ci.yml]
-    status: doing
+    status: done
 
   - id: release-workflow
     phase: implement
@@ -40,7 +40,7 @@ steps:
     title: "release.yml on tag v* + workflow_dispatch: matrix aarch64-apple-darwin, x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu → tar.gz of sandcrab + crabagent + sandcrab-krun (ad-hoc signed via scripts/sign-krun-helper.sh on mac; Developer ID = R10 later) + crabd musl for the matching arch + SHA256SUMS; one publish job creates a DRAFT GitHub release. Packaging lives in scripts/package-release.sh so it runs locally too"
     depends_on: [ci-research]
     artifacts: [.github/workflows/release.yml, scripts/package-release.sh]
-    status: doing
+    status: done
 
   - id: e2e-workflow
     phase: implement
@@ -48,21 +48,21 @@ steps:
     title: "Optional docker-e2e job (workflow_dispatch + nightly cron, not on every PR): build templates, cargo test -- --ignored for the Docker backend on Linux x86_64; Firecracker e2e on hosted ubuntu x64 via /dev/kvm (udev rule + fail-fast `test -w /dev/kvm`; undocumented, may vanish). libkrun e2e stays a local run on the Mac (hosted macOS has no nested virt; no self-hosted runners)"
     depends_on: [ci-workflow]
     artifacts: [.github/workflows/e2e.yml]
-    status: todo
+    status: done
 
   - id: ci-review
     phase: verify
     agent: nebula
     title: "Review: actionlint + zizmor clean; least-privilege permissions; no pull_request_target / untrusted input in run:; SHA-pinned actions; release only from tags, draft; artifacts contain the right bins per platform"
     depends_on: [ci-workflow, release-workflow, e2e-workflow]
-    status: todo
+    status: done
 
   - id: ci-live
     phase: verify
     agent: nova
     title: "Live check: run scripts/package-release.sh locally on the Mac (aarch64-apple-darwin) and on the Linux VPS; `act`-style dry run where possible. Real GitHub run needs a push, which is the human's call"
     depends_on: [release-workflow, ci-workflow]
-    status: todo
+    status: done
 
   - id: ci-docs
     phase: document
@@ -70,4 +70,4 @@ steps:
     title: "docs/ci.md (workflows, what runs where, why hosted-only, libkrun e2e is local, paid fallbacks from runner-research); README install section from release tarballs + Windows → WSL note; CHANGELOG"
     depends_on: [ci-review, ci-live, runner-research]
     artifacts: [docs/ci.md, README.md, CHANGELOG.md]
-    status: todo
+    status: done
