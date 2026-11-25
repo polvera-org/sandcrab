@@ -1,8 +1,9 @@
 //! `crabd init`: the PID 1 boot sequence and the real [`InitOps`] (Linux only).
 //!
 //! Order (design §3): early mounts → overlay root + `pivot_root` → late mounts → hostname,
-//! `lo` up, Ctrl-Alt-Del off → reaper → control port. `init.configure` then mounts the
-//! workspaces and starts `crabd serve` as the sandbox user.
+//! `lo` up, Ctrl-Alt-Del off → pids cgroup → hardening sysctls, read-only `/proc/sys` (and
+//! Docker's other `ReadonlyPaths`) and `/sys` → reaper → control port. `init.configure` then
+//! mounts the workspaces and starts `crabd serve` as the sandbox user.
 
 use std::{
     fs,
@@ -17,8 +18,8 @@ use std::{
 };
 
 use sandcrab_protocol::init::{
-    CONTROL_PORT, DEFAULT_SHUTDOWN_GRACE_MS, InitConfig, InitConfigureResult, SANDBOX_PIDS_MAX,
-    SCRATCH_DRIVE_ID,
+    CONTROL_PORT, DEFAULT_SHUTDOWN_GRACE_MS, InitConfig, InitConfigureResult, PROC_READONLY_PATHS,
+    SANDBOX_PIDS_MAX, SCRATCH_DRIVE_ID,
 };
 use tokio::signal::unix::{SignalKind, signal};
 use tracing::{error, info, warn};
@@ -30,7 +31,7 @@ use super::{
     control::{InitOps, serve_control_connection},
     dirs,
     drives::{self, BlockDevice},
-    netlink, reap, sys,
+    netlink, reap, sys, sysctl,
 };
 use crate::{hardening, server::BoxFuture, vsock};
 
@@ -93,6 +94,7 @@ async fn boot() -> io::Result<()> {
         warn!(error = %e, "could not disable core dumps");
     }
     let pids_cap = pids_cap();
+    harden_kernel();
 
     let ops = Arc::new(Pid1Ops::new(devices, pids_cap));
     let mut sigchld = signal(SignalKind::child())?;
@@ -160,6 +162,35 @@ fn pids_cap() -> PidsCap {
                 }
             }
         }
+    }
+}
+
+/// Kernel-interface hardening, before any sandbox code can run (`crabd serve` only starts at
+/// `init.configure`): the [`sysctl::HARDENING_SYSCTLS`], then Docker's read-only `/proc`
+/// paths (so a uid-0 sandbox user cannot write the sysctls back through the owner bits) and
+/// a read-only `/sys`. Best effort: each failure is logged and the boot continues, and the
+/// e2e suite asserts the result per backend.
+fn harden_kernel() {
+    let mut set = Vec::new();
+    let mut missing = Vec::new();
+    for (s, outcome) in sysctl::apply_all(Path::new(sysctl::PROC_SYS), sysctl::HARDENING_SYSCTLS) {
+        match outcome {
+            sysctl::Outcome::Set(v) => set.push(format!("{}={v}", s.key)),
+            sysctl::Outcome::Missing => missing.push(s.key),
+            sysctl::Outcome::Failed(e) => warn!(key = s.key, error = %e, "sysctl not hardened"),
+        }
+    }
+    info!(?set, "hardening sysctls");
+    if !missing.is_empty() {
+        info!(?missing, "sysctls not supported by this kernel");
+    }
+    for p in PROC_READONLY_PATHS {
+        if let Err(e) = sys::seal_readonly_path(Path::new(p)) {
+            warn!(error = %e, "stays writable");
+        }
+    }
+    if let Err(e) = sys::seal_sysfs() {
+        warn!(error = %e, "/sys stays writable");
     }
 }
 

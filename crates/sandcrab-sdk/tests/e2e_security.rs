@@ -10,7 +10,8 @@ use common::{
     E2eBackend, bash_t, docker_config, docker_ps, host_uid, run, run_exclusive, sh, wait_for,
 };
 use sandcrab_sdk::{
-    BackendKind, MountMode, NetworkConfig, NetworkPolicy, SandboxConfig, SandboxError,
+    BackendKind, MountMode, NetworkConfig, NetworkPolicy, SandboxConfig, SandboxError, UserSpec,
+    protocol::init::HARDENING_SYSCTLS,
 };
 use tokio::task::JoinSet;
 
@@ -392,6 +393,118 @@ echo "rc=$rc spawned=${#pids[@]}""#,
         assert!(!exec.stdout.contains("ran"), "{exec:?}");
 
         sb.destroy().await.unwrap();
+    })
+    .await;
+}
+
+/// Per-mount options (mountinfo field 6) of the topmost mount exactly at `target`.
+async fn mount_opts(sb: &sandcrab_sdk::Sandbox, target: &str) -> Vec<String> {
+    let line = sh(
+        sb,
+        &format!("awk '$5 == \"{target}\"' /proc/self/mountinfo | tail -n 1"),
+    )
+    .await;
+    let opts = line
+        .split_whitespace()
+        .nth(5)
+        .unwrap_or_else(|| panic!("{target} is not a mount point"));
+    opts.split(',').map(str::to_owned).collect()
+}
+
+/// Kernel interfaces closed to the sandbox, as root (uid 0 without capabilities, the
+/// strongest sandbox user; microVMs only) and as the default user: read-only `/sys` and
+/// `/proc/sys` (Docker's defaults, reproduced by `crabd init`), no user namespaces (Docker:
+/// seccomp; microVMs: `user.max_user_namespaces=0`), and on the microVMs every hardening
+/// sysctl the guest kernel has reads back as hardened. On Docker those sysctls are host-level, so only
+/// the read-only mounts and the namespace denial are asserted.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "e2e: needs a sandbox backend (SANDCRAB_E2E_BACKEND, default docker)"]
+async fn kernel_interfaces_sysfs_sysctls_userns() {
+    run("kernel-interfaces", |h| async move {
+        // Docker runs crabd as the sandbox user, and a uid-0 crabd's Unix socket in the
+        // host-owned run dir is not connectable by the host user, so root is microVM-only.
+        let users = if h.is_docker() {
+            vec![None]
+        } else {
+            vec![None, Some(UserSpec::new(0, 0))]
+        };
+        for user in users {
+            let mut cfg = SandboxConfig::from_template("base");
+            cfg.user = user;
+            let sb = h.sc.spawn(cfg).await.unwrap();
+            let who = sh(&sb, "id -u").await;
+            let who = who.trim();
+
+            for target in ["/sys", "/proc/sys"] {
+                let opts = mount_opts(&sb, target).await;
+                assert!(opts.iter().any(|o| o == "ro"), "{target} as {who}: {opts:?}");
+            }
+            // A write to an existing, owner-writable sysfs attribute fails.
+            let w = sb
+                .bash(
+                    "f=$(find /sys/kernel /sys/bus -maxdepth 2 -type f -perm -u+w 2>/dev/null \
+                     | head -n 1); test -n \"$f\" || exit 99; echo \"$f\" >&2; \
+                     printf 1 > \"$f\"",
+                )
+                .await
+                .unwrap();
+            assert!(
+                !matches!(w.exit_code, Some(0 | 99)),
+                "sysfs write as {who}: {w:?}"
+            );
+            // ...and so does writing a hardening sysctl back (this one has no capability check
+            // in the kernel: only the read-only `/proc/sys` stops a uid-0 sandbox user).
+            let w = sb
+                .bash("echo -1 > /proc/sys/kernel/perf_event_paranoid")
+                .await
+                .unwrap();
+            assert_ne!(w.exit_code, Some(0), "sysctl write as {who}: {w:?}");
+
+            // No user namespaces, so no "unprivileged" root inside one either.
+            let u = sb.bash("command -v unshare && unshare -U true").await.unwrap();
+            assert!(u.stdout.contains("unshare"), "no unshare in base: {u:?}");
+            assert_ne!(u.exit_code, Some(0), "unshare -U as {who}: {u:?}");
+
+            if !h.is_docker() {
+                let script: String = HARDENING_SYSCTLS
+                    .iter()
+                    .map(|s| {
+                        let path = s.key.replace('.', "/");
+                        format!(
+                            "printf '%s=' {key}; cat /proc/sys/{path} 2>/dev/null || echo MISSING\n",
+                            key = s.key
+                        )
+                    })
+                    .collect();
+                let out = sh(&sb, &script).await;
+                let mut missing = Vec::new();
+                for (s, line) in HARDENING_SYSCTLS.iter().zip(out.lines()) {
+                    let v = line
+                        .strip_prefix(&format!("{}=", s.key))
+                        .unwrap_or_else(|| panic!("{out}"))
+                        .trim();
+                    if v == "MISSING" {
+                        missing.push(s.key);
+                    } else {
+                        assert!(s.values.contains(&v), "{} = {v} as {who}", s.key);
+                    }
+                }
+                eprintln!("kernel-interfaces as {who}:\n{out}");
+                // The mainline knobs every pinned guest kernel has.
+                for key in [
+                    "user.max_user_namespaces",
+                    "kernel.perf_event_paranoid",
+                    "kernel.kptr_restrict",
+                    "kernel.dmesg_restrict",
+                    "fs.protected_symlinks",
+                    "fs.protected_regular",
+                    "fs.suid_dumpable",
+                ] {
+                    assert!(!missing.contains(&key), "{key} missing");
+                }
+            }
+            sb.destroy().await.unwrap();
+        }
     })
     .await;
 }

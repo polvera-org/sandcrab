@@ -121,6 +121,10 @@ The same binary has two roles. Role selection: `getpid()==1` → **init**. Other
    which the kernel never applies to uid 0.
    `crabd serve` is forked on a thread whose capability bounding set was emptied first (as Docker's `cap_drop: ALL`), while
    PID 1 is briefly in `/sandbox`, so the child is born capped. Then the cgroupfs is remounted read-only.
+   Before any of that can happen (at boot, right after the pids cgroup), PID 1 writes the hardening sysctls
+   (`HARDENING_SYSCTLS`: no user namespaces, unprivileged `bpf`/`userfaultfd`/`io_uring`/`perf` off, `kptr_restrict`,
+   `fs.protected_*`, ...) and makes `/proc/sys` (plus Docker's other `ReadonlyPaths`) and `/sys` read-only. See
+   [guest-seccomp.md](guest-seccomp.md).
 4. Bring `lo` up with a single `RTM_NEWLINK` via `netlink-packet-route` + `netlink-sys` (safe APIs, guest-only deps). `eth0` was already configured by the kernel `ip=`.
 5. Listen on **vsock port 1 (control)**. This takes framed JSON-RPC, as below.
 6. Install `SIGCHLD` handling. A reaper loop runs `waitpid(-1, WNOHANG)`. Zombie handling is **split**: `crabd serve` reaps its own

@@ -10,6 +10,7 @@
 //! - [`control`] — the `init.*` control-connection handler, generic over [`control::InitOps`];
 //! - [`netlink`] — the one `RTM_NEWLINK` message that brings `lo` up;
 //! - [`reap`] — the reaper's `waitpid(-1)` loop (any process group, so orphans too).
+//! - [`sysctl`] — the hardening sysctls, written and read back under `/proc/sys`.
 //!
 //! Linux-only: `sys` (mounts, pivot_root, reboot, ...) and `pid1` (boot sequence, reaper,
 //! the real `InitOps`). Those need a booted microVM and are covered by the Firecracker e2e
@@ -27,6 +28,7 @@ mod pid1;
 pub mod reap;
 #[cfg(target_os = "linux")]
 pub mod sys;
+pub mod sysctl;
 
 use std::ffi::OsString;
 
