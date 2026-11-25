@@ -4,6 +4,25 @@ All notable changes to Sandcrab. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Added
+- libkrun: `network.policy = unrestricted` without TSI (design §9 Phase B). The helper attaches a virtio-net NIC
+  (`krun_add_net_unixstream`, DHCP by `init.krun`) to a pinned userspace netstack (passt on Linux, gvproxy on macOS)
+  through its own egress filter: host loopback (including gvproxy's `192.168.127.254` alias), the host's own addresses
+  and on-link subnets, private / metadata / reserved ranges and SMTP are dropped; the gateway serves only DNS and DHCP.
+  The netstack is SHA-256 pinned, verified before exec, runs as the user with no listening socket and exits with the
+  helper. `sandcrab libkrun install` installs it (`--no-netstack` skips it), `doctor` reports `lk:netstack`, and
+  `scripts/fetch-libkrun.sh` gains `--netstack-only` / `--no-netstack`. Without it, `unrestricted` stays
+  `PolicyUnenforceable` (never a TSI fallback).
+
+### Deprecated
+- libkrun TSI opt-in (`LibkrunConfig::allow_tsi_unrestricted`, CLI `--libkrun-tsi`): still explicit and still exposes
+  host loopback; use the userspace netstack instead.
+
+### Changed
+- `KrunLibs` gains `netstack: Option<NetstackBin>`, `LibkrunConfig` gains `netstack_dir`, `HelperConfig` gains
+  `netstack` (network `userspace`). The Linux libkrun build now also enables `NET=1`; the install script checks for
+  `krun_add_net_unixstream`.
+
 ### Changed (breaking)
 - Template image pins are **host-local** ([docs/template-pins.md](docs/template-pins.md)). Image IDs do not reproduce
   across hosts, so committed `sandcrab.toml` manifests no longer carry `sha256` / `sha256_by_arch`; a fresh host's

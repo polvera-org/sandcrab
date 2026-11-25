@@ -31,7 +31,7 @@ Linux KVM half is **unverified** until `kvm-dedicated` is up.
 | 6 | Init | `KRUN_INIT_PID1=1`: libkrun's `init.krun` mounts the block root, then **execs `crabd init` as PID 1**. The FC init path (drive serials, overlay + `pivot_root`, control port, reaper, reboot) is reused. Config goes over the vsock control port, never argv or env, because those land on the kernel cmdline |
 | 7 | Transport | libkrun maps guest vsock listeners to host UNIX sockets (`krun_add_vsock_port2(listen=true)`): port 1 → `ctl.sock`, port 1024 → `v.sock`. The host uses a plain `UnixStream` with no `CONNECT` handshake, so it shares the Docker `Endpoint::Unix` connector |
 | 8 | Workspaces | **Live virtio-fs** per mount (`krun_add_virtiofs3`, `read_only` = `MountMode::ReadOnly`, which the VMM enforces). No copy-in or sync-back. The sandbox user defaults to the **host uid:gid**, as on Docker |
-| 9 | Network | **TSI is never enabled implicitly**: `krun_disable_implicit_vsock` + `krun_add_vsock(0)`, and always `krun_set_port_map([])`. `disabled` → no NIC. `unrestricted` → Phase B userspace netstack (passt on Linux, gvproxy on macOS) with host loopback blocked. Until then it is `PolicyUnenforceable`, unless the operator opts into TSI with an explicit flag that states host loopback is reachable. `egress_restricted` → `PolicyUnenforceable` |
+| 9 | Network | **TSI is never enabled implicitly**: `krun_disable_implicit_vsock` + `krun_add_vsock(0)`, and always `krun_set_port_map([])`. `disabled` → no NIC. `unrestricted` → Phase B userspace netstack (passt on Linux, gvproxy on macOS) behind the helper's egress filter, host loopback unreachable (§9.1). Without the pinned netstack it is `PolicyUnenforceable`; the deprecated explicit TSI flag (states that host loopback is reachable) still exists and is never a fallback. `egress_restricted` → `PolicyUnenforceable` |
 | 10 | Ports | Over a **vsock tunnel through `crabd`** (`tunnel.open`), bound to `127.0.0.1` by the backend. This is the primitive the FC design already specifies. Never TSI port mapping, which binds the wildcard address |
 | 11 | Capabilities | `hardware_isolated: true, multi_tenant_safe: false, supports_snapshots: false, supports_host_dir_mounts: true` |
 | 12 | Gating | SDK/CLI feature `libkrun`, **off by default**, compiled for `cfg(any(all(target_os="macos", target_arch="aarch64"), target_os="linux"))`. Elsewhere `--backend libkrun` is a clear "not compiled in" error |
@@ -153,7 +153,7 @@ pub struct Krun { _lib: libloading::Library, pub create_ctx: unsafe extern "C" f
                   /* set_root_disk_remount, add_virtiofs3, disable_implicit_vsock, add_vsock,
                      add_vsock_port2, set_port_map, set_exec, set_env, set_workdir, set_log_level,
                      set_console_output, set_rlimits, get_max_vcpus, check_nested_virt,
-                     add_net_unixstream (Phase B), set_passt_fd (Phase B), start_enter */ }
+                     add_net_unixstream (Phase B, optional symbol), start_enter */ }
 impl Krun { pub fn load(path: &Path, expected_sha256: &str) -> Result<Self>; }   // hash → dlopen → dlsym all
 pub struct Ctx<'k>(&'k Krun, u32);  // safe wrapper: CString conversion, NUL/ASCII validation, errno mapping
 ```
@@ -348,9 +348,63 @@ The spike proved that **TSI is unsafe as a default**. It gives the guest the **h
 | `network.policy` | libkrun mapping |
 |---|---|
 | `disabled` (default) | `krun_disable_implicit_vsock` + `krun_add_vsock(ctx, 0)` (vsock without TSI) + `krun_set_port_map([])`. No NIC. Only `lo`. Verified unreachable **[spike]** |
-| `unrestricted`, Phase A | **`PolicyUnenforceable`** by default. Escape hatch: `LibkrunConfig.allow_tsi_unrestricted = true` (and CLI `--libkrun-tsi`, documented as **"guest can reach host loopback services"**) → TSI with `KRUN_TSI_HIJACK_INET` and an **empty port map**. `enforces_network_policy` returns true only when the flag is set |
-| `unrestricted`, Phase B | A virtio-net userspace netstack. **Linux:** `passt` spawned by the backend with `--no-map-gw`, which blocks host loopback, passed via `krun_set_passt_fd`. **macOS:** `gvproxy` (vfkit mode, `krun_add_net_unixstream` + `NET_FLAG_VFKIT`) with its host-gateway forwarding disabled. Both are pinned by sha. A spike must first prove host loopback is unreachable (the e2e test from §1 becomes a regression test). Then the TSI flag can be deprecated |
+| `unrestricted` (Phase B, **shipped**, step `lk-net-userspace`) | A virtio-net NIC on the pinned userspace netstack, **behind the helper's egress filter** (§9.1): passt on Linux, gvproxy on macOS. Needs the netstack installed (`sandcrab libkrun install`); otherwise **`PolicyUnenforceable`** with the install hint. TSI stays off |
+| `unrestricted` + TSI opt-in (Phase A, **deprecated**) | `LibkrunConfig.allow_tsi_unrestricted = true` / CLI `--libkrun-tsi` (documented as **"guest can reach host loopback services"**) → TSI with `KRUN_TSI_HIJACK_INET` and an **empty port map**. An explicit opt-in wins over the netstack (never silently replaced); a missing netstack never falls back to it |
 | `egress_restricted` | `PolicyUnenforceable` (Phase 3 egress proxy), the same as other backends |
+
+### 9.1 Phase B: userspace netstack behind an egress filter
+
+**Spike (2026-11-24).** Neither netstack is loopback-safe on its own terms in every case:
+
+- **gvproxy v0.9.0** (`-listen-stdio accept -ssh-port -1`): crafted SYNs to `127.0.0.1` / `0.0.0.0` are dropped, but
+  a SYN to **`192.168.127.254`** (its NAT alias for the host's `127.0.0.1`) **reached a listener bound only to host
+  loopback**. It also serves a port-forward HTTP API (`/services/forwarder/expose`) on the gateway `192.168.127.1:80`,
+  which a guest could use to publish ports on the host.
+- **passt** (`--no-map-gw`): drops frames to loopback / `0.0.0.0` (`tap.c`), and a 127.0.0.1-only listener got RST. But
+  a SYN to the **host's own address** reached a listener bound to `0.0.0.0` on the host (expected for a NAT; still a
+  host service).
+
+So the stock netstacks are not the security boundary. **The helper is.** Design:
+
+```
+guest virtio-net ──(libkrun, krun_add_net_unixstream fd, 4-byte BE length frames)──► helper
+helper "net-egress" thread: parse Ethernet/IPv4, EgressPolicy::check, drop or forward ──► netstack (socketpair)
+helper "net-ingress" thread: netstack frames (length-checked) ──► guest
+netstack: passt `--fd 0` (BE32 frames) | gvproxy `-listen-stdio accept` (LE16 frames on stdin/stdout)
+```
+
+- **Addressing (fixed, both platforms):** guest `192.168.127.2/24`, gateway + DNS `192.168.127.1`, MAC
+  `5a:94:ef:e4:0c:ee`, MTU 1500, no virtio-net offloads (`features = 0`). `init.krun` configures `eth0` by DHCP
+  (`NET_FLAG_DHCP_CLIENT`) before `crabd`; `crabd` writes `resolv.conf` (`nameserver 192.168.127.1`).
+- **Egress filter** (`netstack.rs`, guest → netstack, default deny): only IPv4 and ARP (IPv6 is dropped: no v6 on the
+  NIC); to the gateway only DNS (UDP/TCP 53) and DHCP (UDP 67); broadcast only DHCP; never
+  `0/8 10/8 100.64/10 127/8 169.254/16 172.16/12 192.0.0/24 192.0.2/24 192.168/16 198.18/15 198.51.100/24
+  203.0.113/24 224/4 240/4` (the FC egress policy's reserved ranges, which cover gvproxy's `192.168.127.254` alias and
+  cloud metadata), nor the host's own addresses and on-link subnets (`getifaddrs` at spawn), nor TCP 25/465/587 (SMTP).
+  Malformed frames are dropped. Netstack → guest frames are only length-checked.
+- **Netstack process:** pinned by SHA-256 (the helper hashes it right before spawning; mismatch → exit 71), spawned
+  by the helper as the same unprivileged user with an empty environment, `cwd /`, in the helper's process group and
+  (Linux) cgroup leaf. It **listens on nothing**: its only channel is the socketpair, so when the helper dies — however
+  it dies — the netstack reads EOF and exits (passt `--fd` is one-shot; gvproxy exits on stdio EOF). No sockets on
+  disk, so no socket dir to protect. A watcher thread reaps it and logs the frame counters. Spawn failure → exit 76.
+- **Pins** (`netstack_pins.rs`, `<home>/artifacts/libkrun-net/<kind>-<version>/manifest.json`): gvproxy `v0.9.0`
+  release asset `gvproxy-darwin` (universal, ad hoc signed; sha `e2a6825b…`, installed byte for byte); passt
+  `2026_10_02.cba3570` (commit `cba35706…`), built `make static` from the pinned tag by `scripts/fetch-libkrun.sh`
+  (not reproducible: the installed sha is recorded with the commit, as for libkrun on Linux). The Linux libkrun build
+  adds `NET=1` (`krun_add_net_unixstream`); the symbol is optional in `Krun::load`, required only for `userspace`.
+
+**What the filter cannot block** (documented, accepted for `unrestricted`):
+
+- **The public internet**, by definition, including anything the host exposes on a public address it did not have at
+  spawn time.
+- **DNS through the host's resolver.** The netstack forwards gateway:53 to the host's configured resolver, which may
+  be a loopback stub (`127.0.0.53` with systemd-resolved, `mDNSResponder` on macOS). That one resolver port is the only
+  host-loopback service the guest reaches, by design.
+- **Addresses the host gains after spawn** (a new interface, VPN). The deny list is a snapshot.
+- **Other hosts' private services reached through a public address** (hairpin NAT on the router).
+- **Traffic volume / abuse** (no rate limit; Phase 3 egress proxy).
+
+### 9.2 Ports
 
 **Ports (`SandboxConfig.ports`):** a backend-side tokio listener on **`127.0.0.1:<ephemeral>`**. Each accepted connection opens a
 new `v.sock` connection → `tunnel.open{port}` → raw splice to the guest `127.0.0.1:<port>`. This is the FC design §6 primitive.
@@ -477,6 +531,40 @@ needs none; the host's Firecracker nftables setup is unrelated).
   (`guest_boot_ms`); `init.configure` + `hello` ~5 ms. The first spawn of a process adds
   ~400 ms in `rootfs_ready` (`docker image inspect` + hashing `crabd`). Teardown is 30–70 ms.
 
+### 12.3 Phase B results (step `lk-net-userspace`, 2026-11-25)
+
+`cargo test -p sandcrab-backend-libkrun --test libkrun_vm -- --ignored --test-threads=1`, two new tests:
+
+- **`userspace_network_reaches_internet_not_the_host`**: `eth0` up with `192.168.127.2` from DHCP, default route,
+  `nameserver 192.168.127.1`, no IPv6 beyond link-local; `getent hosts example.com` + `curl https://example.com/` →
+  `HTTP 200`. Then, in parallel from the guest, TCP to a host listener bound **only to `127.0.0.1`** and one on
+  `0.0.0.0`, each at `127.0.0.1`, `192.168.127.254` (gvproxy's host-loopback alias), `192.168.127.1` (gateway),
+  `10.0.2.2`, and the host's own LAN / public address (plus a listener bound to it); gateway `:80` (gvproxy API) and
+  `:22`; `169.254.169.254:80`. Every probe: `closed`; **no host listener accepted a connection** (`127.0.0.1`,
+  `0.0.0.0`, `[::1]`, LAN). SMTP submission (`smtp.gmail.com:587`) times out. No netstack left after destroy.
+- **`userspace_disabled_has_no_nic_and_netstack_dies_with_helper`**: with the netstack installed, `disabled` is still
+  loopback only and spawns no netstack; after `SIGKILL` of the helper (its pid from `meta.json`), the netstack exits.
+
+| Host | Netstack | Result |
+|---|---|---|
+| Mac (M2, macOS 26.2, Homebrew libkrun 1.19.8) | gvproxy v0.9.0 | full suite 10/10; spawn → ready 386 ms with the NIC; SDK `e2e_security` (incl. `unrestricted_network_never_reaches_host_loopback`) 6/6 and `e2e_tools` 4/4 (`dev-server` now on `unrestricted`) |
+| `kvm-dedicated` (Ubuntu 26.04, `apparmor_restrict_unprivileged_userns=1`) | passt `2026_10_02.cba3570`, static | full suite 11/11 (incl. the cgroup-leaf test, under `systemd-run --user --scope`); spawn → ready 813 ms with the NIC; SDK `e2e_security` 6/6 and `e2e_tools` 4/4 |
+
+Findings:
+
+- **`krun_set_port_map` must come before the NIC.** libkrun refuses it once `net_index != 0` (EINVAL), so the plan is
+  `add_vsock(0)` → `set_port_map([])` → `add_net_unixstream`.
+- **passt under Ubuntu's userns restriction:** the pinned static binary (no AppArmor profile, which only attaches to
+  `/usr/bin/passt`) starts, runs its own sandbox and exits on socket EOF. No sudo, sysctl or profile change was needed.
+- **passt re-execs `<its path>.avx2`** when the CPU has AVX2 and that file exists. The installer installs only `passt`
+  (passt logs "Can't run AVX2 build, using non-AVX2 version" and continues), so nothing unpinned is executed. The
+  install dir is the user's own (`0555` binary), the same trust as the helper.
+- **Host deny list:** on a host with a Firecracker tap pool, `getifaddrs` yields 128 `/30` + `/32` entries in
+  `172.30/16`. They are dropped as already covered by `172.16/12`, so the list stays small (`netstack::host_prefixes`);
+  more than 256 remaining prefixes fail validation (never truncated).
+- **Netstack lifetime:** the socketpair is the lifeline (EOF → exit, verified after `SIGKILL` of the helper); the
+  netstack is also in the helper's process group (killed with it on destroy) and, on Linux, in its cgroup leaf.
+
 ## 13. Bench
 
 - `sandcrab-bench`: `BackendId::Libkrun` (`"libkrun" | "krun"`), `open_libkrun` gated the same way as the SDK, and
@@ -527,7 +615,9 @@ crates/sandcrab-backend-libkrun/             # NEW
   src/vm.rs         # run dir, spawn helper, lifeline pipe, readiness, timings, crash watch
   src/control.rs    # init.configure / init.shutdown over ctl.sock (shares protocol::init types)
   src/workspace.rs  # ResolvedMount → MountSource::VirtioFs / Block, identity re-check data for the helper
-  src/net.rs        # policy → vsock/TSI/port-map decisions (Phase B: passt / gvproxy spawn)
+  src/net.rs        # policy → vsock/TSI/NIC decisions (disabled / userspace / deprecated TSI)
+  src/netstack.rs   # Phase B: egress filter, frame shuttles, passt / gvproxy spawn (used by the bin)
+  src/netstack_pins.rs # passt / gvproxy pins, manifest, resolve, install
   src/ports.rs      # 127.0.0.1 listeners → tunnel.open (after vsock-tunnel)
   src/reap.rs       # orphan run dirs (meta.json, pid + start time)
   src/cgroup.rs     # Linux only (copied from FC, dedup later)

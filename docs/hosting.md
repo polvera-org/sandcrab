@@ -284,7 +284,8 @@ Benchmarks: [bench/README.md](bench/README.md) (`sandcrab-bench run --backends d
 The libkrun backend runs on the same KVM host as Firecracker, as the unprivileged `<user>`. It
 uses the same `/dev/kvm` access (the `kvm` group), templates, template pins and `crabd`. It
 needs no root, no taps and no nftables: with networking `disabled` (the default), TSI is off
-and the guest has no NIC. Results and caveats are in
+and the guest has no NIC. `unrestricted` uses a pinned userspace netstack (passt) spawned by
+the helper behind its egress filter, again with no root and no host firewall changes. Results and caveats are in
 [design/libkrun-backend.md §12.2](design/libkrun-backend.md).
 
 ### Install
@@ -299,9 +300,21 @@ sandcrab doctor --backend libkrun
 ```
 
 `sandcrab libkrun install` runs `scripts/fetch-libkrun.sh`. It builds libkrun from the pinned
-tag (with `BLK=1`), takes libkrunfw from its pinned prebuilt release, and installs both into
+tag (with `BLK=1 NET=1`), takes libkrunfw from its pinned prebuilt release, and installs both into
 `<state root>/artifacts/libkrun/<version>/`. It also copies the helper into
 `<state root>/bin/`. Linux needs no code signing.
+
+**Netstack for `--network unrestricted`.** The same command builds **passt** statically from
+its pinned tag (`make static`; needs `gcc`, `make` and the static glibc from `libc6-dev`) into
+`<state root>/artifacts/libkrun-net/passt-<version>/` with a manifest (commit + installed
+SHA-256). Do **not** use the distro `passt` package: it is unpinned, and the backend only runs
+the pinned install. `--no-netstack` skips it (then `unrestricted` is refused);
+`scripts/fetch-libkrun.sh --netstack-only` (re)installs only it. passt sandboxes itself with
+user namespaces; on Ubuntu ≥ 23.10 with `kernel.apparmor_restrict_unprivileged_userns=1` see
+[design/libkrun-backend.md §12.3](design/libkrun-backend.md): the pinned static binary works there without
+any sysctl or AppArmor change. `doctor` reports it as
+`lk:netstack`. On macOS the netstack is the pinned **gvproxy** release asset, downloaded and
+SHA-256 checked by the same command.
 
 ### Host-side cap: cgroup v2 delegation (recommended)
 
