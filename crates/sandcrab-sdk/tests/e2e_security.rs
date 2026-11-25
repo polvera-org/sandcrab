@@ -117,16 +117,28 @@ async fn sandbox_hardening_network_user_capabilities() {
             .unwrap();
         assert_ne!(tcp.exit_code, Some(0), "raw TCP egress succeeded: {tcp:?}");
         // Only loopback. libkrun: libkrunfw's kernel always has `dummy0` (TSI's interface);
-        // with TSI off it is down, unaddressed and the sandbox cannot bring it up.
+        // with TSI off it is down, unaddressed and the sandbox cannot bring it up. Docker
+        // Desktop: its kernel creates the tunnel modules' fallback devices (`sit0`, `gre0`,
+        // ...) in every network namespace, also down and unaddressed (no CAP_NET_ADMIN).
         let links = sh(
             &sb,
-            "for i in /sys/class/net/*; do echo \"$(basename $i) $(cat $i/flags)\"; done",
+            "for i in /sys/class/net/*; do [ -f $i/flags ] && echo \"$(basename $i) $(cat $i/flags)\"; done; true",
         )
         .await;
         for line in links.lines() {
             let (name, flags) = line.split_once(' ').unwrap();
             let up = u32::from_str_radix(flags.trim_start_matches("0x"), 16).unwrap() & 1 != 0;
-            let tolerated = h.backend == E2eBackend::Libkrun && name.starts_with("dummy") && !up;
+            let tunnel_fallback = [
+                "gre0", "gretap0", "erspan0", "ip_vti0", "ip6_vti0", "sit0", "ip6tnl0", "ip6gre0",
+                "tunl0",
+            ]
+            .contains(&name);
+            let tolerated = !up
+                && match h.backend {
+                    E2eBackend::Libkrun => name.starts_with("dummy"),
+                    E2eBackend::Docker => tunnel_fallback,
+                    _ => false,
+                };
             assert!(name == "lo" || tolerated, "only loopback expected: {links}");
         }
         assert_eq!(
