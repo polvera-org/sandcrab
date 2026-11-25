@@ -153,6 +153,26 @@ fn state_dir(g: &Global, r: &mut Report, fix: bool) {
     }
 }
 
+/// Which host ↔ crabd transport Docker sandboxes use, and why.
+#[cfg(feature = "docker")]
+fn transport_note(b: &sandcrab_sdk::docker::DockerBackend) -> String {
+    use sandcrab_sdk::docker::{DockerTransport, TRANSPORT_ENV};
+    let source = if std::env::var(TRANSPORT_ENV).is_ok_and(|v| !v.trim().is_empty()) {
+        format!("from ${TRANSPORT_ENV}")
+    } else {
+        "host default".to_owned()
+    };
+    match b.transport() {
+        DockerTransport::Unix => {
+            format!("unix ({source}): Unix socket in the per-sandbox run dir, token-authenticated")
+        }
+        DockerTransport::Tcp => format!(
+            "tcp ({source}): relay container on 127.0.0.1 (ephemeral port), \
+             token-authenticated; sandbox network policy unchanged"
+        ),
+    }
+}
+
 #[cfg(feature = "docker")]
 async fn docker(g: &Global, r: &mut Report, reap: Reap) {
     use sandcrab_sdk::core::{ImageArch, PinOrigin, PinStore, effective_pin, verify_image_pin};
@@ -195,6 +215,7 @@ async fn docker(g: &Global, r: &mut Report, reap: Reap) {
                         Status::Ok,
                         format!("daemon reachable (Docker {v})"),
                     );
+                    r.add("docker transport", Status::Info, transport_note(&b));
                     Some(b)
                 }
                 Err(e) => {
@@ -343,8 +364,9 @@ async fn docker(g: &Global, r: &mut Report, reap: Reap) {
                 "orphans",
                 Status::Ok,
                 format!(
-                    "reaped {} container(s), {} socket dir(s){}",
+                    "reaped {} sandbox(es), {} stray socket volume(s), {} socket dir(s){}",
                     rep.containers.len(),
+                    rep.volumes.len(),
                     rep.socket_dirs.len(),
                     if rep.kept > 0 {
                         format!(
