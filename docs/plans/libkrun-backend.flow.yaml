@@ -302,7 +302,7 @@ steps:
     title: "lk-review fixes: R1 relay off the default bridge, R2 pre-auth slot DoS, R3 tiny-fragment SMTP bypass, R6 fail-closed hardening, R7 swap cap, R12, R14, R16, R19 bench hostname leak; netstack first-run readiness; known items (pty test on macOS, SDK tests without docker, bench smaps matcher)"
     depends_on: [lk-review]
     artifacts: [crates/sandcrab-backend-docker/, crates/sandcrab-guest/, crates/sandcrab-bench/, crates/sandcrab-backend-libkrun/src/netstack.rs]
-    status: doing
+    status: done
 
   - id: lk-verified-fd
     phase: implement
@@ -317,7 +317,7 @@ steps:
     agent: nebula
     title: "Re-review review-fixes + lk-verified-fd; integrated gate on kvm-dedicated + Mac"
     depends_on: [review-fixes, lk-verified-fd]
-    status: todo
+    status: doing
 
   - id: lk-docs
     phase: document
