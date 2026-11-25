@@ -34,13 +34,21 @@
 //! [`ServerConfig::shutdown_grace`] to finish and flush their responses, then everything
 //! left is aborted, background processes are killed and the Unix socket file is removed.
 //!
+//! # Authentication
+//!
+//! With [`ServerConfig::auth`] set, every connection must open with a valid `auth` frame
+//! ([`crate::auth`]) before anything else, including `tunnel.open`; otherwise it gets one
+//! `UNAUTHORIZED` frame and is closed. Without it (microVM vsock, local tests) connections
+//! are served as before.
+//!
 //! # Transports
 //!
 //! - Unix socket (Docker, local tests): a stale socket at the path is removed on start
 //!   (a *live* one, or a non-socket file, is an error). The socket is chmod `0660`: the
 //!   Docker backend runs `crabd` as the host user's uid and the host connects as that same
 //!   uid through a bind-mounted directory, so owner (+ group) access is all that is needed.
-//! - TCP: unauthenticated; only bind to loopback or a private container network.
+//! - TCP: set [`ServerConfig::auth`] for anything but a private test listener (bind logs a
+//!   warning when it is unauthenticated).
 //! - vsock (Firecracker, Linux only): `VMADDR_CID_ANY:<port>` via [`crate::vsock`]. The
 //!   only peer is the VMM's host-side socket, so there is no extra authentication.
 
@@ -68,7 +76,9 @@ use tokio::{
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    CRABD_VERSION, ToolContext, codec, tools,
+    CRABD_VERSION, ToolContext,
+    auth::{self, AuthConfig},
+    codec, tools,
     tunnel::{self, TunnelConfig, TunnelService},
 };
 
@@ -95,6 +105,8 @@ pub struct ServerConfig {
     pub shutdown_grace: Duration,
     /// `tunnel.open` limits.
     pub tunnels: TunnelConfig,
+    /// Require the `auth` frame on every connection (see [`crate::auth`]).
+    pub auth: Option<AuthConfig>,
 }
 
 impl ServerConfig {
@@ -106,6 +118,7 @@ impl ServerConfig {
             max_inflight_per_connection: 64,
             shutdown_grace: Duration::from_secs(10),
             tunnels: TunnelConfig::default(),
+            auth: None,
         }
     }
 }
@@ -248,10 +261,12 @@ impl Server {
             },
             ListenAddr::Tcp(addr) => {
                 let l = TcpListener::bind(addr).await?;
-                warn!(
-                    addr = %l.local_addr()?,
-                    "TCP transport is unauthenticated; bind only to loopback or a private network"
-                );
+                if config.auth.is_none() {
+                    warn!(
+                        addr = %l.local_addr()?,
+                        "TCP transport is unauthenticated; bind only to loopback or a private network"
+                    );
+                }
                 Listener::Tcp(l)
             }
             #[cfg(target_os = "linux")]
@@ -302,6 +317,7 @@ impl Server {
             ..config.tunnels
         };
         let tunnels = Arc::new(TunnelService::new(tunnel_config));
+        let auth = config.auth.clone().map(Arc::new);
         let (stop_tx, stop_rx) = watch::channel(false);
         let slots = Arc::new(Semaphore::new(config.max_connections));
         let mut conns = JoinSet::new();
@@ -309,6 +325,7 @@ impl Server {
         info!(
             default_cwd = %ctx.default_cwd.display(),
             max_connections = config.max_connections,
+            authenticated = auth.is_some(),
             "crabd serving"
         );
 
@@ -334,18 +351,22 @@ impl Server {
             let handler = Arc::clone(&handler);
             let stop = stop_rx.clone();
             let inflight = config.max_inflight_per_connection;
-            let tunnels = Arc::clone(&tunnels);
+            let conn_cfg = ConnConfig {
+                handler,
+                max_inflight: inflight,
+                tunnels: Arc::clone(&tunnels),
+                auth: auth.clone(),
+            };
             match conn {
                 Conn::Unix(s) => conns.spawn(async move {
-                    serve_stream(s, handler, inflight, stop, "unix".into(), permit, tunnels).await;
+                    serve_stream(s, conn_cfg, stop, "unix".into(), permit).await;
                 }),
                 Conn::Tcp(s, peer) => conns.spawn(async move {
-                    let peer = peer.to_string();
-                    serve_stream(s, handler, inflight, stop, peer, permit, tunnels).await;
+                    serve_stream(s, conn_cfg, stop, peer.to_string(), permit).await;
                 }),
                 #[cfg(target_os = "linux")]
                 Conn::Vsock(s, peer) => conns.spawn(async move {
-                    serve_stream(s, handler, inflight, stop, peer, permit, tunnels).await;
+                    serve_stream(s, conn_cfg, stop, peer, permit).await;
                 }),
             };
         }
@@ -408,21 +429,47 @@ fn bind_unix(path: &Path) -> io::Result<UnixListener> {
     Ok(listener)
 }
 
-/// Serve an accepted connection: a raw tunnel if its first frame is `tunnel.open`, else
-/// frame mode ([`serve_connection`]). `conn_slot` is the `max_connections` permit; a tunnel
-/// releases it once it has its own slot.
+/// Per-connection settings shared by every accepted connection of a [`Server`].
+#[derive(Clone)]
+pub struct ConnConfig {
+    pub handler: Handler,
+    pub max_inflight: usize,
+    pub tunnels: Arc<TunnelService>,
+    /// `Some` = the connection must authenticate first.
+    pub auth: Option<Arc<AuthConfig>>,
+}
+
+/// Serve an accepted connection: authenticate it (when configured), then a raw tunnel if
+/// its first frame is `tunnel.open`, else frame mode ([`serve_connection`]). `conn_slot` is
+/// the `max_connections` permit; a tunnel releases it once it has its own slot.
 pub async fn serve_stream<S>(
     mut stream: S,
-    handler: Handler,
-    max_inflight: usize,
+    cfg: ConnConfig,
     mut stop: watch::Receiver<bool>,
     peer: String,
     conn_slot: OwnedSemaphorePermit,
-    tunnels: Arc<TunnelService>,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    let ConnConfig {
+        handler,
+        max_inflight,
+        tunnels,
+        auth,
+    } = cfg;
     debug!(%peer, "connection opened");
+    if let Some(auth) = auth {
+        let verdict = tokio::select! {
+            biased;
+            _ = stop.wait_for(|s| *s) => return,
+            v = auth::authenticate(&mut stream, &auth) => v,
+        };
+        if let Err(why) = verdict {
+            warn!(%peer, reason = ?why, "connection failed authentication; closed");
+            return;
+        }
+        debug!(%peer, "connection authenticated");
+    }
     let first = tokio::select! {
         biased;
         _ = stop.wait_for(|s| *s) => return,

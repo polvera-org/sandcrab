@@ -444,6 +444,79 @@ async fn tcp_transport() {
     handle.await.unwrap().unwrap();
 }
 
+/// Security: with a token, a TCP connection that sends no / a wrong token gets one
+/// UNAUTHORIZED frame, is closed, and no tool call or tunnel runs on it.
+#[tokio::test]
+async fn tcp_auth_refuses_missing_or_wrong_token_and_runs_nothing() {
+    use sandcrab_guest::AuthConfig;
+    use sandcrab_protocol::{AUTH_TOKEN_BYTES, AuthToken};
+
+    let dir = tempfile::tempdir().unwrap();
+    let token = AuthToken::from_bytes(&[0x5a; AUTH_TOKEN_BYTES]);
+    let mut config = ServerConfig::new(ListenAddr::Tcp("127.0.0.1:0".into()));
+    config.auth = Some(AuthConfig {
+        token: token.clone(),
+        timeout: Duration::from_millis(300),
+    });
+    let server = Server::bind(config, Arc::new(ToolContext::new(dir.path())))
+        .await
+        .unwrap();
+    let addr = server.tcp_addr().unwrap();
+    let (tx, rx) = oneshot::channel::<()>();
+    let handle = tokio::spawn(server.run(async {
+        let _ = rx.await;
+    }));
+    let marker = dir.path().join("pwned");
+    let touch = req(
+        1,
+        "bash",
+        json!({ "command": format!("touch {}", marker.display()) }),
+    );
+    let wrong = AuthToken::from_bytes(&[0xa5; AUTH_TOKEN_BYTES]);
+
+    // 1. Tool call with no auth frame. 2. Wrong token, then a tool call. 3. Tunnel with no
+    // auth. 4. Silence until the auth timeout.
+    for case in 0..4 {
+        let mut c = tokio::net::TcpStream::connect(addr).await.unwrap();
+        match case {
+            0 => send(&mut c, &touch).await,
+            1 => {
+                send(&mut c, &serde_json::to_value(wrong.to_request(0)).unwrap()).await;
+                send(&mut c, &touch).await;
+            }
+            2 => send(&mut c, &req(1, "tunnel.open", json!({ "port": 22 }))).await,
+            _ => {}
+        }
+        let resp = recv(&mut c).await;
+        assert_eq!(
+            error_code(&resp),
+            codes::UNAUTHORIZED,
+            "case {case}: {resp}"
+        );
+        assert!(
+            !resp.to_string().contains(token.expose()),
+            "token leaked: {resp}"
+        );
+        assert!(
+            matches!(codec::read_frame(&mut c).await, Ok(None) | Err(_)),
+            "case {case}: connection must be closed after the refusal"
+        );
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!marker.exists(), "an unauthenticated tool call ran");
+
+    // The right token: auth ack, then normal frames.
+    let mut c = tokio::net::TcpStream::connect(addr).await.unwrap();
+    send(&mut c, &serde_json::to_value(token.to_request(0)).unwrap()).await;
+    assert_eq!(recv(&mut c).await["result"], json!({}));
+    send(&mut c, &touch).await;
+    assert_eq!(recv(&mut c).await["result"]["exit_code"], json!(0));
+    assert!(marker.exists());
+
+    tx.send(()).unwrap();
+    handle.await.unwrap().unwrap();
+}
+
 #[tokio::test]
 async fn shutdown_closes_idle_connections() {
     let srv = TestServer::start().await;

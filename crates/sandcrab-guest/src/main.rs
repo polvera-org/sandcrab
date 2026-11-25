@@ -2,11 +2,15 @@
 //!
 //! ```text
 //! crabd serve (--unix <path> | --tcp <addr> | --vsock <port>) [--default-cwd /workspace]
+//!             [--auth-token-file <path>]
+//! crabd relay --tcp <addr> --unix <path>   # TCP -> Unix socket pump (Docker TCP transport)
 //! crabd init        # PID 1 of a microVM (also selected automatically when PID == 1)
 //! ```
 //!
 //! Subcommands:
 //! - `serve`: answer framed JSON-RPC tool calls (see the `sandcrab_guest` library docs).
+//! - `relay`: copy bytes between TCP clients and `crabd`'s Unix socket (see
+//!   `sandcrab_guest::relay`); authentication stays end to end in `serve`.
 //! - `init`: PID 1 mode for microVMs that mounts the rootfs / workspaces, takes config over
 //!   the vsock control port and spawns `crabd serve` (see `sandcrab_guest::init`).
 //!
@@ -15,7 +19,11 @@
 use std::{path::PathBuf, process::ExitCode, sync::Arc, time::Duration};
 
 use clap::{Args, Parser, Subcommand};
-use sandcrab_guest::{ListenAddr, Server, ServerConfig, ToolContext, server::shutdown_signal};
+use sandcrab_guest::{
+    AuthConfig, ListenAddr, Server, ServerConfig, ToolContext,
+    relay::{Relay, RelayConfig},
+    server::shutdown_signal,
+};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -30,6 +38,8 @@ struct Cli {
 enum Command {
     /// Serve tool calls over a Unix socket, TCP or vsock.
     Serve(ServeArgs),
+    /// Relay TCP connections to a `crabd serve --unix` socket (no auth of its own).
+    Relay(RelayArgs),
     /// Run as PID 1 of a Sandcrab microVM (mounts, control port, spawns `serve`).
     Init,
 }
@@ -58,6 +68,26 @@ struct ServeArgs {
     /// Grace period for in-flight requests on SIGTERM / SIGINT, in milliseconds.
     #[arg(long, value_name = "MS", default_value_t = 10_000)]
     shutdown_grace_ms: u64,
+
+    /// Require every connection to open with an `auth` frame carrying the token in this
+    /// file (64 hex digits). The file is deleted after it is read, when possible.
+    #[arg(long, value_name = "PATH")]
+    auth_token_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct RelayArgs {
+    /// TCP address to listen on, e.g. 0.0.0.0:7070.
+    #[arg(long, value_name = "ADDR")]
+    tcp: String,
+
+    /// `crabd serve` Unix socket to forward to.
+    #[arg(long, value_name = "PATH")]
+    unix: PathBuf,
+
+    /// Max concurrently relayed connections.
+    #[arg(long, value_name = "N", default_value_t = 256, value_parser = clap::value_parser!(u32).range(1..))]
+    max_connections: u32,
 }
 
 /// Exactly one transport.
@@ -122,6 +152,7 @@ async fn cli_main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
         Command::Serve(args) => serve(args).await,
+        Command::Relay(args) => relay(args).await,
         Command::Init => unreachable!("handled before argument parsing"),
     };
     match result {
@@ -143,6 +174,11 @@ async fn serve(args: ServeArgs) -> std::io::Result<()> {
     config.max_inflight_per_connection = args.max_inflight as usize;
     config.tunnels.max_tunnels = args.max_tunnels as usize;
     config.shutdown_grace = Duration::from_millis(args.shutdown_grace_ms);
+    if let Some(path) = &args.auth_token_file {
+        config.auth = Some(AuthConfig::new(sandcrab_guest::auth::load_token_file(
+            path,
+        )?));
+    }
 
     let shutdown = shutdown_signal()?;
     let server = Server::bind(config, ctx).await?;
@@ -153,4 +189,20 @@ async fn serve(args: ServeArgs) -> std::io::Result<()> {
         "crabd listening"
     );
     server.run(shutdown).await
+}
+
+async fn relay(args: RelayArgs) -> std::io::Result<()> {
+    let shutdown = shutdown_signal()?;
+    let relay = Relay::bind(RelayConfig {
+        listen: args.tcp,
+        target: args.unix,
+        max_connections: args.max_connections as usize,
+    })
+    .await?;
+    info!(
+        version = sandcrab_guest::CRABD_VERSION,
+        listen = %relay.local_addr()?,
+        "crabd relay listening"
+    );
+    relay.run(shutdown).await
 }
