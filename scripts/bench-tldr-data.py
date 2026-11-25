@@ -15,12 +15,17 @@ What it picks, per host and backend (template "base", warm cache):
 It also checks the claims the page's "What it means" fold makes, and exits non-zero if a
 new run breaks one, so the page cannot keep a conclusion its numbers no longer support.
 
+Before writing, it runs a self-test that feeds check_claims mutated data (e.g. a fake
+Firecracker idle memory below Docker's) and fails if a broken claim would get through.
+
 Usage (from the repo root):
-    python3 scripts/bench-tldr-data.py
+    python3 scripts/bench-tldr-data.py              # self-test, then write the page
+    python3 scripts/bench-tldr-data.py --self-test  # self-test only
 """
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 import sys
@@ -185,6 +190,9 @@ def build_host(hid: str, runs: tuple) -> dict:
                 "multi_tenant_safe": bool(caps and caps.get("multi_tenant_safe")),
                 "file": f,
             }
+    for b, c in backends.items():
+        if c["spawn_ready"] is None:
+            sys.exit(f"{hid}: {b} has no ok lifecycle spawn_ready cell; the page cannot render it")
     for b, dn in dens_override.items():
         if b in backends and dn:
             backends[b]["density"] = dn
@@ -209,25 +217,85 @@ def check_claims(hosts: list) -> dict:
             fails.append(f"{b} on kvm-dedicated: not hardware isolated or spawn p95 >= 1 s")
     if not (mac["libkrun"]["hardware_isolated"] and mac["libkrun"]["spawn_ready"]["p95"] < 1e9):
         fails.append("libkrun on mac-m2: not hardware isolated or spawn p95 >= 1 s")
-    # 3. Docker is lightest at idle on the same host, same memory kind, also with its daemons.
-    dk, lk = kvm["docker"], kvm["libkrun"]
-    if dk["mem_idle"]["kind"] != lk["mem_idle"]["kind"]:
-        fails.append("kvm-dedicated docker/libkrun memory kinds differ")
+    # 3. Docker is lighter at idle than every microVM measured on the same host (same memory
+    # kind, also with its daemons). The page names exactly the microVMs in `light_vs`, so an
+    # unmeasured one (no idle memory and CPU) is never implied by the claim.
+    dk = kvm["docker"]
     dens_n = dk["density"]["max_n"]
-    if not (dk["mem_idle"]["bytes"] < lk["mem_idle"]["bytes"]
-            and dk["cpu_idle"]["cpu_s"] < lk["cpu_idle"]["cpu_s"]
-            and dk["mem_idle"]["bytes"] * dens_n + (dk["shared_daemons_bytes"] or 0)
-            < lk["mem_idle"]["bytes"] * dens_n):
-        fails.append("docker is not lighter than libkrun at idle on kvm-dedicated")
+    vms = [b for b in ORDER if b in kvm and kvm[b]["hardware_isolated"]]
+    light_vs = []
+    for b in vms:
+        vm = kvm[b]
+        if vm["mem_idle"] is None and vm["cpu_idle"] is None:
+            continue
+        light_vs.append(b)
+        if vm["mem_idle"] is None or vm["cpu_idle"] is None:
+            fails.append(f"{b} on kvm-dedicated has only one of idle memory/CPU measured")
+            continue
+        if dk["mem_idle"]["kind"] != vm["mem_idle"]["kind"]:
+            fails.append(f"kvm-dedicated docker/{b} memory kinds differ")
+        if not (dk["mem_idle"]["bytes"] < vm["mem_idle"]["bytes"]
+                and dk["cpu_idle"]["cpu_s"] < vm["cpu_idle"]["cpu_s"]
+                and dk["mem_idle"]["bytes"] * dens_n + (dk["shared_daemons_bytes"] or 0)
+                < vm["mem_idle"]["bytes"] * dens_n):
+            fails.append(f"docker is not lighter than {b} at idle on kvm-dedicated")
+    if not light_vs:
+        fails.append("no microVM on kvm-dedicated has idle memory/CPU to compare docker with")
     if dk["hardware_isolated"] or dk["multi_tenant_safe"]:
         fails.append("docker reports hardware isolation or multi-tenant safety")
     if fails:
         sys.exit("claims no longer hold:\n  " + "\n  ".join(fails))
-    return {"ok": True, "fleet_n": dens_n}
+    return {"ok": True, "fleet_n": dens_n, "light_vs": light_vs,
+            "light_vs_all": light_vs == vms}
+
+
+def self_test(hosts: list) -> None:
+    """check_claims must reject data that breaks a claim (mutation tests on a copy)."""
+    def kvm_col(hs: list, b: str) -> dict:
+        h = next(h for h in hs if h["id"] == "kvm-dedicated")
+        return next(c for c in h["backends"] if c["backend"] == b)
+
+    def rejects(mutate) -> bool:
+        hs = copy.deepcopy(hosts)
+        mutate(hs)
+        try:
+            check_claims(hs)
+        except SystemExit:
+            return True
+        return False
+
+    def fake_fc(hs: list, mem: bool, cpu: bool) -> None:
+        fc, dk = kvm_col(hs, "firecracker"), kvm_col(hs, "docker")
+        if mem:
+            fc["mem_idle"] = {"bytes": 1 << 20, "kind": dk["mem_idle"]["kind"], "n": 10}
+        if cpu:
+            fc["cpu_idle"] = {"cpu_s": 1.0, "window_s": 60}
+
+    base = check_claims(copy.deepcopy(hosts))
+    cases = {
+        # The case the review found: a microVM lighter than Docker must break claim 3.
+        "firecracker idle memory 1 MiB": lambda hs: fake_fc(hs, mem=True, cpu=True),
+        "firecracker idle memory only": lambda hs: fake_fc(hs, mem=True, cpu=False),
+        "firecracker spawn faster than libkrun": lambda hs: kvm_col(hs, "firecracker")[
+            "spawn_ready"].update(p50=1.0),
+        "docker hardware isolated": lambda hs: kvm_col(hs, "docker").update(
+            hardware_isolated=True),
+    }
+    missed = [name for name, m in cases.items() if not rejects(m)]
+    if missed:
+        sys.exit("self-test: check_claims accepted broken data: " + ", ".join(missed))
+    unmeasured = [b for b in ("firecracker",)
+                  if kvm_col(hosts, b)["mem_idle"] is None and b in base["light_vs"]]
+    if unmeasured:
+        sys.exit(f"self-test: claim 3 names unmeasured {unmeasured}")
 
 
 def main() -> None:
     hosts = [build_host(hid, runs) for hid, runs in HOSTS]
+    self_test(hosts)
+    if "--self-test" in sys.argv[1:]:
+        print("self-test ok")
+        return
     data = {
         "generator": "scripts/bench-tldr-data.py",
         "hosts": hosts,
