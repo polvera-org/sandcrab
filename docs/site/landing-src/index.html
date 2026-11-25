@@ -69,7 +69,7 @@
     <div class="narr">
       <div class="col hero-copy">
         <p class="tagline"><span>Open-source sandboxing for AI agents.</span> <span>Written in Rust, licensed Apache-2.0.</span></p>
-        <p class="hero-lede">Give every agent turn a fresh, locked-down sandbox in about 250&nbsp;ms, then throw it away. The workspace survives every molt. One tiny Rust daemon, <code>crabd</code>, speaks the same protocol on every backend.</p>
+        <p class="hero-lede">Give every agent turn a fresh, locked-down sandbox in about 250&nbsp;ms (Docker on an SSD VPS), then throw it away. The workspace survives every molt. One tiny Rust daemon, <code>crabd</code>, speaks the same protocol on every backend.</p>
         <p class="sr-only">Scene: a coral crab sits inside a sealed glass jar. The jar is one sandbox.</p>
         <div class="cta-row">
           <a class="pill" href="#start">Quickstart</a>
@@ -78,7 +78,7 @@
         <dl class="status">
           <div><dt>Docker</dt><dd>Production-ready</dd></div>
           <div><dt>Firecracker</dt><dd>Built, KVM tests pending</dd></div>
-          <div><dt>Spawn</dt><dd>About 250&nbsp;ms</dd></div>
+          <div><dt>Spawn</dt><dd>About 250&nbsp;ms (Docker, SSD VPS)</dd></div>
         </dl>
       </div>
       <div class="aside" aria-hidden="true"><img class="poster" src="assets/crab/isolation.webp" width="1536" height="1030" alt="" fetchpriority="high"></div>
@@ -151,7 +151,7 @@
         <div class="measure">
           <h2 id="stats-h">Measured, not promised</h2>
           <p class="kicker">Docker backend, 2-vCPU VPS, n=30</p>
-          <p class="lede">Every number below comes from one canonical benchmark run, kept in the repo with its raw JSON. Firecracker has no numbers yet: its benchmark waits for a KVM host.</p>
+          <p class="lede">Every number below comes from one canonical Docker run on a 2-vCPU SSD VPS, kept in the repo with its raw JSON. Spawn time depends on the host: on a bare-metal KVM box with HDD storage, Docker was several times slower. Firecracker and libkrun have been benchmarked too, on other hosts; the report shows every host with its caveats.</p>
           <p><a class="link" href="../bench-report.html">Read the bench report</a></p>
           <ul class="stats">
             <li><span class="stat-v">~250<small>ms</small></span><span class="stat-k">Spawn to ready, p50</span><span class="stat-s">227–258 ms across templates</span></li>
@@ -238,7 +238,7 @@
             <p class="be-status">Built, KVM tests pending</p>
             <h3>Firecracker microVMs</h3>
             <p class="be-tag">Own kernel behind KVM, hardware isolation</p>
-            <p>Its own kernel per sandbox, for hostile multi-tenant code. Built and tested against a fake VMM; real-KVM end-to-end tests and benchmarks are pending, so no numbers yet.</p>
+            <p>Its own kernel per sandbox, for hostile multi-tenant code. First real-KVM benchmarks are in the bench report: one bare-metal host whose HDD storage skews the Docker comparison, so no general speed claim yet.</p>
             <ul class="ticks">
               <li>Same <code>crabd</code>, same frames, same tools</li>
               <li>Workspaces become block drives, synced back at teardown</li>
