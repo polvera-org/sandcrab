@@ -40,7 +40,7 @@ steps:
     title: "Point the landing (nav, benchmark section, footer; rebuild), site index and README at benchmarks.html; keep bench-report.html for presentations"
     depends_on: [tldr-page]
     artifacts: [docs/site/landing-src/index.html, docs/site/landing/, docs/site/index.html, README.md]
-    status: doing
+    status: done
 
   - id: tldr-review
     phase: verify
