@@ -341,4 +341,4 @@ steps:
     title: "README hero: replace the old crab photo with a transparent PNG render of the 3D crab kit, one simple static scene readable at a glance (user request)"
     depends_on: [lk-docs]
     artifacts: [README.md, docs/assets/]
-    status: doing
+    status: done
