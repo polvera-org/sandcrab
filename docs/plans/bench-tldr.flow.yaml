@@ -24,7 +24,7 @@ steps:
     title: "Build docs/site/benchmarks.html via its own generator scripts/bench-tldr-data.py reading the results JSON (no hand-typed numbers); no validity/invalid badges (marketing page), factual host + hardware labels; 'See full benchmark' link; light/dark; phone width"
     depends_on: [tldr-plan]
     artifacts: [docs/site/benchmarks.html, scripts/bench-tldr-data.py]
-    status: doing
+    status: done
 
   - id: bench-validity
     phase: implement
@@ -40,7 +40,7 @@ steps:
     title: "Point the landing (nav, benchmark section, footer; rebuild), site index and README at benchmarks.html; keep bench-report.html for presentations"
     depends_on: [tldr-page]
     artifacts: [docs/site/landing-src/index.html, docs/site/landing/, docs/site/index.html, README.md]
-    status: todo
+    status: doing
 
   - id: tldr-review
     phase: verify
