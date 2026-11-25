@@ -115,9 +115,27 @@ build cache. Dev machines can run out of space mid-task, which breaks Docker and
 
 ## 5. Picking Up From Here (Agent Handoff)
 
-Phase 1 (V1) is complete on the Docker backend; see [`docs/ROADMAP.md`](docs/ROADMAP.md) (V1 status) and the flow
-[`docs/plans/phase-1-mvp.flow.yaml`](docs/plans/phase-1-mvp.flow.yaml). Next agent:
-1. Bring up a KVM host (bare metal, or a VM with nested virtualization and `cpu=host`) per [`docs/hosting.md`](docs/hosting.md).
-2. Run the pending Firecracker e2e suite (`cargo test -p sandcrab-backend-firecracker -- --ignored`) and the benchmark with `--backends docker,firecracker`, then regenerate `docs/site/bench-report.html` (`scripts/bench-report-data.py`).
-3. Close the deferred review item: pack/commit workspaces through the verified root fd and have `crabd` re-check root dev/ino after start (cross-registry nesting race).
-4. Phase 2: Cloud Hypervisor + `libkrun` backends, then the egress proxy (Phase 3).
+**Done.** Phase 1 (V1) and the libkrun backend flow (Phase 2, partial) are complete on `feat/phase-1`; see
+[`docs/ROADMAP.md`](docs/ROADMAP.md#status) and the flows [`docs/plans/phase-1-mvp.flow.yaml`](docs/plans/phase-1-mvp.flow.yaml)
+and [`docs/plans/libkrun-backend.flow.yaml`](docs/plans/libkrun-backend.flow.yaml). Three backends ship: Docker (Linux,
+and macOS over the `tcp` transport), Firecracker (Linux KVM; KVM e2e passes) and libkrun (Apple Silicon macOS and
+Linux KVM; e2e passes on both). Also done: protocol 0.2 connection auth, guest hardening that fails closed,
+host-local template pins, pins verified through the fd that is used, a per-host bench report. The final review
+([`docs/reviews/libkrun-backend-review.md`](docs/reviews/libkrun-backend-review.md)) says "ship with follow-ups".
+Host setup for every backend: [`docs/hosting.md`](docs/hosting.md).
+
+**Next**, roughly in this order:
+1. The review backlog ([`docs/ROADMAP.md`](docs/ROADMAP.md#next)). The top three (R18 private-dir checks, N2 stamps bound to
+   digests, N3 quarantine cleared through the fd) are the `integrity-fixes` step; then R10 (sign and notarize with a
+   real Developer ID; note that `sandcrab libkrun install` re-signs every helper), the `doctor` checks for swap and
+   TSI precedence, I1 (fd passing for Firecracker drives before the jailer), R9 (setuid bits on virtio-fs shares).
+   Also drop the stale "e2e pending" note from the libkrun `doctor` summary.
+2. Benchmarks ([`docs/bench/README.md`](docs/bench/README.md#open-bench-todo)): Docker vs libkrun on mac-m2 in an idle
+   weekend window (`--backends docker,libkrun`); one valid, interleaved `docker,firecracker,libkrun` run on an SSD/NVMe
+   KVM host (kvm-dedicated's HDDs skew Docker). Then regenerate `docs/site/bench-report.html`
+   (`scripts/bench-report-data.py`).
+3. The older deferred review items: pack/commit workspaces through the verified root fd and have `crabd` re-check root
+   dev/ino after start; the cross-registry nesting race.
+4. Phase 2 remainder: Cloud Hypervisor backend, Firecracker `jailer` (then reconsider `multi_tenant_safe`), libkrun helper
+   confinement (Seatbelt / Landlock + seccomp), reproducible template content digests.
+5. Phase 3: the egress allowlist and secret-injection proxy.
