@@ -27,9 +27,6 @@ use crate::args::BackendArg;
 use crate::doctor::{Report, Status};
 use crate::util::{self, print_json};
 
-/// Appended to the doctor summary until the backend has passed its end-to-end run.
-pub const E2E_NOTE: &str = "e2e pending";
-
 /// `$SANDCRAB_SIGN_IDENTITY`: codesign identity for the helper (default `-`, ad hoc).
 #[cfg(target_os = "macos")]
 pub const SIGN_IDENTITY_ENV: &str = "SANDCRAB_SIGN_IDENTITY";
@@ -420,16 +417,13 @@ pub fn doctor(g: &Global, r: &mut Report) {
         r.add(
             "libkrun",
             Status::Ok,
-            format!("libkrun: ready (hardware isolated) — {E2E_NOTE}"),
+            "libkrun: ready (hardware isolated)",
         );
     } else {
         r.add(
             "libkrun",
             if selected { Status::Fail } else { Status::Info },
-            format!(
-                "libkrun: unavailable ({}) — {E2E_NOTE}",
-                blockers.join(", ")
-            ),
+            format!("libkrun: unavailable ({})", blockers.join(", ")),
         );
     }
 }
