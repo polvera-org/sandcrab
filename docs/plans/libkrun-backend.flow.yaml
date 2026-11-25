@@ -198,7 +198,7 @@ steps:
     title: "Bench on kvm-dedicated, STANDARD tier (--resource-runs 10), --backends libkrun only; reuse the full docker,firecracker run from bench-kvm-fc"
     depends_on: [lk-e2e-linux, bench-kvm-fc, bench-fixes, lk-w2-emfile]
     artifacts: [docs/bench/results/]
-    status: todo
+    status: doing
 
   - id: bench-report
     phase: implement
@@ -256,7 +256,7 @@ steps:
     title: "libkrun W2 (two workspaces) fails with EMFILE in the guest on Linux (found by bench smoke); root-cause + fix + regression test; also explain Firecracker idle CPU ~30x libkrun"
     depends_on: [bench-fixes, lk-e2e-linux]
     artifacts: [crates/sandcrab-backend-libkrun/, crates/sandcrab-guest/]
-    status: doing
+    status: done
 
   - id: guest-hardening-3
     phase: implement
@@ -264,7 +264,7 @@ steps:
     title: "crabd: /sys read-only for the sandbox (Docker parity), hardening sysctls in init (unprivileged userns/bpf/userfaultfd/io_uring/perf off) per docs/design/guest-seccomp.md"
     depends_on: [guest-hardening-2, lk-w2-emfile]
     artifacts: [crates/sandcrab-guest/]
-    status: todo
+    status: doing
 
   - id: lk-review
     phase: verify
