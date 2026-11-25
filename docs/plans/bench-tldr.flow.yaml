@@ -21,9 +21,17 @@ steps:
   - id: tldr-page
     phase: implement
     agent: ada
-    title: "Build docs/site/benchmarks.html from scripts/bench-report-data.py output (no hand-typed numbers); 'See full benchmark' link to bench-report.html; light/dark; phone width"
+    title: "Build docs/site/benchmarks.html via its own generator scripts/bench-tldr-data.py reading the results JSON (no hand-typed numbers); no validity/invalid badges (marketing page), factual host + hardware labels; 'See full benchmark' link; light/dark; phone width"
     depends_on: [tldr-plan]
-    artifacts: [docs/site/benchmarks.html, scripts/bench-report-data.py]
+    artifacts: [docs/site/benchmarks.html, scripts/bench-tldr-data.py]
+    status: todo
+
+  - id: bench-validity
+    phase: implement
+    agent: ada
+    title: "sandcrab-bench: (1) preflight (~2 min: load, disk type, short drift probe) that predicts an invalid run before a long one starts; (2) tier-aware validity (valid for smoke/standard/full by each tier's own rules; 'full' stays the publish bar); recompute for committed results; full report shows it"
+    depends_on: [tldr-plan]
+    artifacts: [crates/sandcrab-bench/, docs/bench/results/schema.json, scripts/bench-report-data.py, docs/site/bench-report.html, docs/bench/README.md]
     status: todo
 
   - id: tldr-links
@@ -37,8 +45,8 @@ steps:
   - id: tldr-review
     phase: verify
     agent: nebula
-    title: "Review: every number traces to the JSON, caveats are honest (no invalid run presented as definitive), no private hostnames, links work"
-    depends_on: [tldr-links]
+    title: "Review: every number traces to the JSON, host/hardware labels present and comparisons within-host, no private hostnames, links work; bench-validity preflight + tier validity logic"
+    depends_on: [tldr-links, bench-validity]
     status: todo
 
   - id: tldr-live
@@ -51,7 +59,7 @@ steps:
   - id: tldr-docs
     phase: document
     agent: rosetta
-    title: "docs/bench/README.md: how the TL;DR page is generated; CHANGELOG line"
+    title: "docs/bench/README.md: TL;DR page generation, preflight, tier validity; AGENTS.md bench tiers note; CHANGELOG"
     depends_on: [tldr-review, tldr-live]
     artifacts: [docs/bench/README.md, CHANGELOG.md]
     status: todo

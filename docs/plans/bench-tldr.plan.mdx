@@ -30,15 +30,19 @@ Steps sitting side by side run in parallel. Arrows are real dependencies.
    host (with host labels), as big numbers.
 2. **Footprint.** Memory per idle sandbox, density (sandboxes per host), idle CPU.
 3. **What it means.** Three bullets: microVMs start fast enough for per-turn sandboxes; Docker is lightest on
-   memory; pick by isolation needs. One line on validity ("indicative: no run is valid yet") and a link to the
-   caveats.
+   memory; pick by isolation needs. No validity badges: strict validity is an internal engineering rule, and
+   these are real measurements. Every number carries its host and hardware label.
 4. **Footer.** "See full benchmark →" and the date, commit and hosts of the runs.
+
+## Also in this flow (user request)
+
+- **Bench preflight.** About 2 minutes before any long run, it checks host load, disk type and a short drift probe,
+  and warns that the run would come out invalid before hours are spent.
+- **Tier-aware validity.** A run is "valid" by the rules of its own tier (smoke, standard or full). "Full" stays
+  the bar for published numbers. This is internal: it's shown in the full report, not on the TL;DR page.
 
 ## Risks & open questions
 
-- **No run is `valid` yet** (busy Mac, HDD host, Standard tier). The page has to stay honest without becoming a
-  paper: one visible "indicative" badge plus a link to the caveats.
-- **Mac Docker numbers are still pending** the reserved weekend idle-Mac run. Proposal: show "pending" rather
-  than leave the column empty.
-- **Cross-host comparisons** (e.g. Docker on the SSD VPS vs microVMs on the HDD box) mislead. Proposal: compare
-  only within a host, and show host labels next to every number.
+- **Mac Docker numbers are pending** the weekend idle-Mac run. That column shows "coming soon", not a gap.
+- **Fairness without caveat walls.** Compare backends only within a host, and label each host's hardware (e.g. HDD)
+  next to its numbers, so the page stays truthful without a list of disclaimers.
