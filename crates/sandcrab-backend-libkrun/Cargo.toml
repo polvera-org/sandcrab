@@ -25,9 +25,10 @@ sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-rustix = { workspace = true, features = ["fs", "process", "stdio"] }
+rustix = { workspace = true, features = ["fs", "process", "stdio", "thread"] }
 
-# The helper SHA-256s ~33 MB of libkrun + libkrunfw on every spawn: use the ARMv8 SHA2
+# Pinned files are re-hashed only when their stat stamp does not match (design §12.4), but
+# install and that fallback hash ~33 MB of libkrun + libkrunfw: use the ARMv8 SHA2
 # instructions (sha2's `asm` backend) instead of the portable code (~95 ms → ~20 ms on M2).
 [target.'cfg(target_arch = "aarch64")'.dependencies]
 sha2 = { workspace = true, features = ["asm"] }

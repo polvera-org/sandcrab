@@ -141,7 +141,11 @@ pub(crate) fn unix_ms() -> Option<u64> {
 /// Process-level inputs of [`KrunVm::launch`].
 #[derive(Debug, Clone)]
 pub(crate) struct Launch<'a> {
+    /// The installed helper: its `argv[0]`, and what is executed unless `exec` is set.
     pub helper: &'a Path,
+    /// What to `execve` instead of `helper`: on Linux `/proc/self/fd/<n>` of the backend's
+    /// verified fd of the helper (design §12.4), so the binary that runs is the one checked.
+    pub exec: Option<&'a Path>,
     /// Directory holding libkrunfw (exported as [`LIB_PATH_ENV`]).
     pub lib_dir: &'a Path,
     /// The validated config line (`HelperConfig::to_line`).
@@ -213,7 +217,10 @@ impl KrunVm {
             .open(&log_path)
             .map_err(|e| io_at(&log_path, e))?;
         let log2 = log.try_clone().map_err(|e| io_at(&log_path, e))?;
-        let mut cmd = Command::new(l.helper);
+        let mut cmd = Command::new(l.exec.unwrap_or(l.helper));
+        // argv[0] stays the installed path (`ps`, orphan reaping and the tests match on it);
+        // after an fd exec the helper renames its thread (comm) itself.
+        cmd.arg0(l.helper);
         cmd.current_dir(&self.dir)
             .env_clear()
             .env(LIB_PATH_ENV, l.lib_dir)
@@ -658,6 +665,7 @@ mod tests {
     fn launch<'a>(helper: &'a Path, lib_dir: &'a Path) -> Launch<'a> {
         Launch {
             helper,
+            exec: None,
             lib_dir,
             config_line: b"{\"version\":1}\n",
             cgroup: None,

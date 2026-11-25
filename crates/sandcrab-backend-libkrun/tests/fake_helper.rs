@@ -39,6 +39,7 @@ use sandcrab_backend_libkrun::helper_proto::{
 };
 use sandcrab_backend_libkrun::netstack::NetstackKind;
 use sandcrab_backend_libkrun::reap::{ProcId, RunMeta};
+use sandcrab_backend_libkrun::verified::HelperRecord;
 use sandcrab_backend_libkrun::{KrunLibs, LibkrunBackend, LibkrunConfig, RootfsSource};
 use sandcrab_core::testing::MockCrabd;
 use sandcrab_core::{
@@ -389,6 +390,13 @@ fn backend_libs_at(
     if !helper.exists() {
         fs::create_dir_all(&bin).unwrap();
         std::os::unix::fs::symlink(std::env::current_exe().unwrap(), &helper).unwrap();
+        // The install record `sandcrab libkrun install` writes (hash the test binary once per
+        // process): the backend then checks the helper with one `fstat` per spawn.
+        static RECORD: std::sync::OnceLock<HelperRecord> = std::sync::OnceLock::new();
+        RECORD
+            .get_or_init(|| HelperRecord::record(&helper).unwrap())
+            .save(&helper)
+            .unwrap();
     }
     let lib = home.join("lib");
     fs::create_dir_all(&lib).unwrap();
@@ -1106,7 +1114,9 @@ async fn network_policies() {
         binary: sandcrab_backend_libkrun::helper_proto::PinnedFile {
             sha256: sandcrab_backend_libkrun::artifacts::sha256_file(&ns_bin).unwrap(),
             path: ns_bin,
+            stamp: None,
         },
+        avx2: None,
     };
     let e = env_libs(|_| {}, |l| l.netstack = Some(ns.clone()));
     let sb = e

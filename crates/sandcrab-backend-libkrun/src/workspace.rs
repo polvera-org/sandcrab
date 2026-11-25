@@ -106,6 +106,7 @@ pub(crate) fn plan_with(
                     path: m.host_path.clone(),
                     read_only,
                     sha256: None,
+                    stamp: None,
                 });
                 // The volume's own ext4 label is unknown: resolve by serial only.
                 plan.guest_mounts.push(GuestMount::block(
@@ -234,6 +235,7 @@ mod tests {
                 path: "/v/vol.ext4".into(),
                 read_only: false,
                 sha256: None,
+                stamp: None,
             }]
         );
         assert_eq!(

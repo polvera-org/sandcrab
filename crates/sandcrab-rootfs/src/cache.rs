@@ -10,9 +10,15 @@
 //! cache entry and are published with an atomic `rename`, so a concurrent reader never sees a partial
 //! image. Per-sandbox writable state goes on a sparse scratch drive ([`create_scratch`]) that guest
 //! init overlays on top of the read-only base.
+//!
+//! The published image is `0444` and its manifest records a stat stamp ([`FileStamp`]) next to
+//! `rootfs_sha256`. Backends open it with [`open_image`]: one `fstat` proves it is the inode that
+//! was hashed, unmodified since (a mismatch re-hashes it through the same fd, then re-records or
+//! refuses), and the VMM gets that verified fd, never the path (libkrun design §12.4).
 
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -25,6 +31,7 @@ use crate::augment;
 use crate::error::{Error, IoCtx, Result};
 use crate::hash::{sha256_bytes, sha256_file};
 use crate::mkfs::{self, MkfsStrategy};
+use crate::stamp::{self, FileStamp, VerifiedFile};
 
 /// Bump whenever the produced image changes for the same inputs (augmentation, mkfs flags, layout)
 /// or the key derivation changes. 2: arch in the key and the manifest.
@@ -107,6 +114,11 @@ pub struct RootfsManifest {
     pub crabd_path: String,
     pub mkfs: MkfsStrategy,
     pub rootfs_sha256: String,
+    /// Stat stamp of `rootfs.ext4` that goes with `rootfs_sha256` ([`crate::stamp`]). Absent in
+    /// manifests written before stamps existed: the first [`open_image`] re-hashes the image
+    /// and records it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rootfs_stamp: Option<FileStamp>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -124,6 +136,71 @@ impl RootfsManifest {
     pub fn to_json(&self) -> String {
         serde_json::to_string_pretty(self).expect("manifest serializes")
     }
+
+    /// Write `path` atomically (temp file in the same dir, fsync, rename).
+    pub fn save(&self, path: &Path) -> Result<()> {
+        let dir = path.parent().unwrap_or(Path::new("."));
+        let tmp = dir.join(format!(".{MANIFEST_FILE}.{}.tmp", std::process::id()));
+        let res = (|| {
+            let mut f = File::create(&tmp).at(&tmp)?;
+            f.write_all(self.to_json().as_bytes()).at(&tmp)?;
+            f.sync_all().at(&tmp)?;
+            fs::rename(&tmp, path).at(path)
+        })();
+        if res.is_err() {
+            let _ = fs::remove_file(&tmp);
+        }
+        res
+    }
+}
+
+/// A cached rootfs image opened once and verified through that fd ([`open_image`]).
+#[derive(Debug)]
+pub struct VerifiedImage {
+    /// The open, verified image (read-only). Hand the VMM this fd (or
+    /// [`crate::stamp::fd_path`] of it), not the path.
+    pub verified: VerifiedFile,
+    pub path: PathBuf,
+    /// The manifest, with the stamp that now goes with the image.
+    pub manifest: RootfsManifest,
+    /// Re-recording a fresh stamp in `manifest.json` failed (read-only cache?): the image is
+    /// still verified, but the next process re-hashes it. For the caller to log.
+    pub record_error: Option<Error>,
+}
+
+/// Open `<dir>/rootfs.ext4` and verify it against `manifest` through that fd: a matching
+/// stamp costs one `fstat`; otherwise the image is re-hashed (a full read: call this off the
+/// async runtime) and either refused ([`Error::DigestMismatch`]) or re-stamped in
+/// `manifest.json`. An image from before stamps existed is made `0444` first.
+pub fn open_image(dir: &Path, manifest: &RootfsManifest) -> Result<VerifiedImage> {
+    let path = dir.join(ROOTFS_FILE);
+    let file = File::open(&path).at(&path)?;
+    if manifest.rootfs_stamp.is_none() {
+        let mode = file.metadata().at(&path)?.permissions().mode();
+        if mode & 0o222 != 0 {
+            // Before hashing: the chmod bumps ctime, which the new stamp then includes.
+            file.set_permissions(fs::Permissions::from_mode(0o444))
+                .at(&path)?;
+        }
+    }
+    let verified = stamp::verify_open(
+        file,
+        &path,
+        &manifest.rootfs_sha256,
+        manifest.rootfs_stamp.as_ref(),
+    )?;
+    let mut manifest = manifest.clone();
+    let mut record_error = None;
+    if verified.restamped(manifest.rootfs_stamp.as_ref()) {
+        manifest.rootfs_stamp = verified.stamp;
+        record_error = manifest.save(&dir.join(MANIFEST_FILE)).err();
+    }
+    Ok(VerifiedImage {
+        verified,
+        path,
+        manifest,
+        record_error,
+    })
 }
 
 /// What to build.
@@ -359,9 +436,12 @@ impl RootfsBuilder {
         }
         fs::remove_file(&tar_path).at(&tar_path)?;
 
-        // 4. manifest.
-        let rootfs_sha256 = sha256_file(&img)?;
-        let size_bytes = fs::metadata(&img).at(&img)?.len();
+        // 4. read-only, then hash + stamp through one fd (after the chmod and the fsync, which
+        // must not move ctime afterwards; publishing renames the *directory*, not the image).
+        File::open(&img).and_then(|f| f.sync_all()).at(&img)?;
+        fs::set_permissions(&img, fs::Permissions::from_mode(0o444)).at(&img)?;
+        let (rootfs_sha256, rootfs_stamp) = stamp::record(&img)?;
+        let size_bytes = rootfs_stamp.size;
         let manifest = RootfsManifest {
             cache_key: key.to_string(),
             template: req.template.clone(),
@@ -379,13 +459,13 @@ impl RootfsBuilder {
             crabd_path: format!("/{}", stats.crabd_tar_path),
             mkfs: strategy,
             rootfs_sha256,
+            rootfs_stamp: Some(rootfs_stamp),
             created_at: Utc::now(),
         };
         let mpath = tmp.join(MANIFEST_FILE);
         let mut f = File::create(&mpath).at(&mpath)?;
         f.write_all(manifest.to_json().as_bytes()).at(&mpath)?;
         f.sync_all().at(&mpath)?;
-        File::open(&img).and_then(|f| f.sync_all()).at(&img)?;
         Ok(manifest)
     }
 }
@@ -578,6 +658,7 @@ mod tests {
             crabd_path: "/usr/sbin/crabd".into(),
             mkfs: MkfsStrategy::NativeTar,
             rootfs_sha256: "c".into(),
+            rootfs_stamp: None,
             created_at: Utc::now(),
         };
         let dir = tempfile::tempdir().unwrap();
@@ -616,6 +697,82 @@ mod tests {
         m["size_bytes"] = 5.into();
         fs::write(entry.join(MANIFEST_FILE), m.to_string()).unwrap();
         assert!(b.lookup(&key).is_err());
+    }
+
+    /// A cache entry as an older pipeline left it: writable image, manifest without a stamp.
+    fn legacy_entry(root: &Path, content: &[u8]) -> (PathBuf, RootfsManifest) {
+        let key = cache_key("a", Arch::Amd64, "b", PIPELINE_VERSION);
+        let dir = root.join("rootfs").join(&key);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(ROOTFS_FILE), content).unwrap();
+        fs::set_permissions(dir.join(ROOTFS_FILE), fs::Permissions::from_mode(0o644)).unwrap();
+        let m = RootfsManifest {
+            cache_key: key,
+            template: None,
+            image: "i".into(),
+            image_id: "a".into(),
+            arch: Arch::Amd64,
+            crabd_sha256: "b".into(),
+            pipeline_version: PIPELINE_VERSION,
+            size_bytes: content.len() as u64,
+            content_bytes: 1,
+            entries: 1,
+            inodes: 1,
+            label: ROOTFS_LABEL.into(),
+            fs_uuid: "u".into(),
+            crabd_path: "/sbin/crabd".into(),
+            mkfs: MkfsStrategy::NativeTar,
+            rootfs_sha256: sha256_bytes(content),
+            rootfs_stamp: None,
+            created_at: Utc::now(),
+        };
+        m.save(&dir.join(MANIFEST_FILE)).unwrap();
+        (dir, m)
+    }
+
+    #[test]
+    fn open_image_stamps_once_then_trusts_the_stamp() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (dir, m) = legacy_entry(tmp.path(), b"ext4 image");
+        // First use: made read-only, re-hashed, stamp recorded in manifest.json.
+        let v = open_image(&dir, &m).unwrap();
+        assert_eq!(v.verified.how, stamp::Verification::Hashed);
+        assert!(v.record_error.is_none());
+        let mode = fs::metadata(&v.path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o444);
+        let on_disk = RootfsManifest::load(&dir.join(MANIFEST_FILE)).unwrap();
+        assert_eq!(on_disk.rootfs_stamp, v.verified.stamp);
+        assert!(on_disk.rootfs_stamp.is_some());
+        // Later uses: one fstat.
+        let again = open_image(&dir, &on_disk).unwrap();
+        assert_eq!(again.verified.how, stamp::Verification::Stamp);
+        assert_eq!(again.manifest, on_disk);
+    }
+
+    #[test]
+    fn open_image_refuses_a_tampered_or_swapped_image() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (dir, m) = legacy_entry(tmp.path(), b"ext4 image");
+        let m = open_image(&dir, &m).unwrap().manifest;
+        let img = dir.join(ROOTFS_FILE);
+        // In place, same size (needs a chmod first: the image is 0444).
+        fs::set_permissions(&img, fs::Permissions::from_mode(0o644)).unwrap();
+        fs::write(&img, b"evil image").unwrap();
+        assert!(matches!(
+            open_image(&dir, &m),
+            Err(Error::DigestMismatch { .. })
+        ));
+        // Replaced under the same name.
+        let evil = dir.join("evil");
+        fs::write(&evil, b"evil image").unwrap();
+        fs::rename(&evil, &img).unwrap();
+        assert!(matches!(
+            open_image(&dir, &m),
+            Err(Error::DigestMismatch { .. })
+        ));
+        // The manifest kept the good stamp: nothing was re-recorded for a bad image.
+        let on_disk = RootfsManifest::load(&dir.join(MANIFEST_FILE)).unwrap();
+        assert_eq!(on_disk.rootfs_stamp, m.rootfs_stamp);
     }
 
     #[test]

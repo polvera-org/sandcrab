@@ -1,33 +1,38 @@
 //! Runtime-loaded libkrun FFI (design §3): a hand-written `extern "C"` fn-pointer table for
-//! the libkrun subset we use, loaded with `libloading` from **pinned absolute paths** after the
-//! file's SHA-256 has been checked, plus the safe [`Ctx`] wrapper. This module is the crate's
-//! only `unsafe` island; the `sandcrab-krun` helper is its only user.
+//! the libkrun subset we use, loaded with `libloading` **through the fd that was verified**
+//! (pinned stat stamp, else SHA-256 of that fd; [`crate::verified`]), plus the safe [`Ctx`]
+//! wrapper. This module is the crate's only `unsafe` island; the `sandcrab-krun` helper is its
+//! only user.
 //!
 //! The VM configuration is first expressed as a pure, ordered list of [`KrunCall`]s
 //! ([`plan`]), then applied one by one with [`Ctx::apply`]. The plan is unit-testable without
 //! libkrun, so the security-relevant call sequence (TSI off, empty port map; design §9, risk 1)
 //! is asserted in tests, and the helper logs each call as it applies it.
 //!
+//! Loading by fd: each library is opened once, verified through that fd, and `dlopen`ed as
+//! `/proc/self/fd/<n>` (Linux) or `/dev/fd/<n>` (macOS: dyld opens the fdesc node, which is
+//! the same vnode, and checks its code signature as usual). A rename or replacement of the
+//! path after the check cannot change what is loaded.
+//!
 //! libkrunfw: libkrun `dlopen`s it by **leaf name** ([`LIBKRUNFW_LEAF`]) inside
-//! `krun_start_enter`. [`Krun::load`] hash-verifies it and loads it first by absolute path
-//! (`RTLD_GLOBAL`). On Linux glibc then resolves the leaf name to that already-loaded image by
-//! soname. **macOS dyld does not** (observed: "Couldn't find or load libkrunfw.5.dylib" with
-//! the image preloaded), so the leaf lookup still searches [`LIBRARY_PATH_ENV`], which dyld
-//! reads only at process start. The caller must therefore launch the helper with that variable
-//! set to exactly the pinned libkrunfw directory; [`check_libkrunfw_lookup`] enforces it
-//! before anything is loaded, so the search can only find the file that was hashed.
+//! `krun_start_enter`. [`Krun::load`] loads the verified libkrunfw first (`RTLD_GLOBAL`), then
+//! asks the loader for the leaf name with `RTLD_NOLOAD` and requires the very same handle:
+//! glibc matches it by `DT_SONAME`, dyld by install name (the installer rewrites the macOS
+//! copy's id to the leaf). libkrun's later lookup therefore resolves to the verified image
+//! without touching the file system, and [`LIBRARY_PATH_ENV`] no longer decides what is loaded.
+//! It is still checked as defence in depth ([`check_libkrunfw_lookup`]): unset, or exactly
+//! the pinned directory (dyld strips `DYLD_*` from hardened-runtime processes, so it may be
+//! unset there).
 
 use std::ffi::{CString, c_char};
 use std::fmt;
-use std::io::Read;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-
-use sha2::{Digest, Sha256};
 
 use crate::helper_proto::{
     CONTROL_PORT, HelperConfig, HelperNetwork, PinnedFile, TOOLS_PORT, VirtiofsSemantics,
 };
+use crate::verified::{self, PinError};
 
 /// `KRUN_TSI_HIJACK_INET`: TSI for AF_INET/AF_INET6 sockets.
 pub const KRUN_TSI_HIJACK_INET: u32 = 1 << 0;
@@ -101,47 +106,32 @@ pub enum FfiError {
 
 pub type Result<T> = std::result::Result<T, FfiError>;
 
-/// Lowercase hex SHA-256 of a file (streamed).
-pub fn sha256_file(path: &Path) -> Result<String> {
-    let io = |source| FfiError::Io {
-        path: path.to_owned(),
-        source,
-    };
-    let mut file = std::fs::File::open(path).map_err(io)?;
-    let mut hasher = Sha256::new();
-    let mut buf = vec![0u8; 1 << 20];
-    loop {
-        let n = file.read(&mut buf).map_err(io)?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    Ok(hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect())
-}
+/// `dlopen` flag: only return a handle for an object that is already loaded.
+#[cfg(target_os = "macos")]
+const RTLD_NOLOAD: i32 = 0x10;
+#[cfg(not(target_os = "macos"))]
+const RTLD_NOLOAD: i32 = 0x4;
 
-/// Check `path` against its pinned SHA-256.
-pub fn verify_sha256(path: &Path, expected: &str) -> Result<()> {
-    let actual = sha256_file(path)?;
-    if actual == expected {
-        Ok(())
-    } else {
-        Err(FfiError::ShaMismatch {
-            path: path.to_owned(),
-            expected: expected.to_owned(),
-            actual,
-        })
+/// Open `pin` once and verify it through that fd (stamp, else SHA-256).
+pub fn open_verified(pin: &PinnedFile) -> Result<std::fs::File> {
+    match verified::open_pinned(pin) {
+        Ok(v) => Ok(v.file),
+        Err(PinError::Mismatch(m)) => Err(FfiError::ShaMismatch {
+            path: pin.path.clone(),
+            expected: pin.sha256.clone(),
+            actual: m,
+        }),
+        Err(PinError::Io(m)) => Err(FfiError::Io {
+            path: pin.path.clone(),
+            source: std::io::Error::other(m),
+        }),
     }
 }
 
-/// Check that libkrun's leaf-name `dlopen` of libkrunfw can only resolve to `libkrunfw`
-/// (the pinned file): its file name is [`LIBKRUNFW_LEAF`], [`LIBRARY_PATH_ENV`] is exactly
-/// its directory, and nothing that is searched earlier is set. `env` reads the process
-/// environment (injected for tests).
+/// Defence in depth for libkrun's leaf-name `dlopen` of libkrunfw (the guarantee is the
+/// `RTLD_NOLOAD` check in [`Krun::load`]): the pinned file is named [`LIBKRUNFW_LEAF`],
+/// [`LIBRARY_PATH_ENV`] is unset or exactly its directory, and nothing that is searched
+/// earlier is set. `env` reads the process environment (injected for tests).
 pub fn check_libkrunfw_lookup(
     libkrunfw: &Path,
     env: impl Fn(&str) -> Option<std::ffi::OsString>,
@@ -162,16 +152,14 @@ pub fn check_libkrunfw_lookup(
         }
     }
     match env(LIBRARY_PATH_ENV) {
-        Some(v) if Path::new(&v) == dir => Ok(()),
+        Some(v) if v.is_empty() || Path::new(&v) == dir => Ok(()),
         Some(v) => err(format!(
-            "{LIBRARY_PATH_ENV} is `{}`, must be exactly `{}`",
+            "{LIBRARY_PATH_ENV} is `{}`, must be unset or exactly `{}`",
             Path::new(&v).display(),
             dir.display()
         )),
-        None => err(format!(
-            "{LIBRARY_PATH_ENV} is unset; the helper must be launched with it set to `{}`",
-            dir.display()
-        )),
+        // dyld strips DYLD_* from hardened-runtime processes; the leaf resolves by RTLD_NOLOAD.
+        None => Ok(()),
     }
 }
 
@@ -256,8 +244,12 @@ impl fmt::Debug for Krun {
     }
 }
 
-/// `dlopen` an already hash-verified absolute path with `RTLD_NOW | RTLD_GLOBAL`.
-fn dlopen_verified(pin: &PinnedFile) -> Result<libloading::Library> {
+/// `dlopen` a verified file **through its fd** (`/proc/self/fd/<n>` | `/dev/fd/<n>`) with
+/// `RTLD_NOW | RTLD_GLOBAL`. `pin` names it in errors only.
+fn dlopen_verified(
+    file: &std::fs::File,
+    pin: &PinnedFile,
+) -> Result<libloading::os::unix::Library> {
     if !pin.path.is_absolute() {
         return Err(FfiError::InvalidArgument {
             call: "dlopen",
@@ -265,16 +257,48 @@ fn dlopen_verified(pin: &PinnedFile) -> Result<libloading::Library> {
         });
     }
     let flags = libloading::os::unix::RTLD_NOW | libloading::os::unix::RTLD_GLOBAL;
-    // SAFETY: loading runs the library's initializers. The file is the pinned, hash-verified
-    // libkrun/libkrunfw build, loaded by absolute path (no search-path lookup), in the
-    // single-purpose helper process before any other threads touch it.
-    let lib = unsafe { libloading::os::unix::Library::open(Some(&pin.path), flags) }.map_err(
+    // SAFETY: loading runs the library's initializers. The fd is the pinned libkrun/libkrunfw
+    // build, verified through this very fd (no path re-resolution, no search-path lookup), in
+    // the single-purpose helper process before libkrun runs anything.
+    unsafe { libloading::os::unix::Library::open(Some(verified::fd_path(file)), flags) }.map_err(
         |source| FfiError::Load {
             path: pin.path.clone(),
             source,
         },
-    )?;
-    Ok(lib.into())
+    )
+}
+
+/// Require that a leaf-name `dlopen` of [`LIBKRUNFW_LEAF`] (what libkrun does later) resolves
+/// to the already loaded, verified `fw` without any search: `RTLD_NOLOAD` must return the
+/// same handle.
+fn check_leaf_is_loaded(fw: libloading::os::unix::Library) -> Result<libloading::Library> {
+    let fw_raw = fw.into_raw();
+    // SAFETY: `fw_raw` came from `into_raw` just above and gets exactly one owner again.
+    let fw = unsafe { libloading::os::unix::Library::from_raw(fw_raw) };
+    let flags = libloading::os::unix::RTLD_NOW | RTLD_NOLOAD;
+    // SAFETY: RTLD_NOLOAD never loads anything (no initializer runs); it only looks up an
+    // object that is already mapped, adding a reference that dropping the handle releases.
+    let found = unsafe { libloading::os::unix::Library::open(Some(LIBKRUNFW_LEAF), flags) };
+    match found {
+        Ok(h) => {
+            let found_raw = h.into_raw();
+            // SAFETY: release the one reference the RTLD_NOLOAD lookup added (when it is the
+            // same object, `fw` keeps its own reference).
+            drop(unsafe { libloading::os::unix::Library::from_raw(found_raw) });
+            if found_raw == fw_raw {
+                Ok(fw.into())
+            } else {
+                Err(FfiError::Lookup(format!(
+                    "{LIBKRUNFW_LEAF} resolves to another loaded object than the verified \
+                     libkrunfw"
+                )))
+            }
+        }
+        Err(e) => Err(FfiError::Lookup(format!(
+            "{LIBKRUNFW_LEAF} does not resolve to the verified libkrunfw (its soname / install \
+             name must be the leaf): {e}"
+        ))),
+    }
 }
 
 /// Resolve one symbol as a copied fn pointer of type `T`.
@@ -297,14 +321,16 @@ unsafe fn sym<T: Copy>(lib: &libloading::Library, path: &Path, symbol: &'static 
 }
 
 impl Krun {
-    /// Verify and load libkrunfw, then verify and load libkrun and resolve every symbol.
-    /// Fails if a hash differs (before anything is loaded) or any symbol is missing.
+    /// Verify libkrunfw and libkrun through one fd each (stamp, else SHA-256), load libkrunfw
+    /// through its fd and check that libkrun's leaf-name lookup resolves to it, then load
+    /// libkrun through its fd and resolve every symbol. Fails before anything is loaded if
+    /// either file is not the pinned build, and if any symbol is missing.
     pub fn load(libkrun: &PinnedFile, libkrunfw: &PinnedFile) -> Result<Self> {
-        // Both hashes before either dlopen: nothing runs unless both are the pinned builds.
-        verify_sha256(&libkrunfw.path, &libkrunfw.sha256)?;
-        verify_sha256(&libkrun.path, &libkrun.sha256)?;
-        let fw = dlopen_verified(libkrunfw)?;
-        let lib = dlopen_verified(libkrun)?;
+        // Both verified before either dlopen: nothing runs unless both are the pinned builds.
+        let fw_file = open_verified(libkrunfw)?;
+        let lib_file = open_verified(libkrun)?;
+        let fw = check_leaf_is_loaded(dlopen_verified(&fw_file, libkrunfw)?)?;
+        let lib: libloading::Library = dlopen_verified(&lib_file, libkrun)?.into();
         let p = libkrun.path.as_path();
         // SAFETY: each type alias is the exact prototype from libkrun.h v1.19; the pointers
         // are stored next to `_libkrun`, which keeps the library mapped as long as `Krun`.
@@ -774,10 +800,12 @@ mod tests {
             libkrun: PinnedFile {
                 path: "/a/libkrun.dylib".into(),
                 sha256: SHA_ZERO.into(),
+                stamp: None,
             },
             libkrunfw: PinnedFile {
                 path: "/a/libkrunfw.5.dylib".into(),
                 sha256: SHA_ZERO.into(),
+                stamp: None,
             },
             vcpus: 2,
             memory_mib: 512,
@@ -786,12 +814,14 @@ mod tests {
                 path: "/c/rootfs.ext4".into(),
                 read_only: true,
                 sha256: None,
+                stamp: None,
             },
             scratch: DiskSpec {
                 block_id: SCRATCH_DRIVE_ID.into(),
                 path: "/r/id/scratch.ext4".into(),
                 read_only: false,
                 sha256: None,
+                stamp: None,
             },
             disks: vec![],
             virtiofs: vec![VirtioFsShare {
@@ -819,8 +849,10 @@ mod tests {
             binary: PinnedFile {
                 path: "/a/gvproxy".into(),
                 sha256: SHA_ZERO.into(),
+                stamp: None,
             },
             deny: vec![],
+            avx2: None,
         });
         c.validate().unwrap();
         let rendered: Vec<String> = plan(&c).iter().map(ToString::to_string).collect();
@@ -918,6 +950,7 @@ mod tests {
             path: "/v/vol.ext4".into(),
             read_only: false,
             sha256: None,
+            stamp: None,
         });
         c.virtiofs_semantics = VirtiofsSemantics::LinuxSimplified;
         let ids: Vec<_> = plan(&c)
@@ -959,15 +992,17 @@ mod tests {
             .unwrap()
             .write_all(b"not a library")
             .unwrap();
-        let actual = sha256_file(&fake).unwrap();
+        let actual = sandcrab_rootfs::stamp::record(&fake).unwrap().0;
         assert_eq!(actual.len(), 64);
         let wrong = PinnedFile {
             path: fake.clone(),
             sha256: SHA_ZERO.into(),
+            stamp: None,
         };
         let right = PinnedFile {
             path: fake.clone(),
             sha256: actual,
+            stamp: None,
         };
         // Wrong pin on either file: rejected by hash, nothing loaded.
         assert!(matches!(
@@ -987,6 +1022,7 @@ mod tests {
         let missing = PinnedFile {
             path: dir.path().join("nope"),
             sha256: SHA_ZERO.into(),
+            stamp: None,
         };
         assert!(matches!(
             Krun::load(&missing, &right),
@@ -1008,8 +1044,10 @@ mod tests {
         };
         run(&[(LIBRARY_PATH_ENV, "/pins/krun")]).unwrap();
         run(&[(LIBRARY_PATH_ENV, "/pins/krun/")]).unwrap();
+        // Unset (dyld strips DYLD_* under the hardened runtime): the RTLD_NOLOAD check in
+        // `Krun::load` is what binds the leaf to the verified image.
+        run(&[]).unwrap();
         for bad in [
-            vec![],
             vec![(LIBRARY_PATH_ENV, "/opt/homebrew/lib")],
             vec![(LIBRARY_PATH_ENV, "/elsewhere:/pins/krun")],
             vec![

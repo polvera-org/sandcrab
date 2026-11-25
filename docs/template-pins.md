@@ -10,6 +10,13 @@ what a pin is, what it does and does not prove, and how to create one.
 | Template base images (`FROM debian:…@sha256:…`, `node`, `uv`, `bun`) | OCI digest, reproducible | Committed `templates/*/Dockerfile` |
 | Built template images (`sandcrab/<name>:<version>`) | Local Docker image ID, **per host** | `~/.sandcrab/template-pins/` (not committed) |
 | microVM rootfs, Firecracker kernel and binary, libkrun libraries, `crabd` | SHA-256 | Rootfs cache manifests, compiled-in artifact pins |
+| The built rootfs image, libkrun/libkrunfw, the netstack, the libkrun helper | SHA-256 + stat stamp, checked per spawn through the fd that is then used | Rootfs cache `manifest.json` (`rootfs_stamp`), artifact `manifest.json` (`stamp`), `<helper>.pin.json` |
+
+A cached rootfs image is `0444`, and its manifest records its SHA-256 next to a stat
+stamp (device, inode, size, mtime, ctime). Each spawn opens the image once, compares
+`fstat` of that fd with the stamp, re-hashes through the same fd only on a mismatch, and
+hands the VMM that fd, never the path. ctime is the part a same-user attacker cannot
+forge: see [the libkrun design, §12.4](design/libkrun-backend.md#124-pins-and-verification-step-lk-verified-fd-2026-11-25).
 
 The committed `sandcrab.toml` manifests carry **no** image IDs. A local image ID does not
 reproduce across hosts: apt packages are not version-pinned, layer timestamps differ

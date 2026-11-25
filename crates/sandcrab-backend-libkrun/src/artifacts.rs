@@ -67,6 +67,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use sandcrab_rootfs::stamp::{self, FileStamp};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -400,6 +401,11 @@ pub struct LibManifest {
     pub sha256: String,
     /// Post-copy modifications, in order (e.g. `install_name_tool -id libkrunfw.5.dylib`).
     pub fixups: Vec<String>,
+    /// Stat stamp that goes with `sha256` (`sandcrab_rootfs::stamp`): a match spares the
+    /// backend and the helper the hash. Written by the Rust installer, and recorded by
+    /// [`Artifacts::resolve`] on first use of an install that lacks it (the shell installer).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stamp: Option<FileStamp>,
 }
 
 /// `manifest.json` (written last, after every file is in place).
@@ -515,12 +521,49 @@ fn check_lib(pin: LibPin, m: &LibManifest) -> Result<(), String> {
 pub struct PinnedPath {
     pub path: PathBuf,
     pub sha256: String,
+    /// The stat stamp that goes with `sha256` (verified by [`Artifacts::resolve`]).
+    pub stamp: Option<FileStamp>,
 }
 
 impl PinnedPath {
-    /// Re-hash the file and compare (call right before `dlopen`).
+    /// Re-hash the file and compare (a full read; [`Self::verify_stamped`] is the fast path).
     pub fn verify(&self) -> Result<(), ArtifactError> {
         verify_sha256(&self.path, &self.sha256)
+    }
+
+    /// Open the file once and verify it through that fd: a matching stamp costs one
+    /// `fstat`, anything else a full hash. On success the stamp is the current one (fresh after
+    /// a re-hash; `None` if the file was too new to stamp).
+    pub fn verify_stamped(&mut self) -> Result<(), ArtifactError> {
+        let v = stamp::open_verified(&self.path, &self.sha256, self.stamp.as_ref())
+            .map_err(|e| stamp_err(&self.path, &self.sha256, e))?;
+        self.stamp = v.stamp;
+        Ok(())
+    }
+}
+
+impl From<PinnedPath> for crate::helper_proto::PinnedFile {
+    fn from(p: PinnedPath) -> Self {
+        Self {
+            path: p.path,
+            sha256: p.sha256,
+            stamp: p.stamp,
+        }
+    }
+}
+
+/// A `sandcrab_rootfs` stamp/hash error as an [`ArtifactError`].
+pub(crate) fn stamp_err(path: &Path, expected: &str, e: sandcrab_rootfs::Error) -> ArtifactError {
+    match e {
+        sandcrab_rootfs::Error::DigestMismatch { actual, .. } => ArtifactError::DigestMismatch {
+            path: path.to_path_buf(),
+            expected: expected.to_owned(),
+            actual,
+        },
+        other => ArtifactError::Io {
+            context: format!("verify {}", path.display()),
+            source: io::Error::other(other.to_string()),
+        },
     }
 }
 
@@ -573,8 +616,16 @@ impl Artifacts {
                         detail: format!("missing {}", pin.file_name),
                     });
                 }
-                let sha256 = sha256_file(&path)?;
-                Ok(PinnedPath { path, sha256 })
+                // Trust on first use: hash through one fd and stamp what was hashed.
+                let file =
+                    fs::File::open(&path).map_err(io_err(format!("open {}", path.display())))?;
+                let (sha256, stamp) = stamp::hash_and_stamp(&file)
+                    .map_err(io_err(format!("read {}", path.display())))?;
+                Ok(PinnedPath {
+                    path,
+                    sha256,
+                    stamp,
+                })
             };
             tracing::warn!(dir = %dir.display(), "libkrun pin verification disabled (verify_pins=false)");
             return Ok(ResolvedArtifacts {
@@ -584,7 +635,7 @@ impl Artifacts {
                 manifest: None,
             });
         }
-        let manifest = Manifest::load(dir)?;
+        let mut manifest = Manifest::load(dir)?;
         manifest
             .check(pins)
             .map_err(|detail| ArtifactError::ManifestMismatch {
@@ -592,9 +643,10 @@ impl Artifacts {
                 detail,
             })?;
         let pinned = |m: &LibManifest| -> Result<PinnedPath, ArtifactError> {
-            let p = PinnedPath {
+            let mut p = PinnedPath {
                 path: dir.join(&m.file),
                 sha256: m.sha256.clone(),
+                stamp: m.stamp,
             };
             if !p.path.is_file() {
                 return Err(ArtifactError::NotInstalled {
@@ -602,16 +654,94 @@ impl Artifacts {
                     detail: format!("missing {}", m.file),
                 });
             }
-            p.verify()?;
+            // One fstat when the recorded stamp matches; a full hash otherwise.
+            p.verify_stamped()?;
             Ok(p)
         };
+        let libkrun = pinned(&manifest.libkrun)?;
+        let libkrunfw = pinned(&manifest.libkrunfw)?;
+        if (libkrun.stamp, libkrunfw.stamp) != (manifest.libkrun.stamp, manifest.libkrunfw.stamp) {
+            // First use of an install without stamps (or a benign metadata change): record the
+            // stamps that now go with the verified digests, so later processes skip the hash.
+            manifest.libkrun.stamp = libkrun.stamp.or(manifest.libkrun.stamp);
+            manifest.libkrunfw.stamp = libkrunfw.stamp.or(manifest.libkrunfw.stamp);
+            if let Err(e) = write_json(&dir.join(MANIFEST_NAME), &manifest) {
+                tracing::warn!(error = %e, "could not record libkrun stat stamps (next use re-hashes)");
+            }
+        }
         Ok(ResolvedArtifacts {
             dir: dir.to_path_buf(),
-            libkrun: pinned(&manifest.libkrun)?,
-            libkrunfw: pinned(&manifest.libkrunfw)?,
+            libkrun,
+            libkrunfw,
             manifest: Some(manifest),
         })
     }
+}
+
+/// Write `value` as pretty JSON to `path` atomically (temp file, fsync, rename).
+pub(crate) fn write_json(path: &Path, value: &impl Serialize) -> Result<(), ArtifactError> {
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let leaf = path.file_name().unwrap_or_default().to_string_lossy();
+    let tmp = dir.join(format!(".{leaf}.{}.tmp", std::process::id()));
+    let mut json = serde_json::to_vec_pretty(value).expect("serializes");
+    json.push(b'\n');
+    let res = (|| {
+        let mut f = fs::File::create(&tmp).map_err(io_err(format!("create {}", tmp.display())))?;
+        f.write_all(&json)
+            .and_then(|()| f.sync_all())
+            .map_err(io_err(format!("write {}", tmp.display())))?;
+        fs::rename(&tmp, path).map_err(io_err(format!("rename {}", path.display())))
+    })();
+    if res.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    res
+}
+
+/// Create `dir` and its missing parents `0700` (review R18: under a `0002` umask the state
+/// tree came out group-writable, so group members could replace the helper or edit the
+/// manifests). The umask can only remove bits from `0700`, so no umask makes them looser.
+/// Existing directories are left as they are; [`check_private_dir`] refuses unsafe ones.
+pub fn create_private_dir_all(dir: &Path) -> io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+}
+
+/// Create one directory `0700` (fails if it exists).
+pub fn create_private_dir(dir: &Path) -> io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    fs::DirBuilder::new().mode(0o700).create(dir)
+}
+
+/// Refuse a directory that others could write to (group/world-writable, not owned by us, or a
+/// symlink): whoever can write it can replace a pinned file or its record.
+pub fn check_private_dir(dir: &Path) -> Result<(), ArtifactError> {
+    use std::os::unix::fs::MetadataExt;
+    let m = fs::symlink_metadata(dir).map_err(io_err(format!("stat {}", dir.display())))?;
+    let uid = rustix::process::getuid().as_raw();
+    let mode = m.mode();
+    if !m.is_dir() || m.uid() != uid || mode & 0o022 != 0 {
+        return Err(ArtifactError::Io {
+            context: format!(
+                "`{}` must be a directory owned by uid {uid} and not group/world-writable \
+                 (is {}, uid {}, mode {:o}); fix it with `chmod go-w {}`",
+                dir.display(),
+                if m.is_dir() {
+                    "a directory"
+                } else {
+                    "not a directory"
+                },
+                m.uid(),
+                mode & 0o7777,
+                dir.display()
+            ),
+            source: io::Error::from(io::ErrorKind::PermissionDenied),
+        });
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -767,12 +897,12 @@ fn install_with(
     apply: &ApplyFixup<'_>,
 ) -> Result<ResolvedArtifacts, ArtifactError> {
     let parent = dest.parent().expect("artifact dir has a parent");
-    fs::create_dir_all(parent).map_err(io_err(format!("create {}", parent.display())))?;
+    create_private_dir_all(parent).map_err(io_err(format!("create {}", parent.display())))?;
     let leaf = dest.file_name().expect("versioned dir").to_string_lossy();
     let staging = parent.join(format!(".{leaf}.staging.{}", std::process::id()));
     let _ = fs::remove_dir_all(&staging);
     let res = (|| {
-        fs::create_dir(&staging).map_err(io_err(format!("create {}", staging.display())))?;
+        create_private_dir(&staging).map_err(io_err(format!("create {}", staging.display())))?;
         let libkrun = stage_lib(&staging, pins, &pins.libkrun, &input.libkrun, apply)?;
         let libkrunfw = stage_lib(&staging, pins, &pins.libkrunfw, &input.libkrunfw, apply)?;
         let manifest = Manifest {
@@ -863,14 +993,18 @@ fn stage_lib(
         apply(f, &dest)?;
     }
     set_mode(0o444)?;
+    // Hash + stamp through one fd, after the last chmod (publishing renames the directory,
+    // which leaves the files' ctime alone).
+    let (sha256, stamp) = stamp::record(&dest).map_err(|e| stamp_err(&dest, "", e))?;
     Ok(LibManifest {
         version: pin.version.into(),
         file: pin.file_name.into(),
         origin: src.origin,
         origin_sha256,
         git_commit,
-        sha256: sha256_file(&dest)?,
+        sha256,
         fixups: fixups.iter().flat_map(Fixup::describe).collect(),
+        stamp: Some(stamp),
     })
 }
 
@@ -1025,6 +1159,58 @@ mod tests {
         // PinnedPath::verify catches a swap after resolution.
         fs::write(&r.libkrunfw.path, b"evil2").unwrap();
         assert!(u.libkrunfw.verify().is_err());
+    }
+
+    #[test]
+    fn install_stamps_files_in_private_dirs() {
+        use std::os::unix::fs::MetadataExt;
+        let t = tempfile::tempdir().unwrap();
+        let pins = test_pins();
+        let dest = t.path().join("a/libkrun/1.19.8");
+        let r = install_with(&dest, &pins, &inputs(t.path()), &fake_fixup).unwrap();
+        // 0700 whatever the umask (the test runs under the default 022, which gives 0755).
+        for d in [
+            &dest,
+            dest.parent().unwrap(),
+            dest.parent().unwrap().parent().unwrap(),
+        ] {
+            assert_eq!(
+                fs::metadata(d).unwrap().mode() & 0o777,
+                0o700,
+                "{}",
+                d.display()
+            );
+            check_private_dir(d).unwrap();
+        }
+        let m = r.manifest.as_ref().unwrap();
+        assert!(m.libkrun.stamp.is_some() && m.libkrunfw.stamp.is_some());
+        assert_eq!(r.libkrun.stamp, m.libkrun.stamp);
+        // A group-writable artifact dir is refused.
+        fs::set_permissions(&dest, fs::Permissions::from_mode(0o770)).unwrap();
+        assert!(check_private_dir(&dest).is_err());
+    }
+
+    #[test]
+    fn unstamped_install_is_stamped_on_first_resolve_and_swaps_are_refused() {
+        let t = tempfile::tempdir().unwrap();
+        let pins = test_pins();
+        let dest = t.path().join("d");
+        install_with(&dest, &pins, &inputs(t.path()), &fake_fixup).unwrap();
+        // What scripts/fetch-libkrun.sh writes: no stamps.
+        let mut m = Manifest::load(&dest).unwrap();
+        m.libkrun.stamp = None;
+        m.libkrunfw.stamp = None;
+        write_json(&dest.join(MANIFEST_NAME), &m).unwrap();
+        let r = Artifacts::resolve_with(&dest, &pins, true).unwrap();
+        let on_disk = Manifest::load(&dest).unwrap();
+        assert!(on_disk.libkrun.stamp.is_some(), "recorded on first use");
+        assert_eq!(on_disk.libkrunfw.stamp, r.libkrunfw.stamp);
+        // Same name, other inode, same size: refused (re-hashed, digest differs).
+        let evil = dest.join("evil");
+        fs::write(&evil, b"ab!").unwrap();
+        fs::rename(&evil, &r.libkrunfw.path).unwrap();
+        let e = Artifacts::resolve_with(&dest, &pins, true).unwrap_err();
+        assert!(matches!(e, ArtifactError::DigestMismatch { .. }), "{e}");
     }
 
     #[test]
