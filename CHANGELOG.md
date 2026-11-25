@@ -34,6 +34,17 @@ All notable changes to Sandcrab. The format follows [Keep a Changelog](https://k
 - `--allow-insecure` and `SANDCRAB_ALLOW_INSECURE`: accepted, hidden from `--help`, print a warning, and do nothing.
 
 ### Added
+- Docker backend on macOS (Docker Desktop): a `tcp` transport (`DockerTransport`, default on macOS, `unix` elsewhere,
+  override with `SANDCRAB_DOCKER_TRANSPORT=unix|tcp`). `crabd` serves a Unix socket in a per-sandbox tmpfs volume and a
+  hardened relay container (`crabd relay`) publishes it on `127.0.0.1` only, with an ephemeral port. The sandbox
+  container's network is unchanged, so `disabled` is still network mode `none`. `sandcrab doctor` shows the transport;
+  `reap_orphans` also removes relay containers and socket volumes. See
+  [docs/hosting.md](docs/hosting.md#docker-on-macos-docker-desktop).
+- Connection authentication (protocol **0.2**): `crabd serve --auth-token-file` requires an `auth` frame with a
+  per-sandbox 256-bit token as the first frame of every connection (tools, reconnects, `tunnel.open`), compared in
+  constant time; anything else gets `-32008 UNAUTHORIZED` and the connection is closed. The Docker backend always
+  uses it (both transports); the token is passed as a 0400 file that `crabd` deletes, held in memory by
+  `sandcrab_core::AuthConnector`, and redacted in `Debug`. See [docs/protocol.md](docs/protocol.md#authentication-auth).
 - `sandcrab template pin <names>|--all`: adopt images already present as host-local pins, with a warning.
   `sandcrab_core::pins` (`PinStore`, `TemplatePin`, `effective_pin`), `SandcrabBuilder::template_pins_dir`,
   `SandboxManager::pin_store`.

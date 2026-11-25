@@ -1,6 +1,8 @@
 # Sandcrab protocol and tool reference
 
-Protocol version **`0.1`** (`sandcrab_protocol::PROTOCOL_VERSION`). This page describes the
+Protocol version **`0.2`** (`sandcrab_protocol::PROTOCOL_VERSION`; `0.2` added the
+[`auth`](#authentication-auth) frame and the `UNAUTHORIZED` error code, and a `crabd`
+started without a token behaves exactly like `0.1`). This page describes the
 wire contract between a host (`sandcrab-core`, the SDK, the CLI) and `crabd`, the guest
 daemon inside every sandbox. Every backend speaks it, so Docker and Firecracker behave
 the same way.
@@ -12,6 +14,7 @@ behaviour. `sandcrab tools schema` prints the JSON Schema of every tool's input 
 
 - [Framing](#framing)
 - [Envelope](#envelope-json-rpc-20)
+- [Authentication: `auth`](#authentication-auth)
 - [Handshake: `hello` and `ping`](#handshake-hello-and-ping)
 - [Errors](#errors)
 - [Tools](#tools)
@@ -65,11 +68,39 @@ Every message is one frame:
   defined but **reserved**: `crabd` 0.1 never emits them. Use `process_poll` for incremental
   output.
 
+## Authentication: `auth`
+
+When `crabd serve` runs with `--auth-token-file <path>`, **every** connection must open with
+exactly one `auth` frame, before `hello`, any tool call or `tunnel.open`. This applies to the
+first connection, readiness retries, reconnects and every tunnel connection alike.
+
+```text
+-> {"jsonrpc":"2.0","id":0,"method":"auth","params":{"token":"<64 hex digits>"}}
+<- {"jsonrpc":"2.0","id":0,"result":{}}
+... then an ordinary connection: frames, or `tunnel.open` as the next frame ...
+```
+
+- The token is 256 bits from the host's OS CSPRNG, hex-encoded (`AuthToken`). It is per
+  sandbox.
+- `crabd` reads the token file once at start and deletes it (when the mount is writable), so
+  tool processes started later cannot read it.
+- The comparison is constant-time. A missing, wrong or malformed token, a first frame that
+  is not `auth`, EOF, or no frame within 5 s gets one `-32008 UNAUTHORIZED` error frame
+  with a generic message. `crabd` then closes the connection without reading anything else.
+- The host never logs the token: `AuthToken` and `AuthParams` print `<redacted>` in `Debug`.
+  `sandcrab_core::AuthConnector` sends the frame on every stream it opens, so no host code
+  path can skip it.
+- Without `--auth-token-file` there is no `auth` step (microVM vsock, local tests).
+
+The Docker backend always starts `crabd` with a token, on both of its transports (see
+[Transports](#transports)). Like `tunnel.open`, `auth` is a connection-level verb, not a tool.
+It is not in `TOOL_NAMES` and not part of `Call`.
+
 ## Handshake: `hello` and `ping`
 
 | Method | Params | Result |
 | --- | --- | --- |
-| `hello` | `protocol_version?: string`, `client?: string` (both optional, diagnostics only) | `crabd_version`, `protocol_version` (`"0.1"`), `tools: string[]`, `default_cwd` |
+| `hello` | `protocol_version?: string`, `client?: string` (both optional, diagnostics only) | `crabd_version`, `protocol_version` (`"0.2"`), `tools: string[]`, `default_cwd` |
 | `ping` | `{}` | `{}` |
 
 The host calls `hello` once after connecting; `sandcrab-core` treats the sandbox as ready
@@ -95,6 +126,7 @@ structured fields.
 | -32005 | `AMBIGUOUS_EDIT` | `file_edit` matched more than once without `replace_all` | `{path, occurrences}` |
 | -32006 | `TOO_LARGE` | Input or output over a size limit | `{size, limit}` |
 | -32007 | `UNIMPLEMENTED` | Tool not implemented by this daemon / backend | `{detail}` |
+| -32008 | `UNAUTHORIZED` | The connection did not authenticate ([`auth`](#authentication-auth)); `crabd` closes it | `{detail}` |
 
 Unknown codes are preserved verbatim (`ProtocolError::Other`).
 
@@ -102,7 +134,8 @@ The SDK's LLM bridge (`Sandbox::tool_dispatch`, used by crabagent and by `sandcr
 reports the same errors as `{"error": {"code": "<snake_case>", "message": "..."}}` with
 stable string codes: `parse_error`, `invalid_request`, `unknown_tool`, `invalid_params`,
 `internal_error`, `execution_failed`, `timed_out`, `path_not_allowed`, `not_found`,
-`ambiguous_edit`, `too_large`, `unimplemented`, and `tool_error` for unknown numeric codes.
+`ambiguous_edit`, `too_large`, `unimplemented`, `unauthorized` (fatal), and `tool_error` for
+unknown numeric codes.
 
 Note: a `bash` timeout is **not** an error. It returns a normal result with
 `timed_out: true` and the output captured so far.
@@ -337,12 +370,14 @@ The same frames run over every transport.
 
 | Transport | Used by | Details |
 | --- | --- | --- |
-| Unix socket | Docker | `crabd serve --unix /run/sandcrab/crabd.sock`. The directory is a per-sandbox host directory bind-mounted into the container; the socket is chmod 0660 and `crabd` runs as the host user's uid. A stale socket is replaced on start. |
-| TCP | local testing | `crabd serve --tcp 127.0.0.1:5000`. **Unauthenticated:** bind to loopback or a private network only. |
+| Unix socket | Docker (`unix` transport, Linux default) | `crabd serve --unix /run/sandcrab/crabd.sock --auth-token-file /run/sandcrab/auth-token`. The directory is a per-sandbox host directory bind-mounted into the container; the socket is chmod 0660 and `crabd` runs as the host user's uid. A stale socket is replaced on start. |
+| TCP via `crabd relay` | Docker (`tcp` transport, macOS / Docker Desktop default) | `crabd serve --unix /opt/sandcrab/sock/crabd.sock --auth-token-file /run/sandcrab/auth-token` in the sandbox; the socket lives in a per-sandbox tmpfs volume. A relay container runs `crabd relay --tcp 0.0.0.0:7070 --unix /opt/sandcrab/sock/crabd.sock`, published on host `127.0.0.1` with an ephemeral port. The relay copies bytes and does no auth; `crabd` authenticates every relayed connection. |
+| TCP | local testing | `crabd serve --tcp 127.0.0.1:5000`. Without `--auth-token-file` it is **unauthenticated** (logged as a warning): bind to loopback or a private network only. |
 | vsock | Firecracker | `crabd serve --vsock 1024` (any CID). The host side uses Firecracker's vsock-over-UDS: connect to the VM's vsock Unix socket, write `CONNECT <port>\n`, read one line `OK <host_port>\n`; after that the stream carries frames. Any other reply, or EOF (no guest listener yet), means retry. |
 
 `crabd serve` flags: `--default-cwd` (default `/workspace`), `--max-connections` (64),
-`--max-inflight` (64), `--max-tunnels` (64), `--shutdown-grace-ms` (10 000). On SIGTERM / SIGINT it stops
+`--max-inflight` (64), `--max-tunnels` (64), `--shutdown-grace-ms` (10 000),
+`--auth-token-file` (none). On SIGTERM / SIGINT it stops
 accepting, lets in-flight requests finish within the grace period, kills background
 process groups and removes the Unix socket. Logs go to stderr (`RUST_LOG`, default `info`).
 

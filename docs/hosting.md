@@ -2,7 +2,9 @@
 
 Two kinds of Linux host run Sandcrab V1:
 
-1. A **Docker host** for the Docker backend: any Linux machine or VPS with Docker.
+1. A **Docker host** for the Docker backend: any Linux machine or VPS with Docker (a Mac
+   with Docker Desktop also works for local development, see
+   [Docker on macOS](#docker-on-macos-docker-desktop)).
    Officially supported and hardened, but containers share the host kernel
    (`hardware_isolated = false`, `multi_tenant_safe = false`): use it for your own agents
    and trusted code. For hostile multi-tenant code, use Firecracker.
@@ -101,6 +103,43 @@ network `none` unless `unrestricted`, ports on `127.0.0.1` only, and `crabd` bin
 read-only. Template `disk_mb` is **not** enforced (overlay2 would need xfs with pquota).
 Images must match this host's pin ([template-pins.md](template-pins.md); local integrity, not
 provenance). It still shares the host kernel, so it is not hardware isolation.
+
+### Docker on macOS (Docker Desktop)
+
+Docker Desktop runs containers in a Linux VM, so a Unix socket in a bind-mounted directory
+cannot connect the Mac to `crabd`: the socket lives in the VM's kernel. On macOS the Docker
+backend therefore uses its **`tcp` transport** by default:
+
+- `crabd` listens on a Unix socket in a 1 MiB per-sandbox tmpfs volume
+  (`sandcrab-<id>-sock`; mode 0700, owned by the container user, `nosuid,nodev,noexec`).
+- A second container per sandbox, `sandcrab-<id>-relay`, runs `crabd relay`. It mounts that
+  volume read-only and publishes port 7070 on **`127.0.0.1` with an ephemeral host port**,
+  never `0.0.0.0`. It runs no user code and is hardened like the sandbox, plus a read-only
+  root filesystem, 64 pids and 64 MiB.
+- A port on `127.0.0.1` is reachable by every local user and process on the Mac. So every
+  connection must first present a per-sandbox 256-bit token
+  ([protocol: `auth`](protocol.md#authentication-auth)). Without the token, nothing runs.
+  The token goes to `crabd` as a 0400 file in the per-sandbox run dir, never in env or
+  labels, so it is not in `docker inspect`. `crabd` deletes the file after reading it.
+  The `unix` transport uses the same token.
+
+**`disabled` networking is unchanged.** The sandbox container keeps network mode `none`
+(only loopback; no routes, no egress). Only the relay sits on Docker's default bridge, and
+it has no user code. The trade-off: one extra small container per sandbox (created and
+started in parallel with the sandbox; spawn-to-ready was about 200 ms p50 on an Apple Silicon
+Mac), and the relay's port is also reachable from other containers
+on the default bridge. The token covers that path too. Docker's internal networks were
+rejected because Docker does not publish ports from them, and putting the sandbox on a
+bridge would have given `disabled` sandboxes a network interface.
+
+Choose the transport with `SANDCRAB_DOCKER_TRANSPORT=unix|tcp` (or `DockerConfig::transport`).
+`sandcrab doctor` shows the one in use. Linux defaults to `unix`. Docker Desktop for Linux
+needs `tcp`, and `tcp` also works on a Linux Docker Engine host for testing. The Docker
+backend still reports `hardware_isolated = false` and `multi_tenant_safe = false` on every
+host.
+
+On macOS, build `crabd` with `scripts/build-crabd.sh` (it links with `rust-lld`; no musl
+toolchain is needed) and the templates with `templates/build.sh` as on Linux.
 
 ## 2. KVM host (Firecracker)
 
