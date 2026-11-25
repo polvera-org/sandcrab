@@ -776,6 +776,36 @@ mod tests {
     }
 
     #[test]
+    fn manifest_edited_to_stamp_another_image_is_refused() {
+        // Review N2: another (genuine) image is moved in, and its own recorded stamp is pasted
+        // into this manifest. That stamp vouches for the other image's digest, not this
+        // manifest's `rootfs_sha256`, so it is no hit: the image is hashed and refused.
+        let tmp = tempfile::tempdir().unwrap();
+        let (dir, m) = legacy_entry(tmp.path(), b"ext4 image");
+        let mut m = open_image(&dir, &m).unwrap().manifest;
+        let other = tmp.path().join("other.ext4");
+        fs::write(&other, b"evil image").unwrap();
+        let (_, other_stamp) = stamp::record(&other).unwrap();
+        fs::rename(&other, dir.join(ROOTFS_FILE)).unwrap(); // rename keeps ino and ctime here
+        let moved = FileStamp::of(&fs::metadata(dir.join(ROOTFS_FILE)).unwrap());
+        let mut forged = other_stamp;
+        if !forged.same_file_state(&moved) {
+            // Some filesystems bump ctime on rename: stamp what is there now, still with the
+            // other image's genuine digest.
+            forged = FileStamp {
+                sha256: other_stamp.sha256,
+                ..moved
+            };
+        }
+        m.rootfs_stamp = Some(forged);
+        m.save(&dir.join(MANIFEST_FILE)).unwrap();
+        assert!(matches!(
+            open_image(&dir, &m),
+            Err(Error::DigestMismatch { .. })
+        ));
+    }
+
+    #[test]
     fn scratch_is_sparse_ext4() {
         if Command::new("mke2fs").arg("-V").output().is_err() {
             eprintln!("mke2fs not installed; skipping");

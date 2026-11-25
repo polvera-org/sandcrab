@@ -11,6 +11,18 @@
 //! `/proc/self/fd/<n>` path to it), never the path again, so the check and the use refer to
 //! the same inode.
 //!
+//! # A stamp vouches for one digest (review N2)
+//!
+//! A stamp records the digest it was proven against ([`FileStamp::sha256`]), and a stamp hit
+//! counts only when that digest equals the one the caller expects (the compiled-in pin, or the
+//! manifest digest the caller already validated). So a stamp taken of some other file, with its
+//! genuine digest, cannot be pasted next to a pin to stand in for it: the digests differ, the
+//! file is re-hashed and refused. A stamp without a digest (written before this rule) never
+//! hits; the file is hashed once and re-stamped. What a stamp cannot stop is someone who writes
+//! the manifest *and* forges a stamp claiming the expected digest for another inode: there is no
+//! secret to sign with. That needs write access to the private (`0700`) state tree, where the
+//! same user can already replace the pinned files themselves.
+//!
 //! # Why `ctime` cannot be forged by the same unprivileged user
 //!
 //! Every write, truncate, `chmod`/`chown`, link-count change and `utimensat` sets `st_ctime`
@@ -51,7 +63,8 @@ use crate::hash::to_hex;
 /// the hash that proved its content (coarse kernel clocks tick every 1 to 10 ms).
 pub const RACY_MARGIN: Duration = Duration::from_millis(100);
 
-/// `(dev, ino, size, mtime, ctime)` of a regular file; times in nanoseconds since the epoch.
+/// `(dev, ino, size, mtime, ctime)` of a regular file (times in nanoseconds since the epoch),
+/// plus the SHA-256 that content was proven to have when the stamp was recorded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FileStamp {
@@ -60,10 +73,15 @@ pub struct FileStamp {
     pub size: u64,
     pub mtime_ns: i64,
     pub ctime_ns: i64,
+    /// The digest this stamp vouches for (see the module doc). `None`: a bare `fstat` (e.g. a
+    /// disk pinned by stamp only), or a stamp recorded before digests were bound to stamps;
+    /// such a stamp never stands in for a digest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<Sha256Digest>,
 }
 
 impl FileStamp {
-    /// The stamp of already-fetched metadata.
+    /// The stamp of already-fetched metadata (no digest bound).
     #[must_use]
     pub fn of(m: &Metadata) -> Self {
         let ns = |s: i64, n: i64| s.saturating_mul(1_000_000_000).saturating_add(n);
@@ -73,7 +91,37 @@ impl FileStamp {
             size: m.size(),
             mtime_ns: ns(m.mtime(), m.mtime_nsec()),
             ctime_ns: ns(m.ctime(), m.ctime_nsec()),
+            sha256: None,
         }
+    }
+
+    /// This stamp, vouching for `sha256` (hex, optional `sha256:` prefix; unbound if malformed).
+    #[must_use]
+    pub fn bound_to(self, sha256: &str) -> Self {
+        Self {
+            sha256: Sha256Digest::parse(sha256),
+            ..self
+        }
+    }
+
+    /// Same `(dev, ino, size, mtime, ctime)`, whatever digest either is bound to.
+    #[must_use]
+    pub fn same_file_state(&self, other: &Self) -> bool {
+        (self.dev, self.ino, self.size, self.mtime_ns, self.ctime_ns)
+            == (
+                other.dev,
+                other.ino,
+                other.size,
+                other.mtime_ns,
+                other.ctime_ns,
+            )
+    }
+
+    /// Whether this stamp vouches for `expected_sha256` (hex, optional `sha256:` prefix).
+    #[must_use]
+    pub fn vouches_for(&self, expected_sha256: &str) -> bool {
+        self.sha256
+            .is_some_and(|d| Some(d) == Sha256Digest::parse(expected_sha256))
     }
 
     /// `fstat` of an open file.
@@ -89,10 +137,57 @@ impl FileStamp {
     }
 }
 
+/// A SHA-256 digest, serialized as lowercase hex (`Copy`, so stamps stay `Copy`).
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Sha256Digest([u8; 32]);
+
+impl Sha256Digest {
+    /// Parse 64 hex digits (either case, optional `sha256:` prefix).
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        let s = s.strip_prefix("sha256:").unwrap_or(s).as_bytes();
+        if s.len() != 64 {
+            return None;
+        }
+        let nib = |c: u8| (c as char).to_digit(16).and_then(|d| u8::try_from(d).ok());
+        let mut out = [0u8; 32];
+        let (pairs, _) = s.as_chunks::<2>();
+        for (o, [hi, lo]) in out.iter_mut().zip(pairs) {
+            *o = (nib(*hi)? << 4) | nib(*lo)?;
+        }
+        Some(Self(out))
+    }
+
+    /// Lowercase hex.
+    #[must_use]
+    pub fn to_hex(&self) -> String {
+        to_hex(&self.0)
+    }
+}
+
+impl std::fmt::Debug for Sha256Digest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.to_hex())
+    }
+}
+
+impl Serialize for Sha256Digest {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        s.serialize_str(&self.to_hex())
+    }
+}
+
+impl<'de> Deserialize<'de> for Sha256Digest {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        Self::parse(&s).ok_or_else(|| serde::de::Error::custom("expected a 64-digit hex SHA-256"))
+    }
+}
+
 /// How [`open_verified`] established the content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verification {
-    /// The recorded stamp matched: nothing was read.
+    /// The recorded stamp matched and vouches for the expected digest: nothing was read.
     Stamp,
     /// The content was hashed through the fd and matched the expected digest.
     Hashed,
@@ -118,8 +213,9 @@ impl VerifiedFile {
 }
 
 /// Open `path` (read-only, close-on-exec), require a regular file and verify it against
-/// `expected_sha256` (lowercase hex, optional `sha256:` prefix): a matching `recorded` stamp
-/// skips the hash; otherwise the content is hashed through the fd. See the module doc.
+/// `expected_sha256` (lowercase hex, optional `sha256:` prefix): a `recorded` stamp that
+/// matches the fd **and** vouches for `expected_sha256` skips the hash; otherwise the content
+/// is hashed through the fd. See the module doc.
 pub fn open_verified(
     path: &Path,
     expected_sha256: &str,
@@ -144,10 +240,13 @@ pub fn verify_open(
         )));
     }
     let now = FileStamp::of(&meta);
-    if recorded == Some(&now) {
+    if let Some(r) = recorded
+        && r.same_file_state(&now)
+        && r.vouches_for(expected_sha256)
+    {
         return Ok(VerifiedFile {
             file,
-            stamp: Some(now),
+            stamp: Some(*r),
             how: Verification::Stamp,
         });
     }
@@ -170,14 +269,16 @@ pub fn verify_open(
 }
 
 /// SHA-256 of `file`'s content (positional reads, the fd offset is untouched) and the stamp
-/// that content goes with: `None` when the file changed while it was read, or its ctime is
-/// not [`RACY_MARGIN`] older than the hash (after waiting up to that margin).
+/// that content goes with, bound to that digest: `None` when the file changed while it was
+/// read, or its ctime is not [`RACY_MARGIN`] older than the hash (after waiting up to that
+/// margin).
 pub fn hash_and_stamp(file: &File) -> io::Result<(String, Option<FileStamp>)> {
     let before = FileStamp::of_file(file)?;
     let settled = settle(&before);
     let sha = sha256_fd(file)?;
     let after = FileStamp::of_file(file)?;
-    Ok((sha, (settled && before == after).then_some(before)))
+    let stamp = (settled && before == after).then(|| before.bound_to(&sha));
+    Ok((sha, stamp))
 }
 
 /// Wait (at most [`RACY_MARGIN`]) until `stamp`'s ctime is that much in the past. `false` when
@@ -264,15 +365,61 @@ mod tests {
         write(&p, b"rootfs");
         let (sha, stamp) = record(&p).unwrap();
         assert_eq!(sha, sha256_bytes(b"rootfs"));
+        assert!(stamp.vouches_for(&sha));
         let v = open_verified(&p, &sha, Some(&stamp)).unwrap();
         assert_eq!(v.how, Verification::Stamp);
         assert!(!v.restamped(Some(&stamp)));
-        // A wrong expected digest is not even looked at on a stamp hit: the stamp *is* the
-        // proof that the content hashed to the recorded digest.
+        // The expected digest may carry a prefix or upper case.
+        let upper = format!("sha256:{}", sha.to_uppercase());
         assert_eq!(
-            open_verified(&p, "00", Some(&stamp)).unwrap().how,
+            open_verified(&p, &upper, Some(&stamp)).unwrap().how,
             Verification::Stamp
         );
+    }
+
+    #[test]
+    fn stamp_only_vouches_for_its_own_digest() {
+        // Review N2: a genuine stamp of this very file, recorded with its digest, is not a hit
+        // when the caller expects another pin: the file is hashed and refused.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("img");
+        write(&p, b"rootfs");
+        let (_, stamp) = record(&p).unwrap();
+        let pin = sha256_bytes(b"pinned");
+        match open_verified(&p, &pin, Some(&stamp)) {
+            Err(Error::DigestMismatch { expected, .. }) => assert_eq!(expected, pin),
+            other => panic!("expected DigestMismatch, got {other:?}"),
+        }
+        // A legacy stamp (no digest) never hits, but the content is still accepted by hash
+        // and re-stamped with its digest.
+        let sha = sha256_bytes(b"rootfs");
+        let legacy = FileStamp {
+            sha256: None,
+            ..stamp
+        };
+        let v = open_verified(&p, &sha, Some(&legacy)).unwrap();
+        assert_eq!(v.how, Verification::Hashed);
+        assert!(v.restamped(Some(&legacy)));
+        assert!(v.stamp.unwrap().vouches_for(&sha));
+    }
+
+    #[test]
+    fn stamp_digest_serde() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("img");
+        write(&p, b"rootfs");
+        let (sha, stamp) = record(&p).unwrap();
+        let json = serde_json::to_value(stamp).unwrap();
+        assert_eq!(json["sha256"], serde_json::Value::String(sha));
+        let back: FileStamp = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(back, stamp);
+        // Records written before the binding still parse (unbound).
+        let mut old = json;
+        old.as_object_mut().unwrap().remove("sha256");
+        let back: FileStamp = serde_json::from_value(old).unwrap();
+        assert!(back.sha256.is_none() && back.same_file_state(&stamp));
+        assert!(Sha256Digest::parse("zz").is_none());
+        assert!(Sha256Digest::parse(&"g".repeat(64)).is_none());
     }
 
     #[test]

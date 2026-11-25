@@ -68,7 +68,7 @@ pub fn open_disk(d: &DiskSpec) -> Result<Option<File>, PinError> {
         (None, Some(want)) => {
             let now = FileStamp::of_file(&file)
                 .map_err(|e| PinError::Io(format!("stat `{}`: {e}", d.path.display())))?;
-            if &now == want {
+            if now.same_file_state(want) {
                 Ok(Some(file))
             } else {
                 Err(PinError::Mismatch(format!(
@@ -248,5 +248,25 @@ mod tests {
         assert_eq!(open_pinned(&pin).unwrap().how, stamp::Verification::Stamp);
         std::fs::write(&h, b"#!evil!!").unwrap();
         assert!(matches!(open_pinned(&pin), Err(PinError::Mismatch(_))));
+    }
+
+    #[test]
+    fn helper_record_edited_to_stamp_another_file_is_refused() {
+        // Review N2: the helper is replaced and the record's stamp is set to the new file's
+        // genuine stamp (with its digest), keeping the recorded sha: no stamp hit, refused.
+        let tmp = tempfile::tempdir().unwrap();
+        let h = tmp.path().join("sandcrab-krun");
+        std::fs::write(&h, b"#!helper").unwrap();
+        let mut rec = HelperRecord::record(&h).unwrap();
+        let evil = tmp.path().join("evil");
+        std::fs::write(&evil, b"#!evil!!").unwrap();
+        std::fs::rename(&evil, &h).unwrap();
+        rec.stamp = stamp::record(&h).unwrap().1;
+        rec.save(&h).unwrap();
+        let loaded = HelperRecord::load(&h).unwrap().unwrap();
+        assert!(matches!(
+            open_pinned(&loaded.pinned(&h)),
+            Err(PinError::Mismatch(_))
+        ));
     }
 }

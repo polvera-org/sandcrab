@@ -1214,6 +1214,38 @@ mod tests {
     }
 
     #[test]
+    fn manifest_edited_to_stamp_another_file_is_refused() {
+        // Review N2: another file is moved in under the pinned name, and its genuine (sha,
+        // stamp) record is used to edit the manifest's stamp (the sha must stay the compiled
+        // pin, `Manifest::check` enforces it). The stamp vouches for the other file's digest,
+        // not the pin, so it is no hit: the file is hashed and refused.
+        let t = tempfile::tempdir().unwrap();
+        let pins = test_pins();
+        let dest = t.path().join("d");
+        let r = install_with(&dest, &pins, &inputs(t.path()), &fake_fixup).unwrap();
+        let evil = t.path().join("evil");
+        fs::write(&evil, b"ab!").unwrap();
+        fs::rename(&evil, &r.libkrunfw.path).unwrap();
+        let (_, evil_stamp) = stamp::record(&r.libkrunfw.path).unwrap();
+        let mut m = Manifest::load(&dest).unwrap();
+        assert_eq!(m.libkrunfw.sha256, SHA_ABC, "the compiled pin");
+        m.libkrunfw.stamp = Some(evil_stamp);
+        write_json(&dest.join(MANIFEST_NAME), &m).unwrap();
+        let e = Artifacts::resolve_with(&dest, &pins, true).unwrap_err();
+        assert!(matches!(e, ArtifactError::DigestMismatch { .. }), "{e}");
+        // The same edit through the helper's pin (backend → helper) is refused too.
+        let pin = crate::helper_proto::PinnedFile {
+            path: r.libkrunfw.path.clone(),
+            sha256: SHA_ABC.into(),
+            stamp: Some(evil_stamp),
+        };
+        assert!(matches!(
+            crate::verified::open_pinned(&pin),
+            Err(crate::verified::PinError::Mismatch(_))
+        ));
+    }
+
+    #[test]
     fn wrong_inputs_are_refused() {
         let t = tempfile::tempdir().unwrap();
         let pins = test_pins();
