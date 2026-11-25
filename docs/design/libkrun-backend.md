@@ -349,7 +349,7 @@ The spike proved that **TSI is unsafe as a default**. It gives the guest the **h
 |---|---|
 | `disabled` (default) | `krun_disable_implicit_vsock` + `krun_add_vsock(ctx, 0)` (vsock without TSI) + `krun_set_port_map([])`. No NIC. Only `lo`. Verified unreachable **[spike]** |
 | `unrestricted` (Phase B, **shipped**, step `lk-net-userspace`) | A virtio-net NIC on the pinned userspace netstack, **behind the helper's egress filter** (§9.1): passt on Linux, gvproxy on macOS. Needs the netstack installed (`sandcrab libkrun install`); otherwise **`PolicyUnenforceable`** with the install hint. TSI stays off |
-| `unrestricted` + TSI opt-in (Phase A, **deprecated**) | `LibkrunConfig.allow_tsi_unrestricted = true` / CLI `--libkrun-tsi` (documented as **"guest can reach host loopback services"**) → TSI with `KRUN_TSI_HIJACK_INET` and an **empty port map**. An explicit opt-in wins over the netstack (never silently replaced); a missing netstack never falls back to it |
+| `unrestricted` + TSI opt-in (Phase A, **deprecated**) | `LibkrunConfig.allow_tsi_unrestricted = true` / CLI `--libkrun-tsi` (documented as **"guest can reach host loopback services"**) → TSI with `KRUN_TSI_HIJACK_INET` and an **empty port map**. An installed netstack wins over the opt-in (the opt-in is then ignored with an error-level log on every spawn, since the safe path exists); the opt-in only applies where no netstack is installed, and a missing netstack never falls back to TSI without it |
 | `egress_restricted` | `PolicyUnenforceable` (Phase 3 egress proxy), the same as other backends |
 
 ### 9.1 Phase B: userspace netstack behind an egress filter

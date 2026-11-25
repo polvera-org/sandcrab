@@ -1071,7 +1071,8 @@ async fn reaper_kills_dead_owners_helper() {
     assert!(e.run_dirs().is_empty());
 }
 
-/// `unrestricted` needs the explicit TSI opt-in; `egress_restricted` is never enforceable.
+/// `unrestricted` needs the netstack (or, without it, the TSI opt-in); `egress_restricted` is
+/// never enforceable.
 /// Refusals happen before anything is launched.
 async fn network_policies() {
     let e = env();
@@ -1133,6 +1134,20 @@ async fn network_policies() {
     let sb = e.m().spawn(e.spawn_cfg()).await.unwrap();
     assert_eq!(e.config().network, HelperNetwork::Disabled);
     assert!(e.config().netstack.is_none());
+    sb.destroy().await.unwrap();
+
+    // R12: the deprecated TSI opt-in never beats an installed netstack.
+    let e = env_libs(
+        |c| c.allow_tsi_unrestricted = true,
+        |l| l.netstack = Some(ns.clone()),
+    );
+    let sb = e
+        .m()
+        .spawn(SandboxConfig::from_template("base").network(NetworkConfig::unrestricted()))
+        .await
+        .unwrap();
+    assert_eq!(e.config().network, HelperNetwork::Userspace);
+    assert!(e.config().netstack.is_some());
     sb.destroy().await.unwrap();
 }
 

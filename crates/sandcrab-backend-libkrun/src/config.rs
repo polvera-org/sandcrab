@@ -67,8 +67,9 @@ pub struct LibkrunConfig {
     pub term_after: Duration,
     /// … and SIGKILL it at this point.
     pub kill_after: Duration,
-    /// Allow `network.policy = unrestricted` through TSI. **The guest can reach host loopback
-    /// services.** Off by default: `unrestricted` is then `PolicyUnenforceable` (design §9).
+    /// Deprecated. Allow `network.policy = unrestricted` through TSI when the pinned userspace
+    /// netstack is **not** installed. **The guest can reach host loopback services.** Ignored
+    /// (with an error log) when the netstack is installed; off by default (design §9).
     pub allow_tsi_unrestricted: bool,
     /// Ownership semantics of virtio-fs workspace shares.
     pub virtiofs_semantics: VirtiofsSemantics,
