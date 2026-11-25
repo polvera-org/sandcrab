@@ -178,6 +178,7 @@ html:not(.js) .crab-film, html.no-3d .crab-film { display:none; }
 .be { border-top:2px solid var(--ink); padding-top:22px; }
 .be-status { display:inline-flex; align-items:center; gap:8px; margin:0 0 18px; font:400 11.5px/1.4 var(--mono); text-transform:uppercase; letter-spacing:.16em; color:var(--ink-3); }
 .be-status::before { content:""; width:9px; height:9px; border-radius:50%; border:1.5px solid var(--ink-3); }
+.be-wide { grid-column:1 / -1; }
 .be-live { color:var(--ink); }
 .be-live::before { background:var(--rust); border-color:var(--rust); }
 .be h3 { font-size:clamp(26px,2.6vw,34px); font-weight:800; font-stretch:84%; letter-spacing:-.025em; line-height:1.02; }
