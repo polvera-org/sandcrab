@@ -6,12 +6,12 @@ authority on metrics, scenarios, statistics, fairness rules and the decision fra
 The harness talks to the backends only through the public SDK, so the same code measures
 every backend. Each run writes one schema-versioned JSON file into `results/`.
 
-**V1 scope:** only **Docker** is measured. Firecracker is wired in: `--backends
-firecracker` compiles into the default build. On a host without a usable `/dev/kvm`, or
-without the pinned FC artifacts, the backend shows up in the results as
-`{"status": "unavailable", "reason": "...", "todo": true}`, both in `backends[]` and on every
-matrix cell. It is never replaced by another backend. Measuring Firecracker for real needs a
-KVM host (kvm-homelab), which is still to do.
+**Scope:** Docker, Firecracker and libkrun are measured (`--backends docker,firecracker,libkrun`).
+A backend that cannot run on a host (no usable `/dev/kvm`, missing pinned artifacts, unsigned
+libkrun helper) shows up in the results as `{"status": "unavailable", "reason": "...", "todo": true}`,
+both in `backends[]` and on every matrix cell. It is never replaced by another backend. Current
+results: dev-vps (Docker), kvm-dedicated (Docker, Firecracker, libkrun) and mac-m2 (libkrun); see
+[`results/README.md`](results/README.md).
 
 ## Prerequisites
 
@@ -118,6 +118,27 @@ first:
 
 `summarize` prints all of this as a table.
 
+## The bench report (`docs/site/bench-report.html`)
+
+The report renders every number from the results JSON, embedded by `scripts/bench-report-data.py`:
+
+1. Commit the new results file and add its caveats to `results/README.md`.
+2. Add it to `RUNS` in `scripts/bench-report-data.py`, next to the other runs of its host, with
+   its role: `primary` (its backends become comparison columns), `rerun` (same host and code,
+   shown only as a noise check) or `density` (a density-only rerun that replaces the host's
+   density data). A backend a host has not measured yet goes in `PENDING`; it renders as
+   "pending", never as numbers.
+3. Run `python3 scripts/bench-report-data.py` and open the page (e.g. `python3 -m http.server`
+   in `docs/site`). Check it in light and dark.
+
+The page groups runs by `host.hostname` (use `--host-label`, never a real hostname), derives the
+tier (Smoke/Standard/Full) from the recorded config and the arch from the crabd target, and
+computes its caveats (HDD storage, Docker's seccomp asymmetry, RSS vs PSS, validity, tier mix
+on one host, busy hosts, density reruns, the density cap) from the data. Host-specific prose the
+data cannot show (e.g. the libkrun pin-check cost on CPUs without SHA extensions) lives in the
+page script, keyed by host and backend. Metric ids renamed after a run was recorded are mapped
+in `LEGACY_METRICS`.
+
 ## Fairness notes and known deviations (Docker, V1)
 
 - **Interleaving:** iterations alternate between backends (ABAB) within each cell, the
@@ -169,11 +190,14 @@ first:
 - **Harness overhead:** `harness.noop_overhead_ns` (median cost of timing an empty future)
   and `harness.sampler_cpu_pct` (the 10 Hz cgroup sampler's CPU) are reported for every run.
 
-## Firecracker TODO (KVM host)
+## Open bench TODO
 
-- Run on kvm-homelab: `--backends docker,firecracker`. Firecracker opens through
-  `SandcrabBuilder::firecracker` when `/dev/kvm` and the pinned artifacts are present.
+- Rerun Firecracker on kvm-dedicated: its memory/CPU probes landed after the
+  `20261124T183907Z-kvm-dedicated.json` run, so FC memory and idle CPU are blank in the report.
+- Docker on mac-m2 (`--backends docker,libkrun`) in a reserved idle window.
+- One interleaved `docker,firecracker,libkrun` run on an SSD/NVMe KVM host (kvm-dedicated's HDDs
+  skew Docker).
+- libkrun on Linux: the guest-RAM mapping is not found in the helper's `smaps`, so
+  `mem.vmm_guest_pss_*` / `mem.vmm_overhead*` are `not_measured`.
 - FC probes still missing in `crates/sandcrab-bench/src/backend.rs`: `disk_rw` (the per-VM
-  scratch drive plus workspace image bytes). Memory/CPU and teardown verification (VMM
-  exited, run dir with its sockets and drives removed) are done.
-- Record `templates[].rootfs_sha256` from the rootfs pipeline.
+  scratch drive plus workspace image bytes). Record `templates[].rootfs_sha256`.

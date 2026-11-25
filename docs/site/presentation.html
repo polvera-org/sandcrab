@@ -205,7 +205,7 @@ img.fb { display:none; }
     <div class="cap">
       <p class="eyebrow">07 · Tide pool vs. sealed jar</p>
       <h2>What isolates what</h2>
-      <p>Docker: a hardened container on the shared host kernel, for single-tenant, trusted hosts. Firecracker: its own kernel behind KVM, built, real-KVM runs pending.</p>
+      <p>Docker: a hardened container on the shared host kernel, for single-tenant, trusted hosts. Firecracker: its own kernel behind KVM, built, first real-KVM benchmarks in the report.</p>
     </div>
   </section>
 
@@ -223,7 +223,7 @@ img.fb { display:none; }
     <div class="cap">
       <p class="eyebrow">09 · The numbers</p>
       <h2>Measured, and what isn’t yet</h2>
-      <p>Canonical Docker run: n=<span data-v="benchN">30</span> per cell, p50 bars, p95 whiskers. Firecracker, Cloud Hypervisor and libkrun stay dashed until a KVM host measures them.</p>
+      <p>Canonical Docker run on dev-vps (2-vCPU SSD VPS): n=<span data-v="benchN">30</span> per cell, p50 bars, p95 whiskers. Firecracker and libkrun were measured on other hosts (bare-metal KVM, Apple M2), so they stay dashed here; the full report compares them host by host.</p>
       <p class="src"><span data-v="benchFile">results.json</span> · commit <span data-v="benchCommit">—</span> · <a href="bench-report.html">full report</a></p>
     </div>
   </section>
@@ -243,7 +243,7 @@ img.fb { display:none; }
     <div class="cap">
       <p class="eyebrow">11 · Next</p>
       <h2>Stepping stones</h2>
-      <p>Get a KVM host, publish Firecracker numbers, add Cloud Hypervisor and libkrun, then build the control plane.</p>
+      <p>Publish a valid microVM-vs-Docker run on an SSD KVM host, add Cloud Hypervisor, then build the control plane.</p>
       <p class="go"><a class="pill pill-sm" href="walkthrough.html">Read the walkthrough</a></p>
     </div>
   </section>
