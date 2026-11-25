@@ -198,7 +198,7 @@ steps:
     title: "Bench on kvm-dedicated, STANDARD tier (--resource-runs 10), --backends libkrun only; reuse the full docker,firecracker run from bench-kvm-fc"
     depends_on: [lk-e2e-linux, bench-kvm-fc, bench-fixes, lk-w2-emfile]
     artifacts: [docs/bench/results/]
-    status: doing
+    status: done
 
   - id: bench-report
     phase: implement
@@ -206,7 +206,7 @@ steps:
     title: "Regenerate bench report: per-host sections (dev-vps Docker, kvm-dedicated Docker vs Firecracker vs libkrun, Mac Docker vs libkrun), host/disk/arch labels, microVM vs Docker comparison; update landing/presentation numbers if they change"
     depends_on: [bench-kvm-fc, lk-bench-mac, lk-bench-kvm]
     artifacts: [docs/site/bench-report.html, scripts/bench-report-data.py, docs/bench/README.md]
-    status: todo
+    status: doing
 
   - id: lk-net-userspace
     phase: implement
