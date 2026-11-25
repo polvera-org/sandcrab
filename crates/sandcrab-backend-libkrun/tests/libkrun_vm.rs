@@ -1331,7 +1331,10 @@ fn private_rootfs(env: &Env) -> Vec<PathBuf> {
         .map(|e| e.path().join("rootfs.ext4"))
         .filter(|p| p.is_file())
         .collect();
-    assert!(!imgs.is_empty(), "no base rootfs in the cache: spawn base once first");
+    assert!(
+        !imgs.is_empty(),
+        "no base rootfs in the cache: spawn base once first"
+    );
     imgs
 }
 
@@ -1373,7 +1376,9 @@ fn swap_modified(path: &Path, offset: u64) {
 }
 
 async fn spawn_base(env: &Env) -> Result<Sandbox, SandboxError> {
-    env.manager.spawn(SandboxConfig::from_template("base")).await
+    env.manager
+        .spawn(SandboxConfig::from_template("base"))
+        .await
 }
 
 fn helper_refused_pin(e: &SandboxError) -> bool {
@@ -1461,7 +1466,10 @@ async fn tampered_netstack_is_refused() {
     let ns = env.backend.libs().netstack.clone().unwrap();
     let sb = env.manager.spawn(unrestricted()).await.unwrap();
     sb.destroy().await.unwrap();
-    assert!(no_netstack_left(), "the netstack exits (else: ETXTBSY below)");
+    assert!(
+        no_netstack_left(),
+        "the netstack exits (else: ETXTBSY below)"
+    );
     // The binary the helper executes on this CPU, modified in place.
     let executed = match (&ns.avx2, avx2) {
         (Some(v), true) => v.path.clone(),
