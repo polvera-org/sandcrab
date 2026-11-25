@@ -70,12 +70,20 @@ pub struct FirecrackerBackend {
     config: Arc<FirecrackerConfig>,
     mkfs: MkfsStrategy,
     host_user: UserSpec,
-    /// (image, pin) → verified rootfs path, per process.
+    /// (image, pin) → built rootfs entry, per process (the image is re-checked per spawn).
     rootfs_cache: RootfsCache,
 }
 
-/// (image, pin) → verified rootfs image.
-type RootfsCache = Arc<Mutex<HashMap<(String, Option<String>), PathBuf>>>;
+/// (image, pin) → built rootfs entry (dir + manifest).
+type RootfsCache =
+    Arc<Mutex<HashMap<(String, Option<String>), (PathBuf, crate::rootfs::RootfsManifest)>>>;
+
+/// The root drive to attach: a path, plus the verified fd it refers to (kept open until
+/// Firecracker has opened the drive).
+struct RootDrive {
+    path: PathBuf,
+    _file: Option<std::fs::File>,
+}
 
 impl FirecrackerBackend {
     /// Validate the host and config: `/dev/kvm` read-write, the `firecracker` binary and
@@ -151,20 +159,30 @@ impl FirecrackerBackend {
             .unwrap_or(self.host_user)
     }
 
-    /// Rootfs image for the spec's template (cached per process; built on a cache miss).
-    async fn rootfs(&self, spec: &ResolvedSpec) -> Result<PathBuf> {
+    /// Rootfs image for the spec's template (built once per process on a cache miss),
+    /// verified on every spawn: opened once, its stat stamp compared with the one recorded
+    /// next to its SHA-256 (re-hashed through the same fd only on a mismatch). Firecracker is
+    /// handed `/proc/<pid>/fd/<n>` of that fd, never the cache path (design §12.4 of the
+    /// libkrun design; the same scheme).
+    async fn rootfs(&self, spec: &ResolvedSpec) -> Result<RootDrive> {
         let crabd = match &self.config.rootfs {
-            RootfsSource::Image(p) => return Ok(p.clone()),
+            RootfsSource::Image(p) => {
+                return Ok(RootDrive {
+                    path: p.clone(),
+                    _file: None,
+                });
+            }
             RootfsSource::Template { crabd } => crabd.clone(),
         };
         let key = (spec.image.clone(), spec.image_sha256.clone());
-        if let Some(p) = self
+        let cached = self
             .rootfs_cache
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(&key)
-        {
-            return Ok(p.clone());
+            .cloned();
+        if let Some((dir, manifest)) = cached {
+            return self.verified_root(key, dir, manifest).await;
         }
         // Never build a rootfs from an image this host has not pinned (local integrity).
         if spec.image_sha256.is_none() {
@@ -205,11 +223,54 @@ impl FirecrackerBackend {
             image = %spec.image, cache_hit = built.cache_hit, elapsed = ?built.elapsed,
             "rootfs ready"
         );
+        self.verified_root(key, built.dir, built.manifest).await
+    }
+
+    /// [`crate::rootfs::open_image`] off the runtime, as the root drive.
+    async fn verified_root(
+        &self,
+        key: (String, Option<String>),
+        dir: PathBuf,
+        manifest: crate::rootfs::RootfsManifest,
+    ) -> Result<RootDrive> {
+        let (dir, v) = tokio::task::spawn_blocking(move || {
+            crate::rootfs::open_image(&dir, &manifest).map(|v| (dir, v))
+        })
+        .await
+        .map_err(|e| fc_err("rootfs verify task", e))?
+        .map_err(|e| match e {
+            crate::Error::DigestMismatch {
+                what,
+                expected,
+                actual,
+            } => SandboxError::DigestMismatch {
+                image: what,
+                expected,
+                actual: format!(
+                    "{actual} (the cached rootfs changed after it was built; delete its cache \
+                     entry to rebuild it)"
+                ),
+            },
+            other => fc_err("rootfs", other),
+        })?;
+        if let Some(e) = &v.record_error {
+            tracing::warn!(error = %e, "could not record the rootfs stat stamp (next process re-hashes)");
+        }
+        tracing::debug!(how = ?v.verified.how, "rootfs verified");
         self.rootfs_cache
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(key, built.image_path.clone());
-        Ok(built.image_path)
+            .insert(key, (dir, v.manifest));
+        // Firecracker is another process: it reaches our fd through /proc/<pid>/fd (same uid).
+        let path = PathBuf::from(format!(
+            "/proc/{}/fd/{}",
+            std::process::id(),
+            std::os::fd::AsRawFd::as_raw_fd(&v.verified.file)
+        ));
+        Ok(RootDrive {
+            path,
+            _file: Some(v.verified.file),
+        })
     }
 
     async fn spawn_vm(
@@ -240,7 +301,7 @@ impl FirecrackerBackend {
         // Workspace drives.
         t.mark_custom("ws_attach_start");
         let mut drives = vec![
-            drive(ROOT_DRIVE_ID, &rootfs, true, true),
+            drive(ROOT_DRIVE_ID, &rootfs.path, true, true),
             drive(SCRATCH_DRIVE_ID, &scratch, false, false),
         ];
         let mut guest_mounts = Vec::new();
@@ -371,6 +432,8 @@ impl FirecrackerBackend {
             }),
         };
         configure_and_start(vm, &mut api, &plan, t).await?;
+        // Firecracker opened every drive at configuration: the verified fd can go.
+        drop(rootfs);
 
         let init = InitConfig {
             sandbox_id: spec.id.to_string(),
