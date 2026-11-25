@@ -24,6 +24,7 @@ toml.workspace = true
 tracing.workspace = true
 rustix = { workspace = true, features = ["fs"] }
 uuid.workspace = true
+getrandom.workspace = true
 # workspace archive (sync-back) unpacking
 tar = { version = "0.4", default-features = false }
 
