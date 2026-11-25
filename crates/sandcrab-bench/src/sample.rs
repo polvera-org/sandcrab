@@ -145,8 +145,20 @@ fn parse_smaps(text: &str) -> Vec<Mapping> {
 }
 
 /// Guest RAM = the largest anonymous mappings whose sizes add up to exactly `guest_bytes` (one
-/// region below 3 GiB on x86, two around the MMIO gap above). `None` if no exact match.
+/// region below 3 GiB on x86, two around the MMIO gap above: Firecracker). Without an exact
+/// match, the **smallest** anonymous mapping larger than `guest_bytes` (libkrun reserves one
+/// region rounded up, e.g. 1 GiB for a 512 MiB guest, and the guest only touches its RAM in
+/// it), so its RSS/PSS is still the guest's touched memory. `None` if neither exists.
 fn guest_split(maps: &[Mapping], guest_bytes: u64) -> Option<(u64, u64)> {
+    guest_exact(maps, guest_bytes).or_else(|| {
+        maps.iter()
+            .filter(|m| m.anon && m.size > guest_bytes)
+            .min_by_key(|m| m.size)
+            .map(|m| (m.rss, m.pss))
+    })
+}
+
+fn guest_exact(maps: &[Mapping], guest_bytes: u64) -> Option<(u64, u64)> {
     let mut cands: Vec<&Mapping> = maps
         .iter()
         .filter(|m| m.anon && m.size >= 2 << 20 && m.size <= guest_bytes)
@@ -444,8 +456,31 @@ Pss:                 300 kB
             guest: Some(guest),
         };
         assert_eq!(m.overhead_pss(), Some(700 * 1024));
-        // no exact match → not identified, never guessed
+        // nothing as large as the guest → not identified, never guessed
         assert_eq!(guest_split(&maps, 1024 << 20), None);
+    }
+
+    #[test]
+    fn smaps_guest_split_libkrun_rounds_the_region_up() {
+        // libkrun on x86_64: one 1 GiB anonymous region for a 512 MiB guest, next to a
+        // larger unrelated reservation and small heap arenas.
+        let anon = |size: u64, pss: u64| Mapping {
+            size,
+            rss: pss,
+            pss,
+            anon: true,
+        };
+        let maps = [
+            anon(64 << 20, 1),
+            anon(4 << 30, 2),
+            anon(1 << 30, 300),
+            anon(8 << 20, 3),
+        ];
+        assert_eq!(guest_split(&maps, 512 << 20), Some((300, 300)));
+        // An exact match still wins over a rounded-up region.
+        let mut exact = maps.to_vec();
+        exact.push(anon(512 << 20, 42));
+        assert_eq!(guest_split(&exact, 512 << 20), Some((42, 42)));
     }
 
     #[test]
