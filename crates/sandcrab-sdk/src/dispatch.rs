@@ -55,6 +55,10 @@ impl ToolError {
             ProtocolError::AmbiguousEdit { .. } => "ambiguous_edit",
             ProtocolError::TooLarge { .. } => "too_large",
             ProtocolError::Unimplemented(_) => "unimplemented",
+            // crabd refused the connection itself: nothing the model can retry.
+            ProtocolError::Unauthorized(_) => {
+                return Self::new("unauthorized", err.to_string(), true);
+            }
             ProtocolError::Other { .. } => "tool_error",
         };
         Self::new(code, err.to_string(), false)

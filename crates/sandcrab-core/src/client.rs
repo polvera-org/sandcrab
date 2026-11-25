@@ -426,7 +426,8 @@ const BACKOFF_CAP: Duration = Duration::from_millis(20);
 
 /// Retry connect + `hello` until it succeeds or `deadline` passes.
 ///
-/// A protocol version mismatch is fatal (no retry).
+/// A protocol version mismatch and an auth refusal (`PermissionDenied` from the connector)
+/// are fatal (no retry).
 pub async fn wait_ready(connector: &dyn Connector, deadline: Instant) -> Result<ReadyClient> {
     let started = Instant::now();
     let mut backoff = BACKOFF_START;
@@ -473,6 +474,12 @@ pub async fn wait_ready(connector: &dyn Connector, deadline: Instant) -> Result<
                         client.close().await;
                     }
                 }
+            }
+            // An explicit auth refusal will not fix itself by retrying.
+            Ok(Err(e)) if e.kind() == io::ErrorKind::PermissionDenied => {
+                return Err(SandboxError::Transport(format!(
+                    "connect {connector:?}: {e}"
+                )));
             }
             Ok(Err(e)) => last_err = format!("connect: {e}"),
             Err(_) => last_err = "connect timed out".into(),
@@ -529,7 +536,9 @@ pub async fn open_tunnel(
 }
 
 /// Read exactly one response frame (header + payload, nothing more).
-async fn read_one_response<R: AsyncRead + Unpin + ?Sized>(reader: &mut R) -> Result<RpcResponse> {
+pub(crate) async fn read_one_response<R: AsyncRead + Unpin + ?Sized>(
+    reader: &mut R,
+) -> Result<RpcResponse> {
     let mut header = [0u8; HEADER_LEN];
     reader.read_exact(&mut header).await.map_err(|e| {
         SandboxError::Transport(if e.kind() == io::ErrorKind::UnexpectedEof {

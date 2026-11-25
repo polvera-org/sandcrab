@@ -8,6 +8,7 @@
 //! waits for `crabd` ([`wait_ready`]) and returns a [`Sandbox`] tool-call proxy.
 
 pub mod archive;
+pub mod auth;
 pub mod backend;
 pub mod client;
 pub mod error;
@@ -25,6 +26,7 @@ pub mod timings;
 pub mod tunnel;
 pub mod workspace;
 
+pub use auth::{AuthConnector, DEFAULT_AUTH_HANDSHAKE_TIMEOUT, generate_auth_token};
 pub use backend::{BackendCapabilities, BackendKind, ResolvedSpec, RuntimeBackend, SandboxHandle};
 pub use client::{
     AsyncStream, BoxedStream, CALL_TIMEOUT_GRACE, Connector, CrabdClient, DEFAULT_CALL_TIMEOUT,
