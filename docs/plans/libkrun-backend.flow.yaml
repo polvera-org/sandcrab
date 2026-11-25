@@ -206,7 +206,7 @@ steps:
     title: "Regenerate bench report: per-host sections (dev-vps Docker, kvm-dedicated Docker vs Firecracker vs libkrun, Mac Docker vs libkrun), host/disk/arch labels, microVM vs Docker comparison; update landing/presentation numbers if they change"
     depends_on: [bench-kvm-fc, lk-bench-mac, lk-bench-kvm]
     artifacts: [docs/site/bench-report.html, scripts/bench-report-data.py, docs/bench/README.md]
-    status: doing
+    status: done
 
   - id: lk-net-userspace
     phase: implement
