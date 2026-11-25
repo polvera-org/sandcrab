@@ -317,6 +317,14 @@ steps:
     agent: nebula
     title: "Re-review review-fixes + lk-verified-fd; integrated gate on kvm-dedicated + Mac"
     depends_on: [review-fixes, lk-verified-fd]
+    status: done
+
+  - id: integrity-fixes
+    phase: implement
+    agent: ada
+    title: "Re-review backlog top 3: R18 wire check_private_dir for state root/bin/artifacts, N2 bind stat stamps to digests, N3 clear quarantine via fd + at install + fix hints"
+    depends_on: [lk-rereview]
+    artifacts: [crates/sandcrab-backend-libkrun/, crates/sandcrab-rootfs/, crates/sandcrab-cli/src/libkrun.rs]
     status: doing
 
   - id: lk-docs
@@ -325,4 +333,4 @@ steps:
     title: "hosting.md (macOS + Linux libkrun setup, install script brew/from-source, release signing: Developer ID + hardened runtime + notarization), cli.md, README backend table, ROADMAP, CHANGELOG"
     depends_on: [lk-rereview, lk-live]
     artifacts: [docs/hosting.md, docs/cli.md, README.md, docs/ROADMAP.md, CHANGELOG.md]
-    status: todo
+    status: doing
