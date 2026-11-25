@@ -190,7 +190,7 @@ steps:
     title: "Bench on the Mac (M2, macOS): --backends docker,libkrun (Docker Desktop vs libkrun microVMs)"
     depends_on: [lk-e2e-macos]
     artifacts: [docs/bench/results/]
-    status: doing
+    status: done
 
   - id: lk-bench-kvm
     phase: implement
