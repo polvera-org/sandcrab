@@ -279,7 +279,7 @@ steps:
     agent: nebula
     title: "QA + security review (helper unsafe island, TSI exposure, virtio-fs traversal/identity race, capability honesty, lifeline); decide: per-spawn root-disk hash, Linux lib-hash cost (~187 ms w/o SHA-NI)"
     depends_on: [bench-report, fc-net-egress, guest-hardening-2, small-fixes, guest-hardening-3, docker-tcp-macos]
-    status: doing
+    status: done
 
   - id: crabagent-backends
     phase: implement
@@ -296,10 +296,33 @@ steps:
     depends_on: [bench-report, crabagent-backends]
     status: done
 
+  - id: review-fixes
+    phase: implement
+    agent: ada
+    title: "lk-review fixes: R1 relay off the default bridge, R2 pre-auth slot DoS, R3 tiny-fragment SMTP bypass, R6 fail-closed hardening, R7 swap cap, R12, R14, R16, R19 bench hostname leak; netstack first-run readiness; known items (pty test on macOS, SDK tests without docker, bench smaps matcher)"
+    depends_on: [lk-review]
+    artifacts: [crates/sandcrab-backend-docker/, crates/sandcrab-guest/, crates/sandcrab-bench/, crates/sandcrab-backend-libkrun/src/netstack.rs]
+    status: doing
+
+  - id: lk-verified-fd
+    phase: implement
+    agent: ada
+    title: "Decisions (a)+(b): verified-fd loading (inode/size/mtime/ctime record, re-hash on mismatch) for root disk, libkrun/libkrunfw, netstack, helper; R4, R5, R8, R10 signing, R18 umask"
+    depends_on: [lk-review]
+    artifacts: [crates/sandcrab-backend-libkrun/src/ffi.rs, crates/sandcrab-backend-libkrun/src/artifacts.rs, crates/sandcrab-rootfs/, crates/sandcrab-cli/src/libkrun.rs, scripts/sign-krun-helper.sh]
+    status: doing
+
+  - id: lk-rereview
+    phase: verify
+    agent: nebula
+    title: "Re-review review-fixes + lk-verified-fd; integrated gate on kvm-dedicated + Mac"
+    depends_on: [review-fixes, lk-verified-fd]
+    status: todo
+
   - id: lk-docs
     phase: document
     agent: rosetta
     title: "hosting.md (macOS + Linux libkrun setup, install script brew/from-source, release signing: Developer ID + hardened runtime + notarization), cli.md, README backend table, ROADMAP, CHANGELOG"
-    depends_on: [lk-review, lk-live]
+    depends_on: [lk-rereview, lk-live]
     artifacts: [docs/hosting.md, docs/cli.md, README.md, docs/ROADMAP.md, CHANGELOG.md]
     status: todo
