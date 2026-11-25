@@ -54,7 +54,7 @@ steps:
     agent: nova
     title: "Live check in the browser: light + dark, phone width, landing → TL;DR → full report"
     depends_on: [tldr-links]
-    status: doing
+    status: done
 
   - id: tldr-docs
     phase: document
