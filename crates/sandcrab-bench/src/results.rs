@@ -12,6 +12,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::stats::Stats;
+pub use crate::validity::Tier;
 
 pub const SCHEMA_VERSION: &str = "1";
 
@@ -35,11 +36,24 @@ pub struct RunResult {
     pub drift_check: Option<DriftCheck>,
     /// Shared, amortised daemon memory (dockerd / containerd), reported once per run.
     pub shared_overhead: BTreeMap<String, u64>,
+    /// Valid for the Full tier (the spec rules): publishable.
     pub valid: bool,
     pub invalid_reasons: Vec<String>,
+    /// Tier derived from the config (`smoke` | `standard` | `full`). Absent in files written
+    /// before tiers were recorded; `sandcrab-bench recheck` derives it.
+    #[serde(default)]
+    pub tier: Option<Tier>,
+    /// Valid against the rules of `tier` (Smoke: never).
+    #[serde(default)]
+    pub valid_for_tier: Option<bool>,
+    #[serde(default)]
+    pub tier_invalid_reasons: Vec<String>,
     /// Deviations from the spec and other context for the report.
     pub notes: Vec<String>,
     pub config: RunConfig,
+    /// The preflight that ran before this run (absent with `--no-preflight` and in older files).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preflight: Option<Preflight>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -322,6 +336,83 @@ pub struct RunConfig {
     pub network: String,
 }
 
+/// Severity of a preflight finding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Severity {
+    /// The run would be marked invalid for the tier, or produce void data: `run` refuses
+    /// (Standard/Full) unless `--force`.
+    Fail,
+    /// A risk or a degraded measurement that does not by itself invalidate the run.
+    Warn,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct Finding {
+    /// `load` | `storage` | `memory` | `density` | `disk` | `backends` | `drift`.
+    pub check: String,
+    pub severity: Severity,
+    pub message: String,
+    /// What to do about it.
+    pub fix: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PreflightStorage {
+    /// What lives there: `work-dir` (fixtures, per-run state), `sandcrab-home` (rootfs cache,
+    /// pinned VMM artifacts) or `docker-root`.
+    pub role: String,
+    pub device: String,
+    /// `nvme` | `ssd` | `ssd (internal)` | `hdd` | `unknown`.
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub mount: String,
+    pub free_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct DriftProbe {
+    pub backend: String,
+    pub template: String,
+    /// `spawn_ready` samples (ns) before and after the idle window.
+    pub start_ns: Vec<f64>,
+    pub end_ns: Vec<f64>,
+    pub window_s: u64,
+    pub start_p50_ns: Option<f64>,
+    pub end_p50_ns: Option<f64>,
+    pub drift_pct: Option<f64>,
+    /// Coefficient of variation of all samples, %.
+    pub cv_pct: Option<f64>,
+    pub error: Option<String>,
+}
+
+/// Preflight (`sandcrab-bench preflight`, and the start of `run`): predicts whether a run at
+/// `tier` would come out valid. It sees the host now; it cannot see what happens over hours.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Preflight {
+    pub tier: Tier,
+    /// RFC 3339, UTC.
+    pub at: String,
+    pub duration_s: f64,
+    pub load: [f64; 3],
+    pub max_load: f64,
+    pub mem_total_bytes: u64,
+    pub mem_available_bytes: u64,
+    /// `--density-budget` as given; `None` when the density scenario is not requested.
+    pub density_budget: Option<String>,
+    pub density_budget_bytes: Option<u64>,
+    /// Upper bound of one sandbox's memory (template `memory_mb`).
+    pub density_sandbox_bytes: Option<u64>,
+    pub storage: Vec<PreflightStorage>,
+    pub backends: Vec<BackendStatus>,
+    pub drift_probe: Vec<DriftProbe>,
+    pub findings: Vec<Finding>,
+    /// No `fail` finding for `tier` (Smoke: no finding that would break the run).
+    pub would_be_valid: bool,
+    /// The run went ahead despite `fail` findings (`--force`).
+    pub forced: bool,
+}
+
 /// JSON Schema of [`RunResult`], pretty-printed with a trailing newline.
 #[must_use]
 pub fn schema_json() -> String {
@@ -418,8 +509,12 @@ mod tests {
             shared_overhead: BTreeMap::from([("dockerd_rss".to_owned(), 1)]),
             valid: false,
             invalid_reasons: vec!["n < 30".into()],
+            tier: Some(Tier::Smoke),
+            valid_for_tier: Some(false),
+            tier_invalid_reasons: vec!["smoke".into()],
             notes: vec![],
             config: RunConfig::default(),
+            preflight: None,
         }
     }
 
@@ -438,6 +533,26 @@ mod tests {
         assert_eq!(v["backends"][0]["todo"], true);
         assert!(v["cells"][0]["metrics"]["spawn_ready"]["stats"]["p50_ci95"].is_array());
         assert!(v["host"]["storage"]["type"].is_string());
+    }
+
+    #[test]
+    fn files_without_tier_fields_still_parse() {
+        let mut v = serde_json::to_value(sample()).unwrap();
+        let o = v.as_object_mut().unwrap();
+        for k in [
+            "tier",
+            "valid_for_tier",
+            "tier_invalid_reasons",
+            "preflight",
+        ] {
+            o.remove(k);
+        }
+        let back: RunResult = serde_json::from_value(v).unwrap();
+        assert_eq!(back.tier, None);
+        assert_eq!(back.valid_for_tier, None);
+        assert!(back.preflight.is_none());
+        let json = serde_json::to_string(&back).unwrap();
+        assert!(!json.contains("\"preflight\""));
     }
 
     #[test]

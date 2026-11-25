@@ -85,6 +85,11 @@ Note on macOS local dev:
 for published numbers and only when the human asks for it. Reuse earlier valid results when
 the backend and host have not changed.
 
+**Always preflight before Standard/Full:** `sandcrab-bench preflight --tier standard|full --backends ...` (about a
+minute). `run` also preflights and refuses a run it predicts invalid; don't reach for `--force` to get past a busy
+host or an exhausted density budget, fix the cause. Results record `tier` and `valid_for_tier`; `valid` still means
+valid for Full (publishable).
+
 ### Disk hygiene (clean up after yourself)
 
 This repo is heavy on disk: Rust `target/` dirs (several GB each), template images, rootfs images, and Docker

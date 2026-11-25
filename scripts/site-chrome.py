@@ -28,7 +28,7 @@ REPO = "https://github.com/polvera-org/sandcrab"
 NAV = [
     ("home", "Home", "landing/index.html"),
     ("walkthrough", "Walkthrough", "walkthrough.html"),
-    ("bench", "Benchmarks", "bench-report.html"),
+    ("bench", "Benchmarks", "benchmarks.html"),
     ("symbology", "Symbology", "symbology.html"),
     ("presentation", "Presentation", "presentation.html"),
     ("docs", "Docs", f"{REPO}/tree/main/docs"),
@@ -38,6 +38,7 @@ PAGES = {
     "index.html": None,
     "walkthrough.html": "walkthrough",
     "bench-report.html": "bench",
+    "benchmarks.html": "bench",
     "symbology.html": "symbology",
     "presentation.html": "presentation",
 }

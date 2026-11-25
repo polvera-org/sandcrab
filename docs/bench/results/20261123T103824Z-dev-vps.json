@@ -17968,6 +17968,11 @@
   "invalid_reasons": [
     "spawn_ready p50 drifted 61.5% start→end"
   ],
+  "tier": "full",
+  "valid_for_tier": false,
+  "tier_invalid_reasons": [
+    "spawn_ready p50 drifted 61.5% start→end"
+  ],
   "notes": [
     "firecracker not measured: /dev/kvm not usable (No such file or directory (os error 2)); Firecracker needs a KVM host (bare metal or a VM with nested virtualization) — TODO: run on kvm-homelab",
     "density capped at 16 sandboxes (spec: 500) to keep this host safe",

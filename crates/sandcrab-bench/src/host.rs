@@ -204,7 +204,10 @@ fn storage(path: &str) -> Storage {
     let kind = if device.contains("nvme") {
         "nvme".to_owned()
     } else {
-        match cmd("lsblk", &["-ndo", "ROTA", &device]).as_deref() {
+        match cmd("lsblk", &["-ndo", "ROTA", &device])
+            .or_else(|| sys_rotational(&device))
+            .as_deref()
+        {
             Some("0") => "ssd".into(),
             Some("1") => "hdd".into(),
             _ => "unknown".into(),
@@ -217,6 +220,69 @@ fn storage(path: &str) -> Storage {
         fs,
         probed_path: path.to_owned(),
     }
+}
+
+/// `/sys/block/<dev>/queue/rotational` for a device node (`/dev/md3`, `/dev/sda1`): a
+/// partition reads its parent disk's queue. Fallback when `lsblk` is missing. A
+/// `/dev/mapper/*` link resolves to its `/dev/dm-N` node first.
+fn sys_rotational(device: &str) -> Option<String> {
+    let real = fs::canonicalize(device).ok();
+    let name = real
+        .as_deref()
+        .and_then(|p| p.to_str())
+        .unwrap_or(device)
+        .strip_prefix("/dev/")?;
+    read_trim(format!("/sys/block/{name}/queue/rotational")).or_else(|| {
+        let real = fs::canonicalize(format!("/sys/class/block/{name}")).ok()?;
+        read_trim(real.parent()?.join("queue/rotational"))
+    })
+}
+
+/// Storage backing `path` (device, `nvme`/`ssd`/`hdd`/`unknown`, filesystem). Linux: `findmnt`
+/// plus the rotational flag; macOS: `df` plus `diskutil` (`Solid State: Yes` on Apple Silicon).
+#[must_use]
+pub fn storage_for(path: &Path) -> Storage {
+    #[cfg(target_os = "macos")]
+    {
+        macos::storage_at(path)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        storage(&path.to_string_lossy())
+    }
+}
+
+/// `(free bytes, mount point)` of the filesystem holding `path`, from `df -Pk`.
+#[must_use]
+pub fn disk_free(path: &Path) -> Option<(u64, String)> {
+    let out = cmd("df", &["-Pk", &path.to_string_lossy()])?;
+    parse_df(&out)
+}
+
+fn parse_df(out: &str) -> Option<(u64, String)> {
+    let line = out.lines().nth(1)?;
+    let cols: Vec<&str> = line.split_whitespace().collect();
+    let avail_kb: u64 = cols.get(3)?.parse().ok()?;
+    Some((avail_kb * 1024, (*cols.last()?).to_owned()))
+}
+
+/// The Sandcrab home (`$SANDCRAB_HOME`, else `~/.sandcrab`): pinned VMM artifacts and the
+/// shared rootfs cache live here.
+#[must_use]
+pub fn sandcrab_home() -> Option<std::path::PathBuf> {
+    std::env::var_os("SANDCRAB_HOME")
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".sandcrab")))
+}
+
+/// Docker's root dir, if the daemon answers and the dir is visible on this host (it is not
+/// with Docker Desktop, whose root lives inside its VM).
+#[must_use]
+pub fn docker_root() -> Option<std::path::PathBuf> {
+    let root = cmd("docker", &["info", "--format", "{{.DockerRootDir}}"])?;
+    let p = std::path::PathBuf::from(root);
+    p.is_dir().then_some(p)
 }
 
 fn docker_info() -> (DockerInfo, String) {
@@ -624,14 +690,15 @@ pub(crate) mod macos {
     }
 
     fn storage() -> Storage {
-        let state = std::env::var_os("SANDCRAB_HOME")
-            .map(std::path::PathBuf::from)
-            .or_else(|| {
-                std::env::var_os("HOME").map(|h| std::path::Path::new(&h).join(".sandcrab"))
-            })
+        let state = super::sandcrab_home()
             .filter(|p| p.exists())
             .unwrap_or_else(|| "/".into());
-        let df = cmd_c("df", &[&state.to_string_lossy()]).unwrap_or_default();
+        storage_at(&state)
+    }
+
+    /// Storage of the volume holding `path`, recorded by device and mount point only.
+    pub fn storage_at(path: &std::path::Path) -> Storage {
+        let df = cmd_c("df", &[&path.to_string_lossy()]).unwrap_or_default();
         let line = df.lines().nth(1).unwrap_or_default();
         let device = line
             .split_whitespace()
@@ -725,6 +792,14 @@ mod tests {
             macos::parse_swapusage("total = 0.00M  used = 0.00M  free = 0.00M  (encrypted)"),
             Some((0, 0))
         );
+    }
+
+    #[test]
+    fn df_parses_free_and_mount() {
+        let out = "Filesystem 1024-blocks Used Available Capacity Mounted on\n\
+                   /dev/md3 100 40 60 40% /\n";
+        assert_eq!(parse_df(out), Some((60 * 1024, "/".into())));
+        assert_eq!(parse_df("header only"), None);
     }
 
     #[test]

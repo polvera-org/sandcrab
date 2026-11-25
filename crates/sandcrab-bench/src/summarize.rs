@@ -26,9 +26,31 @@ pub fn render(r: &RunResult) -> String {
         if r.git.dirty { "-dirty" } else { "" },
         r.seed
     );
+    // Tier verdict: as recorded, or derived for files written before tiers were recorded.
+    let derived = crate::validity::assess(&crate::validity::Inputs::of(r));
+    let (tier, vft, reasons, how) = match (r.tier, r.valid_for_tier) {
+        (Some(t), Some(v)) => (t, v, r.tier_invalid_reasons.clone(), ""),
+        _ => (
+            derived.tier,
+            derived.valid_for_tier,
+            derived.tier_invalid_reasons,
+            " (derived: not recorded in this file)",
+        ),
+    };
     let _ = writeln!(
         s,
-        "valid: {}{}",
+        "tier: {}{how} — valid for {}: {vft}{}",
+        tier.label(),
+        tier.label(),
+        if reasons.is_empty() {
+            String::new()
+        } else {
+            format!(" — {}", reasons.join("; "))
+        }
+    );
+    let _ = writeln!(
+        s,
+        "valid (full, publishable): {}{}",
         r.valid,
         if r.invalid_reasons.is_empty() {
             String::new()
@@ -36,6 +58,15 @@ pub fn render(r: &RunResult) -> String {
             format!(" — {}", r.invalid_reasons.join("; "))
         }
     );
+    if let Some(p) = &r.preflight {
+        let _ = writeln!(
+            s,
+            "preflight ({}){}: {}",
+            p.tier.label(),
+            if p.forced { ", FORCED" } else { "" },
+            crate::preflight::verdict(p).replace('\n', "\n  ")
+        );
+    }
     for b in &r.backends {
         if b.status == Availability::Unavailable {
             let _ = writeln!(

@@ -17435,6 +17435,9 @@
   "invalid_reasons": [
     "n below the spec minimum of 30 (runs=30, resource_runs=10; --allow-small-n/--quick)"
   ],
+  "tier": "standard",
+  "valid_for_tier": true,
+  "tier_invalid_reasons": [],
   "notes": [
     "density capped at 16 sandboxes (spec: 500) to keep this host safe",
     "network policy: `disabled` on every backend (egress_restricted is unenforceable in V1)",

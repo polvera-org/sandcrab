@@ -31,9 +31,35 @@ window, ~72 s per iteration). Choose the tier on purpose:
 
 | Tier | Flags | Time (2 backends, 2 templates) | Use it for |
 |---|---|---|---|
-| **Smoke** | `--quick` | ~5 min | Revalidating after a change to a backend, the bench or the guest. The result is marked invalid and is never published. **This is the default for agents.** |
-| **Standard** | `--runs 30 --warmups 5 --resource-runs 10` (add `--allow-small-n`) | ~1 h | Step-level numbers, and before/after comparisons for perf work. The result is marked invalid for resources; say so in the README note. |
+| **Smoke** | `--quick` | ~5 min | Revalidating after a change to a backend, the bench or the guest. Never valid, never published. **This is the default for agents.** |
+| **Standard** | `--runs 30 --warmups 5 --resource-runs 10` (add `--allow-small-n`) | ~1 h | Step-level numbers, and before/after comparisons for perf work. Can be valid for Standard, never for Full. |
 | **Full** | the canonical command below | ~3 h+ | Published numbers only (bench report, landing page, presentation): once per host per release, or when a change plausibly moves the headline numbers. Requires an explicit request from the maintainer. |
+
+**Preflight first.** Before a Standard or Full run, run `sandcrab-bench preflight --tier <tier>` with
+the run's `--backends` (see [Preflight](#preflight)). `run` does it anyway and refuses a run it
+predicts invalid.
+
+### Validity per tier
+
+The tier is derived from the arguments (`--quick`, `--runs`, `--resource-runs`) and recorded in
+the results as `tier`, with `valid_for_tier` and `tier_invalid_reasons` judged against that tier's
+rules:
+
+| Tier | N | Load, drift, failures |
+|---|---|---|
+| Full | `runs` ≥ 30 and `resource_runs` ≥ 30 | 1-min load ≤ `--max-load` at start, `spawn_ready` drift ≤ 10%, no cell with > 1% failed iterations |
+| Standard | `runs` ≥ 30 and 10 ≤ `resource_runs` < 30 | the same as Full: they protect the latency cells, which Standard measures at the full N=30, so there is nothing to relax them for |
+| Smoke | `--quick`, or anything below Standard's N | never valid (correctness only) |
+
+`valid` / `invalid_reasons` keep their original meaning: valid for **Full**, i.e. publishable. A
+Standard run that passes its tier reads `valid_for_tier: true`, `valid: false`.
+
+`sandcrab-bench recheck <files>` recomputes all of this from what a file recorded (config, start
+load, drift check, cells) and checks the recorded `valid` still matches. `--write` adds the three
+tier fields to files written before tiers existed, changing no other byte (it splices the fields in
+rather than re-serializing, so measured floats cannot move). The committed files were rechecked this
+way: only `20261125T014108Z-kvm-dedicated.json` (libkrun, Standard; load 0.38 at start, drift +0.6%,
+0 failures) is valid for its tier; every other file is Full and invalid for its recorded reason.
 
 Reuse results instead of re-running: if a backend's code and the host have not changed, its
 last valid Full result still stands. Add the new backend in its own run and say in the README
@@ -44,7 +70,10 @@ note which runs are combined.
 ```bash
 cargo build --release -p sandcrab-bench
 
-# Smoke run (tiny N, short windows; the result is marked invalid). A few minutes on Docker.
+# Would a Full run be valid on this host right now? (about a minute; --json, --no-probe)
+target/release/sandcrab-bench preflight --tier full --backends docker,firecracker
+
+# Smoke run (tiny N, short windows; never valid). A few minutes on Docker.
 target/release/sandcrab-bench run --quick --backends docker,firecracker
 
 # Full spec run (N=30, 5 warmups, ABAB-interleaved, seeded cell order)
@@ -62,6 +91,9 @@ target/release/sandcrab-bench host-info          # --json for machine-readable o
 # Table of p50/p95/p99/min/max/stddev for a results file
 target/release/sandcrab-bench summarize docs/bench/results/<file>.json
 
+# Tier + validity recomputed from what files recorded (--write adds missing tier fields)
+target/release/sandcrab-bench recheck docs/bench/results/*.json
+
 # Regenerate the committed JSON Schema (a unit test fails if it is stale)
 cargo run -p sandcrab-bench -- schema > docs/bench/results/schema.json
 ```
@@ -71,10 +103,42 @@ seed is chosen and recorded), `--allow-small-n` (needed for N < 30, and marks th
 invalid), `--calls`/`--call-warmups` (steady-state calls per sandbox), `--resource-runs`,
 `--idle-window-s` (default 60), `--settle-s` (default 5), `--density-cap`/`--density-reps`/
 `--density-floor-mib`, `--touch-mib` (default 64), `--host-kind` (overrides bare-metal/vm
-detection), `--max-load` (default 0.5).
+detection), `--max-load` (default 0.5), `--no-preflight`, `--force` (run despite a preflight
+that predicts the result invalid; recorded as `preflight.forced`), `--probe-samples` (default and
+minimum 5) and `--probe-window-s` (default 30).
 
 `--quick` sets N=3, 1 warmup, 3 calls per metric, 1 resource run, a 2 s idle window, a 1 s
 settle, density capped at 3 with 1 rep, and an 8 MiB touch.
+
+## Preflight
+
+`sandcrab-bench preflight --tier smoke|standard|full` (default `full`; `--backends` defaults to all
+three) predicts, in about a minute, whether a run at that tier would come out valid here. `run` runs
+the same checks first, with the load it records as the run's start load, and writes the result into
+the results file as `preflight`. For Standard and Full it refuses to start when the verdict is
+invalid, naming each reason and its fix, unless `--force`. Smoke runs skip the drift probe and never
+refuse.
+
+| Check | Fails (refuses Standard/Full) when | Warns when |
+|---|---|---|
+| load | 1-min load > `--max-load` (the run's own start rule) | 5- or 15-min load > `--max-load` (busy recently) |
+| memory | `MemAvailable` < `--density-floor-mib` | |
+| density | the density budget fits fewer than 2 sandboxes of the template's `memory_mb` (e.g. `75%` on a desktop already using > 75% of RAM: the budget clamps to 0 and density measures the desktop) | the budget is below `--density-cap` sandboxes |
+| storage | Docker's root is on an HDD and the tier is Full with Docker (the kvm-dedicated Full run drifted −11.9% over 3 h; Standard only warns, since its ~1 h run gives the drift less time to build and the run's own drift check still applies) | the work dir, Sandcrab home or Docker root is on an HDD (Linux: `lsblk`/`/sys/block/*/queue/rotational`; macOS: `diskutil`) |
+| disk | < 5 GiB free where the run writes (at any tier) | < 15 GiB free |
+| backends | no requested backend opens | a requested backend is unavailable |
+| drift probe | the first backend's `spawn_ready` p50 moves > 10% between 5 spawns and 5 more spawns 30 s later **and** the two groups do not overlap (< 1% chance with 5 + 5 samples; `--probe-samples` below 5 is raised to 5), or a probe spawn fails twice in a row | a shift > 5%, a coefficient of variation > 25%, or a probe spawn that failed once and succeeded on retry |
+
+Fixes it suggests: close apps and wait for the load to settle; free memory or pass an absolute
+`--density-budget` (e.g. `2GiB`) or drop `density`; use an SSD/NVMe host (or the microVM backends
+without Docker); free disk space; fix the backend (`sandcrab doctor`).
+
+**What it cannot predict.** The drift probe sees about a minute. It catches a host that is unstable
+now (a background job in progress, caches still warming, a backend that is not fully up). It cannot
+see drift that builds up over hours: page caches growing, an HDD's caches settling (the cause of the
+kvm-dedicated drift, which a 1-minute probe would not have shown, hence the separate storage rule),
+or a cron job or desktop activity starting later. A clean preflight is necessary, not sufficient;
+the run's own start/end drift check stays the authority.
 
 ## What is measured
 
@@ -100,9 +164,14 @@ Teardown counts as finished only once the resources are verified gone. On Docker
 A results file is `results/<UTC>-<host>.json` (schema: `results/schema.json`). Check these
 first:
 
-- **`valid` / `invalid_reasons`**: N < 30, a 1-minute load above `--max-load` at start, drift
-  over 10%, or any cell with more than 1% failures. An invalid run is still useful, but it
-  must not drive the recommendation.
+- **`tier` / `valid_for_tier` / `tier_invalid_reasons`**: the run judged against its own tier
+  ([Validity per tier](#validity-per-tier)). Report Standard runs as "valid for Standard", not as
+  "invalid".
+- **`valid` / `invalid_reasons`**: valid for Full: N < 30, a 1-minute load above `--max-load` at
+  start, drift over 10%, or any cell with more than 1% failures. An invalid run is still useful,
+  but it must not drive the recommendation.
+- **`preflight`**: what the preflight saw before the run, its findings, and whether the run was
+  `forced` past a failing verdict.
 - **`backends[]`**: which backends ran, which were `unavailable` (with the reason), and their
   capability flags.
 - **`host`**: `kind` (`bare-metal` / `vm` / `vm-nested`), `virt`, `kvm_available`,
@@ -118,6 +187,30 @@ first:
 
 `summarize` prints all of this as a table.
 
+## Report pages
+
+Two pages render the committed results; neither has a hand-typed number.
+
+- **`docs/site/benchmarks.html`** (TL;DR): the concise page that the landing, site nav and README
+  link to. Per host and backend (template `base`, warm cache): lifecycle and agent-turn p50/p95,
+  idle memory and CPU, density. Generated by `python3 scripts/bench-tldr-data.py`, which also
+  recomputes the claims in its "What it means" fold and exits non-zero if a run breaks one.
+  Before writing, it runs a self-test that feeds the claim checks mutated data and fails if a
+  broken claim gets through; `--self-test` runs only that. Its host/run list (`HOSTS`) and
+  `PENDING` mirror the full report's `RUNS` and `PENDING`.
+- **`docs/site/bench-report.html`** (full report): distributions, caveats, method, for
+  presentations and deep dives. Linked only from the TL;DR page's bottom link, the presentation
+  and the README. Generated by `python3 scripts/bench-report-data.py` (next section).
+
+Regenerate both after adding a results file.
+
+The TL;DR page deliberately shows **no validity badges**: validity is an internal rule (see
+[Validity per tier](#validity-per-tier)), and each run's tier validity is shown in the full report.
+
+The shared site nav and footer are defined once in `scripts/site-chrome.py`, which rewrites the
+marked blocks in every static page (`python3 scripts/site-chrome.py`; `--check` exits 1 if a page
+is out of date). The Vite-built landing (`docs/site/landing-src`) keeps its own copy of the header.
+
 ## The bench report (`docs/site/bench-report.html`)
 
 The report renders every number from the results JSON, embedded by `scripts/bench-report-data.py`:
@@ -132,8 +225,8 @@ The report renders every number from the results JSON, embedded by `scripts/benc
    in `docs/site`). Check it in light and dark.
 
 The page groups runs by `host.hostname` (use `--host-label`, never a real hostname; it replaces the hostname in the
-file name and the JSON), derives the
-tier (Smoke/Standard/Full) from the recorded config and the arch from the crabd target, and
+file name and the JSON), shows each run's recorded tier and "valid / invalid for <tier>" (a file without
+tier fields is refused: run `sandcrab-bench recheck --write` on it), derives the arch from the crabd target, and
 computes its caveats (HDD storage, Docker's seccomp asymmetry, RSS vs PSS, validity, tier mix
 on one host, busy hosts, density reruns, the density cap) from the data. Host-specific prose the
 data cannot show (e.g. the libkrun pin-check cost on CPUs without SHA extensions) lives in the

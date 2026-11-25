@@ -1,0 +1,48 @@
+---
+slug: bench-tldr
+name: Benchmarks TL;DR page
+---
+
+import { ExecutionFlowchart, TodoList, PhaseTimeline } from "ministack/components";
+
+# Benchmarks TL;DR page: execution plan
+
+A short Benchmarks page (`docs/site/benchmarks.html`) that someone can take in within a minute. It shows the
+headline numbers per backend, memory and density, and the verdict and caveats in one line each. It is generated
+from the same results JSON as the full report, so no number is typed by hand. The landing page links here, and
+this page links to the full report (`bench-report.html`), which stays for presentations and deep dives.
+
+<PhaseTimeline src="./bench-tldr.flow.yaml" />
+
+## Flow
+
+Steps sitting side by side run in parallel. Arrows are real dependencies.
+
+<ExecutionFlowchart src="./bench-tldr.flow.yaml" />
+
+## Work
+
+<TodoList src="./bench-tldr.flow.yaml" />
+
+## Proposed folds
+
+1. **Headline.** Time to a ready sandbox, plus a teardown/first call/agent turn row, for each backend on its best
+   host (with host labels), as big numbers.
+2. **Footprint.** Memory per idle sandbox, density (sandboxes per host), idle CPU.
+3. **What it means.** Three bullets: microVMs start fast enough for per-turn sandboxes; Docker is lightest on
+   memory; pick by isolation needs. No validity badges: strict validity is an internal engineering rule, and
+   these are real measurements. Every number carries its host and hardware label.
+4. **Footer.** "See full benchmark →" and the date, commit and hosts of the runs.
+
+## Also in this flow (user request)
+
+- **Bench preflight.** About 2 minutes before any long run, it checks host load, disk type and a short drift probe,
+  and warns that the run would come out invalid before hours are spent.
+- **Tier-aware validity.** A run is "valid" by the rules of its own tier (smoke, standard or full). "Full" stays
+  the bar for published numbers. This is internal: it's shown in the full report, not on the TL;DR page.
+
+## Risks & open questions
+
+- **Mac Docker numbers are pending** the weekend idle-Mac run. That column shows "coming soon", not a gap.
+- **Fairness without caveat walls.** Compare backends only within a host, and label each host's hardware (e.g. HDD)
+  next to its numbers, so the page stays truthful without a list of disclaimers.

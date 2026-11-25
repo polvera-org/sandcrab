@@ -20,6 +20,7 @@ use sandcrab_sdk::protocol::EntryKind;
 use crate::backend::{BackendId, LiveBackend, OpenOpts, Probe};
 use crate::fixtures::{self, Fixtures};
 use crate::host;
+use crate::preflight;
 use crate::results::{
     Availability, BackendStatus, Cell, CellStatus, DensityRun, DensityStep, DriftCheck, Failure,
     HarnessOverhead, Metric, Phase, RunConfig, RunResult, SCHEMA_VERSION, TemplateInfo, Unit,
@@ -27,9 +28,10 @@ use crate::results::{
 use crate::sample;
 use crate::schedule;
 use crate::stats;
+use crate::validity::{self, Tier};
 
 /// Spec minimum for measured iterations per cell.
-pub const MIN_N: usize = 30;
+pub use crate::validity::MIN_N;
 /// A cell with more failures than this fraction is unreliable (spec §5.12).
 pub const UNRELIABLE_RATE: f64 = 0.01;
 /// Drift threshold on `spawn_ready` p50 (spec §5.11).
@@ -227,6 +229,20 @@ pub struct Plan {
     pub work_dir: PathBuf,
     pub templates_dir: PathBuf,
     pub crabd: PathBuf,
+    /// Run the preflight first (`--no-preflight` clears it).
+    pub preflight: bool,
+    /// Run even when the preflight predicts an invalid result (`--force`).
+    pub force: bool,
+    pub probe_samples: usize,
+    pub probe_window: Duration,
+}
+
+impl Plan {
+    /// The tier these arguments put the run at.
+    #[must_use]
+    pub fn tier(&self) -> Tier {
+        Tier::derive(self.quick, self.runs, self.resource_runs)
+    }
 }
 
 /// One cell of the matrix (backend-independent; backends are interleaved inside it).
@@ -1508,7 +1524,6 @@ async fn drift_p50(ctx: &Ctx<'_>, n: usize) -> Option<f64> {
 pub async fn run(plan: &Plan) -> anyhow::Result<(RunResult, PathBuf)> {
     let started = chrono::Utc::now();
     let mut notes = Vec::new();
-    let mut invalid = Vec::new();
 
     let opts_for = |id: BackendId| OpenOpts {
         state_dir: plan.work_dir.join("state").join(id.label()),
@@ -1588,6 +1603,54 @@ pub async fn run(plan: &Plan) -> anyhow::Result<(RunResult, PathBuf)> {
             });
         }
     }
+
+    // preflight: uses the load recorded above, before any of the bench's own activity. Smoke
+    // skips the drift probe (it would double a smoke run) and never refuses.
+    let tier = plan.tier();
+    let preflight = if plan.preflight {
+        let o = preflight::Opts {
+            tier,
+            max_load: plan.max_load,
+            density: plan.scenarios.contains(&Scenario::Density),
+            density_budget: plan.density_budget,
+            density_budget_raw: plan.density_budget_raw.clone(),
+            density_cap: plan.density_cap,
+            density_floor: plan.density_floor,
+            probe: tier != Tier::Smoke && plan.scenarios.contains(&Scenario::Drift),
+            probe_samples: plan.probe_samples,
+            probe_window: plan.probe_window,
+            template: plan
+                .templates
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "base".into()),
+            work_dir: plan.work_dir.clone(),
+            docker_requested: plan.backends.contains(&BackendId::Docker),
+        };
+        let mut p = preflight::check(&o, noise.load_start, &live, &backends).await;
+        eprint!("{}", preflight::render(&p));
+        if !p.would_be_valid && tier != Tier::Smoke {
+            if !plan.force {
+                for b in &live {
+                    let _ = b.sc.shutdown().await;
+                }
+                anyhow::bail!(
+                    "refusing to start a {} run that preflight predicts invalid (see the verdict \
+                     above). Fix the reasons, choose a smaller tier, or pass --force to run anyway \
+                     (the preflight is recorded in the results).",
+                    tier.label()
+                );
+            }
+            p.forced = true;
+            notes.push(format!(
+                "run forced (--force) although preflight predicted it invalid for {}",
+                tier.label()
+            ));
+        }
+        Some(p)
+    } else {
+        None
+    };
 
     // fixtures
     let fx_root = plan.work_dir.join("fixtures");
@@ -1747,37 +1810,7 @@ pub async fn run(plan: &Plan) -> anyhow::Result<(RunResult, PathBuf)> {
     host::noise_end(&mut noise);
     host_info.crabd.version = ctx.crabd_version.get().cloned().unwrap_or_default();
 
-    // validity
-    if plan.runs < MIN_N || plan.resource_runs < MIN_N {
-        invalid.push(format!(
-            "n below the spec minimum of {MIN_N} (runs={}, resource_runs={}; --allow-small-n/--quick)",
-            plan.runs, plan.resource_runs
-        ));
-    }
-    if noise.load_start[0] > plan.max_load {
-        invalid.push(format!(
-            "host busy: 1-min load {:.2} > {} at start",
-            noise.load_start[0], plan.max_load
-        ));
-    }
-    if let Some(d) = &drift_check
-        && d.flagged
-    {
-        invalid.push(format!(
-            "spawn_ready p50 drifted {:.1}% start→end",
-            d.drift_pct
-        ));
-    }
-    for c in &cells {
-        if c.unreliable {
-            invalid.push(format!(
-                "cell {} unreliable: {}/{} iterations failed",
-                c.key(),
-                c.failures.len(),
-                c.n
-            ));
-        }
-    }
+    // validity: computed from the result below (validity::apply), so `recheck` agrees.
     if !noise.other_guests.is_empty() {
         notes.push(
             "other Proxmox guests running; per-guest CPU (mpstat 30 s) was not sampled".into(),
@@ -1835,7 +1868,7 @@ pub async fn run(plan: &Plan) -> anyhow::Result<(RunResult, PathBuf)> {
 
     let finished = chrono::Utc::now();
     let host_label = host_info.hostname.clone();
-    let result = RunResult {
+    let mut result = RunResult {
         schema_version: SCHEMA_VERSION.into(),
         run_id: uuid::Uuid::new_v4().to_string(),
         started_at: started.to_rfc3339(),
@@ -1851,8 +1884,11 @@ pub async fn run(plan: &Plan) -> anyhow::Result<(RunResult, PathBuf)> {
         density,
         drift_check,
         shared_overhead,
-        valid: invalid.is_empty(),
-        invalid_reasons: invalid,
+        valid: false,
+        invalid_reasons: Vec::new(),
+        tier: None,
+        valid_for_tier: None,
+        tier_invalid_reasons: Vec::new(),
         notes,
         config: RunConfig {
             argv: plan.argv.clone(),
@@ -1884,7 +1920,15 @@ pub async fn run(plan: &Plan) -> anyhow::Result<(RunResult, PathBuf)> {
             allow_small_n: plan.allow_small_n,
             network: "disabled".into(),
         },
+        preflight,
     };
+    validity::apply(&mut result);
+    eprintln!(
+        "tier {}: valid_for_tier={}, valid (full)={}",
+        tier.label(),
+        result.valid_for_tier.unwrap_or(false),
+        result.valid
+    );
 
     fs::create_dir_all(&plan.out_dir)?;
     let safe_host: String = host_label
@@ -1940,6 +1984,10 @@ mod tests {
             kind_override: None,
             noise_declared: String::new(),
             max_load: 0.5,
+            preflight: true,
+            force: false,
+            probe_samples: 5,
+            probe_window: Duration::from_secs(30),
             w2_files: 5000,
             w2_bytes: 50_000_000,
             work_dir: PathBuf::from("/tmp/x"),

@@ -1,0 +1,73 @@
+# ministack execution flow: bench-tldr
+# Validate with: node scripts/validate-flow.mjs docs/plans/bench-tldr.flow.yaml
+
+slug: bench-tldr
+name: Benchmarks TL;DR page
+summary: >-
+  A short, easy-to-read Benchmarks page (main stats, aggregated numbers, conclusions in a few folds),
+  generated from the same results JSON as the full report. The landing page links to it, and it links to
+  the full report for deep dives.
+phases: [plan, implement, verify, document]
+
+steps:
+  - id: tldr-plan
+    phase: plan
+    agent: nova
+    title: "Scope: 3–4 folds (headline numbers per backend, memory/density, verdict + caveats in one line each), same data pipeline, same site style; landing + README link to it"
+    depends_on: []
+    artifacts: [docs/plans/bench-tldr.flow.yaml, docs/plans/bench-tldr.plan.mdx]
+    status: done
+
+  - id: tldr-page
+    phase: implement
+    agent: ada
+    title: "Build docs/site/benchmarks.html via its own generator scripts/bench-tldr-data.py reading the results JSON (no hand-typed numbers); no validity/invalid badges (marketing page), factual host + hardware labels; 'See full benchmark' link; light/dark; phone width"
+    depends_on: [tldr-plan]
+    artifacts: [docs/site/benchmarks.html, scripts/bench-tldr-data.py]
+    status: done
+
+  - id: bench-validity
+    phase: implement
+    agent: ada
+    title: "sandcrab-bench: (1) preflight (~2 min: load, disk type, short drift probe) that predicts an invalid run before a long one starts; (2) tier-aware validity (valid for smoke/standard/full by each tier's own rules; 'full' stays the publish bar); recompute for committed results; full report shows it"
+    depends_on: [tldr-plan]
+    artifacts: [crates/sandcrab-bench/, docs/bench/results/schema.json, scripts/bench-report-data.py, docs/site/bench-report.html, docs/bench/README.md]
+    status: done
+
+  - id: tldr-links
+    phase: implement
+    agent: ada
+    title: "Point the landing (nav, benchmark section, footer; rebuild), site index and README at benchmarks.html; keep bench-report.html for presentations"
+    depends_on: [tldr-page]
+    artifacts: [docs/site/landing-src/index.html, docs/site/landing/, docs/site/index.html, README.md]
+    status: done
+
+  - id: tldr-review
+    phase: verify
+    agent: nebula
+    title: "Review: every number traces to the JSON, host/hardware labels present and comparisons within-host, no private hostnames, links work; bench-validity preflight + tier validity logic"
+    depends_on: [tldr-links, bench-validity]
+    status: done
+
+  - id: tldr-live
+    phase: verify
+    agent: nova
+    title: "Live check in the browser: light + dark, phone width, landing → TL;DR → full report"
+    depends_on: [tldr-links]
+    status: done
+
+  - id: tldr-fixes
+    phase: implement
+    agent: ada
+    title: "Review fixes: R1 takeaway 03 claim + check_claims over all measured microVMs, R2 name host in agent-turn range, R3 label the separate libkrun run, R9/R10 preflight probe-samples floor + transient spawn retry"
+    depends_on: [tldr-review]
+    artifacts: [scripts/bench-tldr-data.py, docs/site/benchmarks.html, crates/sandcrab-bench/]
+    status: done
+
+  - id: tldr-docs
+    phase: document
+    agent: rosetta
+    title: "docs/bench/README.md: TL;DR page generation, preflight, tier validity; AGENTS.md bench tiers note; CHANGELOG"
+    depends_on: [tldr-fixes, tldr-live]
+    artifacts: [docs/bench/README.md, CHANGELOG.md]
+    status: done
