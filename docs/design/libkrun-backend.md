@@ -381,7 +381,10 @@ netstack: passt `--fd 0` (BE32 frames) | gvproxy `-listen-stdio accept` (LE16 fr
   `0/8 10/8 100.64/10 127/8 169.254/16 172.16/12 192.0.0/24 192.0.2/24 192.168/16 198.18/15 198.51.100/24
   203.0.113/24 224/4 240/4` (the FC egress policy's reserved ranges, which cover gvproxy's `192.168.127.254` alias and
   cloud metadata), nor the host's own addresses and on-link subnets (`getifaddrs` at spawn), nor TCP 25/465/587 (SMTP).
-  Malformed frames are dropped. Netstack → guest frames are only length-checked.
+  Malformed frames are dropped, and so is every fragmented TCP/UDP packet (MF set or a non-zero offset) and any
+  TCP/UDP packet shorter than an 8-byte L4 header, so the port checks always see the ports (a tiny first fragment
+  could otherwise slip past the SMTP block where the netstack reassembles). The guest never needs to fragment
+  (MTU 1500, PMTU in the netstack); fragmented ICMP still passes the destination check. Netstack → guest frames are only length-checked.
 - **Netstack process:** pinned by SHA-256 (the helper hashes it right before spawning; mismatch → exit 71), spawned
   by the helper as the same unprivileged user with an empty environment, `cwd /`, in the helper's process group and
   (Linux) cgroup leaf. It **listens on nothing**: its only channel is the socketpair, so when the helper dies — however

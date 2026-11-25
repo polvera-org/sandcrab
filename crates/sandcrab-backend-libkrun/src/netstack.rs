@@ -407,6 +407,11 @@ const PROTO_TCP: u8 = 6;
 const PROTO_UDP: u8 = 17;
 const DNS_PORT: u16 = 53;
 const DHCP_SERVER_PORT: u16 = 67;
+/// IPv4 "more fragments" flag and fragment offset mask (in the flags/offset word).
+const IP_MF: u16 = 0x2000;
+const IP_FRAG_OFFSET: u16 = 0x1fff;
+/// Minimum L4 bytes for a TCP/UDP packet to be forwarded (the UDP header; TCP's is longer).
+const L4_PORTS_HDR: usize = 8;
 
 /// Why a guest frame was dropped.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -423,6 +428,9 @@ pub enum Denial {
     Denied { dst: Ipv4Addr, net: Ipv4Net },
     /// TCP to an SMTP port.
     Smtp { dst: Ipv4Addr, port: u16 },
+    /// A fragmented TCP/UDP packet (any fragment), or a TCP/UDP packet too short to carry
+    /// its ports: the port checks could not see the ports, so it is never forwarded.
+    Fragment { dst: Ipv4Addr, proto: u8 },
 }
 
 impl fmt::Display for Denial {
@@ -440,6 +448,9 @@ impl fmt::Display for Denial {
             Self::Broadcast => f.write_str("broadcast other than DHCP"),
             Self::Denied { dst, net } => write!(f, "{dst} is in denied {net}"),
             Self::Smtp { dst, port } => write!(f, "SMTP to {dst}:{port}"),
+            Self::Fragment { dst, proto } => {
+                write!(f, "fragmented or truncated proto {proto} packet to {dst}")
+            }
         }
     }
 }
@@ -489,10 +500,18 @@ impl EgressPolicy {
         }
         let proto = ip[9];
         let dst = Ipv4Addr::new(ip[16], ip[17], ip[18], ip[19]);
-        let frag_offset = u16::from_be_bytes([ip[6], ip[7]]) & 0x1fff;
-        // Destination port, only in the first (or only) fragment of TCP/UDP.
+        let flags_frag = u16::from_be_bytes([ip[6], ip[7]]);
+        let fragmented = flags_frag & (IP_MF | IP_FRAG_OFFSET) != 0;
+        // TCP/UDP must be unfragmented and carry a full 8-byte L4 header, so the port checks
+        // below always see the destination port. A tiny first fragment (offset 0, MF set,
+        // < 4 L4 bytes) would otherwise slip past the SMTP block, and later fragments carry
+        // no port at all. The guest has no reason to fragment: MTU 1500, PMTU in the
+        // netstack. Other protocols (ICMP) may fragment; only their destination matters.
         let port = match proto {
-            PROTO_TCP | PROTO_UDP if frag_offset == 0 && total >= ihl + 4 => {
+            PROTO_TCP | PROTO_UDP => {
+                if fragmented || total < ihl + L4_PORTS_HDR {
+                    return Err(Denial::Fragment { dst, proto });
+                }
                 Some(u16::from_be_bytes([ip[ihl + 2], ip[ihl + 3]]))
             }
             _ => None,
@@ -758,10 +777,7 @@ mod tests {
         ));
         // A non-first fragment has no ports: never trusted as DNS.
         let frag = ipv4(GATEWAY_IP, PROTO_UDP, 53, 0x0010);
-        assert!(matches!(
-            p.check(&frag),
-            Err(Denial::GatewayService { port: None, .. })
-        ));
+        assert!(matches!(p.check(&frag), Err(Denial::Fragment { .. })));
     }
 
     #[test]
@@ -856,6 +872,62 @@ mod tests {
         let total = u16::try_from(f.len() - 14).unwrap();
         f[16..18].copy_from_slice(&total.to_be_bytes());
         assert!(matches!(p.check(&f), Err(Denial::Smtp { port: 25, .. })));
+    }
+
+    #[test]
+    fn fragmented_tcp_udp_is_dropped() {
+        let p = policy();
+        let dst: Ipv4Addr = "1.1.1.1".parse().unwrap();
+        for proto in [PROTO_TCP, PROTO_UDP] {
+            // Any fragment: first (MF, offset 0), middle (MF, offset > 0), last (offset > 0).
+            for frag in [IP_MF, IP_MF | 1, 1, 0x1fff] {
+                assert_eq!(
+                    p.check(&ipv4(dst, proto, 443, frag)),
+                    Err(Denial::Fragment { dst, proto }),
+                    "proto {proto} frag {frag:#06x}"
+                );
+            }
+            // DF alone is not fragmentation.
+            assert_eq!(p.check(&ipv4(dst, proto, 443, 0x4000)), Ok(()));
+        }
+        // ICMP may fragment (big pings); its destination is still checked.
+        assert_eq!(p.check(&ipv4(dst, 1, 0, IP_MF)), Ok(()));
+        assert!(matches!(
+            p.check(&ipv4("127.0.0.1".parse().unwrap(), 1, 0, IP_MF | 3)),
+            Err(Denial::Denied { .. })
+        ));
+    }
+
+    #[test]
+    fn tiny_first_fragment_cannot_bypass_the_smtp_block() {
+        let p = policy();
+        let dst: Ipv4Addr = "1.1.1.1".parse().unwrap();
+        // Offset 0 + MF with only 2 L4 bytes (source port, no destination port).
+        let mut f = ipv4(dst, PROTO_TCP, 25, IP_MF);
+        f.truncate(14 + 20 + 2);
+        let total = u16::try_from(f.len() - 14).unwrap();
+        f[16..18].copy_from_slice(&total.to_be_bytes());
+        assert_eq!(
+            p.check(&f),
+            Err(Denial::Fragment {
+                dst,
+                proto: PROTO_TCP
+            })
+        );
+        // Same size without MF: truncated L4 header, still never forwarded.
+        f[20..22].copy_from_slice(&0u16.to_be_bytes());
+        assert_eq!(
+            p.check(&f),
+            Err(Denial::Fragment {
+                dst,
+                proto: PROTO_TCP
+            })
+        );
+        // ...and the follow-up fragment (no port at all) is dropped too.
+        assert!(matches!(
+            p.check(&ipv4(dst, PROTO_TCP, 0, 1)),
+            Err(Denial::Fragment { .. })
+        ));
     }
 
     #[test]
