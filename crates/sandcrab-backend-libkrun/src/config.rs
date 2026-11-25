@@ -49,6 +49,13 @@ pub enum RootfsSource {
 /// [`LibkrunConfig::from_env`] and adjust fields.
 #[derive(Debug, Clone)]
 pub struct LibkrunConfig {
+    /// The Sandcrab state root (`~/.sandcrab`) the paths below default into. At construction
+    /// ([`crate::LibkrunBackend::new`]) it and every directory from it down to the helper,
+    /// library, netstack, cache and run dirs must be private: a symlinked root or another
+    /// owner is refused, and a group/world-writable one is tightened to `0700` with a warning
+    /// (review R18, `sandcrab_core::private_dir`). Directories outside it are only checked.
+    /// `None`: no state tree (every directory is checked, none changed).
+    pub state_root: Option<PathBuf>,
     /// The signed `sandcrab-krun` helper (needs `com.apple.security.hypervisor` on macOS).
     pub helper: PathBuf,
     /// Directory holding the pinned libkrun + libkrunfw. `None` = the pinned artifact dir
@@ -102,6 +109,7 @@ impl LibkrunConfig {
     #[must_use]
     pub fn with_home(home: &Path, crabd: impl Into<PathBuf>) -> Self {
         Self {
+            state_root: Some(home.to_path_buf()),
             helper: home.join("bin").join(HELPER_BIN_NAME),
             lib_dir: None,
             netstack_dir: crate::netstack_pins::host_pin()

@@ -34,6 +34,41 @@ use crate::workspace;
 /// Default KVM device.
 pub const KVM_DEVICE: &str = "/dev/kvm";
 
+/// Review R18: the directories holding `firecracker`, the kernel, the rootfs cache (images and
+/// their manifests), the run and the recovery dirs must not be writable by other users. Under
+/// [`FirecrackerConfig::state_root`] the path from the root down is made private (tightened to
+/// `0700` when loose; a symlinked root or another owner is refused); directories outside it
+/// are checked and never changed. See `sandcrab_core::private_dir`.
+fn secure_state(config: &FirecrackerConfig) -> Result<()> {
+    let parent = |p: &Path| p.parent().map(Path::to_path_buf);
+    let dirs: Vec<PathBuf> = [&config.firecracker_bin, &config.kernel]
+        .into_iter()
+        .filter_map(|p| parent(p))
+        .chain([
+            config.cache_root.clone(),
+            config.run_dir.clone(),
+            config.recovery_dir.clone(),
+        ])
+        .collect();
+    let dirs: Vec<&Path> = dirs.iter().map(PathBuf::as_path).collect();
+    let uid = rustix::process::getuid().as_raw();
+    match &config.state_root {
+        Some(root) => {
+            sandcrab_core::private_dir::secure_state_tree("firecracker", root, &dirs, uid)?;
+        }
+        None => {
+            for d in dirs.iter().filter(|d| d.exists()) {
+                sandcrab_core::private_dir::check_foreign_dir(
+                    d,
+                    uid,
+                    "it holds pinned Firecracker files or their records",
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Check that `device` (normally `/dev/kvm`) can be opened read-write.
 pub fn check_kvm(device: &Path) -> Result<()> {
     OpenOptions::new()
@@ -90,6 +125,7 @@ impl FirecrackerBackend {
     /// kernel present (and matching their SHA-256 pins when `verify_pins`), a usable
     /// `mke2fs`. Then reap orphans of dead sandcrab processes.
     pub fn new(config: FirecrackerConfig) -> Result<Self> {
+        secure_state(&config)?;
         check_kvm(Path::new(KVM_DEVICE))?;
         check_executable(&config.firecracker_bin)?;
         if !config.kernel.is_file() {

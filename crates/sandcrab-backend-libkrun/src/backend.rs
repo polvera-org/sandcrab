@@ -101,15 +101,18 @@ impl KrunLibs {
     /// `fstat` when its stamp matches, a full hash otherwise), and its stamp is updated to the
     /// one that now goes with the digest (so the helper's own check is an `fstat` too).
     pub fn check(&mut self, verify: bool) -> Result<()> {
-        let netstack = self
-            .netstack
-            .as_mut()
+        let (libs, netstack) = (
+            [&mut self.libkrun, &mut self.libkrunfw],
+            self.netstack
+                .as_mut()
+                .into_iter()
+                .flat_map(|n| std::iter::once(&mut n.binary).chain(n.avx2.as_mut())),
+        );
+        let files = libs
             .into_iter()
-            .flat_map(|n| std::iter::once(&mut n.binary).chain(n.avx2.as_mut()));
-        for f in [&mut self.libkrun, &mut self.libkrunfw]
-            .into_iter()
-            .chain(netstack)
-        {
+            .map(|f| (f, false))
+            .chain(netstack.map(|f| (f, true)));
+        for (f, is_netstack) in files {
             if !f.path.is_absolute() || !f.path.is_file() {
                 return Err(SandboxError::InvalidConfig(format!(
                     "libkrun library `{}` not found (install the pinned artifacts with \
@@ -118,11 +121,14 @@ impl KrunLibs {
                 )));
             }
             if verify {
-                f.stamp = verify_pinned(f)?.stamp;
+                let v = verify_pinned(f)?;
+                f.stamp = v.stamp;
+                if is_netstack && let Some(stamp) = clear_quarantine_verified(f, &v.file)? {
+                    f.stamp = stamp;
+                }
+            } else if is_netstack {
+                refuse_quarantined(&f.path)?;
             }
-        }
-        if let Some(n) = &self.netstack {
-            check_quarantine(&n.binary.path, verify)?;
         }
         Ok(())
     }
@@ -130,27 +136,86 @@ impl KrunLibs {
 
 /// macOS: a netstack binary carrying `com.apple.quarantine` would be blocked by Gatekeeper
 /// behind a dialog (the upstream gvproxy is not notarized), leaving the guest without a
-/// network. When its pin was just verified, the attribute is removed from that exact file;
-/// unverified, it is refused with the fix.
-fn check_quarantine(path: &Path, verified: bool) -> Result<()> {
+/// network. Once `pin`'s file was verified through `file`, the attribute is removed through
+/// that same fd (review N3: no path is resolved again). Returns the stamp after the removal
+/// (it changes the ctime; the content is re-hashed through the fd and must still match), or
+/// `None` when there was nothing to remove.
+fn clear_quarantine_verified(
+    pin: &PinnedFile,
+    file: &std::fs::File,
+) -> Result<Option<Option<sandcrab_rootfs::FileStamp>>> {
     let io = |e: std::io::Error| SandboxError::Backend {
         backend: "libkrun".into(),
-        message: format!("{}: {e}", path.display()),
+        message: format!("{}: {e}", pin.path.display()),
     };
-    if !netstack::quarantined(path).map_err(io)? {
-        return Ok(());
+    if !netstack::clear_quarantine_fd(file).map_err(io)? {
+        return Ok(None);
     }
-    if verified {
-        netstack::clear_quarantine(path).map_err(io)?;
-        tracing::info!(netstack = %path.display(), "cleared com.apple.quarantine after the pin check");
+    tracing::info!(netstack = %pin.path.display(), "cleared com.apple.quarantine after the pin check");
+    let (sha, stamp) = sandcrab_rootfs::stamp::hash_and_stamp(file).map_err(io)?;
+    if !sha.eq_ignore_ascii_case(&pin.sha256) {
+        return Err(SandboxError::DigestMismatch {
+            image: pin.path.display().to_string(),
+            expected: pin.sha256.clone(),
+            actual: sha,
+        });
+    }
+    Ok(Some(stamp))
+}
+
+/// Without pin verification nothing vouches for the netstack, so a quarantined one is refused
+/// (with the fix) rather than trusted.
+fn refuse_quarantined(path: &Path) -> Result<()> {
+    let quarantined = netstack::quarantined(path).map_err(|e| SandboxError::Backend {
+        backend: "libkrun".into(),
+        message: format!("{}: {e}", path.display()),
+    })?;
+    if !quarantined {
         return Ok(());
     }
     Err(SandboxError::InvalidConfig(format!(
         "netstack `{}` carries com.apple.quarantine, so macOS would block it behind a \
-         Gatekeeper dialog; re-run `sandcrab libkrun install` (or `xattr -d \
-         com.apple.quarantine` on that file once you trust it)",
+         Gatekeeper dialog. With verify_pins off this backend does not remove it: re-run \
+         `sandcrab libkrun install` (it removes the attribute after the digest check), enable \
+         verify_pins, or run `xattr -d com.apple.quarantine` on that file once you trust it",
         path.display()
     )))
+}
+
+/// Review R18: the directories holding the helper (and its record), the libraries, the
+/// netstack (and their manifests), the rootfs cache and the run dir must not be writable by
+/// other users. Under [`LibkrunConfig::state_root`] the whole path from the root down is made
+/// private (tightened to `0700` when loose; a symlinked root or another owner is refused);
+/// directories outside it are checked and never changed. See `sandcrab_core::private_dir`.
+fn secure_state(config: &LibkrunConfig, libs: &KrunLibs) -> Result<()> {
+    let parent = |p: &Path| p.parent().map(Path::to_path_buf);
+    let netstack = libs
+        .netstack
+        .iter()
+        .flat_map(|n| std::iter::once(&n.binary).chain(n.avx2.as_ref()));
+    let dirs: Vec<PathBuf> = [&config.helper, &libs.libkrun.path, &libs.libkrunfw.path]
+        .into_iter()
+        .chain(netstack.map(|f| &f.path))
+        .filter_map(|p| parent(p))
+        .chain([config.cache_root.clone(), config.run_dir.clone()])
+        .collect();
+    let dirs: Vec<&Path> = dirs.iter().map(PathBuf::as_path).collect();
+    let uid = rustix::process::getuid().as_raw();
+    match &config.state_root {
+        Some(root) => {
+            sandcrab_core::private_dir::secure_state_tree("libkrun", root, &dirs, uid)?;
+        }
+        None => {
+            for d in dirs.iter().filter(|d| d.exists()) {
+                sandcrab_core::private_dir::check_foreign_dir(
+                    d,
+                    uid,
+                    "it holds pinned libkrun files or their records",
+                )?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Open `pin` once and verify it through that fd, as a [`SandboxError`].
@@ -256,6 +321,7 @@ impl LibkrunBackend {
     /// dead sandcrab processes.
     pub fn new(config: LibkrunConfig, libs: KrunLibs) -> Result<Self> {
         config.validate()?;
+        secure_state(&config, &libs)?;
         check_executable(&config.helper)?;
         #[cfg(target_os = "macos")]
         check_entitlement(&config.helper)?;

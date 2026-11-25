@@ -17,6 +17,7 @@ pub mod manager;
 pub mod mounts;
 pub mod pins;
 pub mod policy;
+pub mod private_dir;
 pub mod registry;
 pub mod sandbox;
 pub mod template;

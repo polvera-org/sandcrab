@@ -29,7 +29,7 @@ pub use arch::Arch;
 pub use cache::*;
 pub use error::{Error, IoCtx, Result};
 pub use mkfs::MkfsStrategy;
-pub use stamp::FileStamp;
+pub use stamp::{FileStamp, Sha256Digest};
 
 use std::path::PathBuf;
 

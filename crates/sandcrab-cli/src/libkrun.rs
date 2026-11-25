@@ -27,9 +27,6 @@ use crate::args::BackendArg;
 use crate::doctor::{Report, Status};
 use crate::util::{self, print_json};
 
-/// Appended to the doctor summary until the backend has passed its end-to-end run.
-pub const E2E_NOTE: &str = "e2e pending";
-
 /// `$SANDCRAB_SIGN_IDENTITY`: codesign identity for the helper (default `-`, ad hoc).
 #[cfg(target_os = "macos")]
 pub const SIGN_IDENTITY_ENV: &str = "SANDCRAB_SIGN_IDENTITY";
@@ -417,19 +414,12 @@ pub fn doctor(g: &Global, r: &mut Report) {
     }
 
     if blockers.is_empty() {
-        r.add(
-            "libkrun",
-            Status::Ok,
-            format!("libkrun: ready (hardware isolated) — {E2E_NOTE}"),
-        );
+        r.add("libkrun", Status::Ok, "libkrun: ready (hardware isolated)");
     } else {
         r.add(
             "libkrun",
             if selected { Status::Fail } else { Status::Info },
-            format!(
-                "libkrun: unavailable ({}) — {E2E_NOTE}",
-                blockers.join(", ")
-            ),
+            format!("libkrun: unavailable ({})", blockers.join(", ")),
         );
     }
 }
@@ -438,6 +428,21 @@ pub fn doctor(g: &Global, r: &mut Report) {
 /// without it that policy is refused, `disabled` works).
 fn netstack(c: &LibkrunConfig, r: &mut Report) {
     match netstack_pins::resolve_config(c) {
+        Ok(Some(n))
+            if sandcrab_sdk::libkrun::netstack::quarantined(&n.binary.path).unwrap_or(false) =>
+        {
+            r.add(
+                "lk:netstack",
+                Status::Warn,
+                format!(
+                    "{} {} carries com.apple.quarantine: Gatekeeper would block it behind a \
+                     dialog. The backend removes it after the pin check when it starts (with \
+                     verify_pins on), and so does `sandcrab libkrun install`",
+                    n.kind,
+                    n.binary.path.display()
+                ),
+            );
+        }
         Ok(Some(n)) => r.add(
             "lk:netstack",
             Status::Ok,
@@ -566,6 +571,17 @@ fn install(g: &Global, o: &InstallOpts) -> anyhow::Result<u8> {
     let home = home(g)?;
     let dir = artifacts::default_dir(&home);
     let pins = artifacts::host_pins()?;
+    // Review R18: never write pins and records into a tree others can write. A loose tree
+    // owned by this user is tightened to 0700 (logged); a symlinked root or another owner is
+    // refused, like the backend does at construction.
+    if !o.dry_run {
+        use sandcrab_sdk::core::private_dir;
+        let bin = home.join("bin");
+        let net = netstack_pins::host_pin().map(|p| netstack_pins::default_dir(&home, p));
+        let mut dirs = vec![bin.as_path(), dir.as_path()];
+        dirs.extend(net.as_deref().ok());
+        private_dir::secure_state_tree("libkrun", &home, &dirs, private_dir::current_uid())?;
+    }
 
     // 1. Libraries.
     let installed = if o.force || o.from_source || o.fw_from_source {
@@ -681,6 +697,9 @@ fn install_netstack(home: &Path, o: &InstallOpts) -> anyhow::Result<serde_json::
             n.kind,
             n.path.display()
         );
+        if !o.dry_run && netstack_pins::clear_quarantine(&n)? {
+            eprintln!("libkrun: removed com.apple.quarantine from it after the digest check");
+        }
         return Ok(
             json!({ "mode": "present", "kind": n.kind, "path": n.path, "sha256": n.sha256 }),
         );

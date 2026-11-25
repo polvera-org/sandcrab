@@ -628,7 +628,9 @@ pub struct Started {
 /// it makes Gatekeeper block `exec` behind a user dialog.
 pub const QUARANTINE_XATTR: &str = "com.apple.quarantine";
 
-/// Whether `path` carries [`QUARANTINE_XATTR`] (always `false` off macOS).
+/// Whether `path` (followed, like `exec` would) carries [`QUARANTINE_XATTR`] (always `false`
+/// off macOS). Read-only, for `doctor` and refusals; clearing goes through
+/// [`clear_quarantine_fd`].
 pub fn quarantined(path: &Path) -> io::Result<bool> {
     #[cfg(target_os = "macos")]
     {
@@ -645,20 +647,41 @@ pub fn quarantined(path: &Path) -> io::Result<bool> {
     }
 }
 
-/// Remove [`QUARANTINE_XATTR`] from exactly `path` (no-op when absent or off macOS). Call it
-/// only after the file matched its pinned SHA-256: it tells macOS to trust the file.
-pub fn clear_quarantine(path: &Path) -> io::Result<()> {
+/// Remove [`QUARANTINE_XATTR`] from the file open as `file` (review N3: through the fd that was
+/// just verified, never by path). `Ok(false)` when absent, and always off macOS. Call it only
+/// after that fd matched its pinned SHA-256: it tells macOS to trust the file.
+///
+/// macOS refuses to remove an xattr from a file without the owner write bit (our pinned
+/// binaries are `0555`), so the bit is added for the removal and put back, on the same fd. Both
+/// the removal and the chmods change the ctime: re-stamp the file afterwards.
+pub fn clear_quarantine_fd(file: &std::fs::File) -> io::Result<bool> {
     #[cfg(target_os = "macos")]
     {
-        match rustix::fs::removexattr(path, QUARANTINE_XATTR) {
-            Ok(()) | Err(rustix::io::Errno::NOATTR) => Ok(()),
-            Err(e) => Err(e.into()),
+        use std::os::unix::fs::PermissionsExt;
+        match rustix::fs::fgetxattr_query(file, QUARANTINE_XATTR) {
+            Ok(_) => {}
+            Err(rustix::io::Errno::NOATTR) => return Ok(false),
+            Err(e) => return Err(e.into()),
         }
+        let mode = file.metadata()?.permissions().mode() & 0o7777;
+        let widen = mode & 0o200 == 0;
+        if widen {
+            file.set_permissions(std::fs::Permissions::from_mode(mode | 0o200))?;
+        }
+        let removed = match rustix::fs::fremovexattr(file, QUARANTINE_XATTR) {
+            Ok(()) => Ok(true),
+            Err(rustix::io::Errno::NOATTR) => Ok(false),
+            Err(e) => Err(io::Error::from(e)),
+        };
+        if widen {
+            file.set_permissions(std::fs::Permissions::from_mode(mode))?;
+        }
+        removed
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = path;
-        Ok(())
+        let _ = file;
+        Ok(false)
     }
 }
 
@@ -795,8 +818,10 @@ pub fn start(
             let _ = child.kill();
             let _ = child.wait();
             let hint = if kind == NetstackKind::Gvproxy {
-                " (on macOS a `com.apple.quarantine` attribute makes Gatekeeper block the \
-                 unnotarized gvproxy behind a dialog; `sandcrab libkrun install` clears it)"
+                " (if gvproxy carries a `com.apple.quarantine` attribute, Gatekeeper blocks \
+                 it behind a dialog: `sandcrab doctor` reports it, and `sandcrab libkrun \
+                 install` or a backend with pin verification on removes it after the digest \
+                 check)"
             } else {
                 ""
             };
@@ -852,7 +877,7 @@ pub(crate) mod frames {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::frames::*;
     use super::*;
 
@@ -1004,25 +1029,43 @@ mod tests {
         assert!(matches!(p.check(&f), Err(Denial::Smtp { port: 25, .. })));
     }
 
-    /// xattr presence only (never executes the file, so no Gatekeeper dialog).
+    /// Give `path` a download-quarantine attribute (tests only; never execute such a file).
     #[cfg(target_os = "macos")]
-    #[test]
-    fn quarantine_is_detected_and_cleared() {
-        let tmp = tempfile::tempdir().unwrap();
-        let f = tmp.path().join("gvproxy");
-        std::fs::write(&f, b"not a binary").unwrap();
-        assert!(!quarantined(&f).unwrap());
+    pub(crate) fn set_quarantine(path: &Path) {
         rustix::fs::setxattr(
-            &f,
+            path,
             QUARANTINE_XATTR,
             b"0081;00000000;curl;",
             rustix::fs::XattrFlags::empty(),
         )
         .unwrap();
-        assert!(quarantined(&f).unwrap());
-        clear_quarantine(&f).unwrap();
+    }
+
+    /// xattr API only (never executes the file, so no Gatekeeper dialog).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn quarantine_is_detected_and_cleared_through_the_fd() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("gvproxy");
+        std::fs::write(&f, b"not a binary").unwrap();
         assert!(!quarantined(&f).unwrap());
-        clear_quarantine(&f).unwrap(); // absent: no-op
+        set_quarantine(&f);
+        // Installed binaries are 0555: removal needs (and restores) the owner write bit.
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o555)).unwrap();
+        assert!(quarantined(&f).unwrap());
+        let fd = std::fs::File::open(&f).unwrap();
+        // The path now names another file: the fd's file is the one cleared.
+        let moved = tmp.path().join("moved");
+        std::fs::rename(&f, &moved).unwrap();
+        std::fs::write(&f, b"impostor").unwrap();
+        set_quarantine(&f);
+        assert!(clear_quarantine_fd(&fd).unwrap());
+        assert!(!quarantined(&moved).unwrap());
+        assert!(quarantined(&f).unwrap(), "the path was not followed");
+        let mode = std::fs::metadata(&moved).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o555, "mode restored");
+        assert!(!clear_quarantine_fd(&fd).unwrap(), "absent: no-op");
     }
 
     #[test]

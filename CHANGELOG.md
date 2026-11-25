@@ -173,6 +173,15 @@ Stop every running `sandcrab`, `crabagent` and bench process before upgrading, t
   outbound NAT, not the default bridge; a same-named network without those options is refused (review R1).
 - Docker backend: the `state_dir` must be a real directory owned by the user (not a symlink); a looser mode is
   tightened to 0700 (review R14).
+- libkrun and Firecracker backends, and `sandcrab libkrun install`, secure the existing state tree at construction:
+  the state root and every directory down to the helper, libraries, netstack, kernel, caches, run and recovery dirs.
+  A symlinked root or a foreign owner is refused; a group/world-writable directory owned by the user (e.g. a `0775`
+  `~/.sandcrab` made under umask `0002`) is tightened to `0700` with a warning (review R18).
+- Stat stamps record the digest they vouch for; a stamp hit counts only for that digest, so a stamp copied from
+  another file cannot stand in for a pin (review N2). This is **libkrun helper protocol v3**: re-run
+  `sandcrab libkrun install --helper <path>`. Older stamps re-hash once and are re-recorded.
+- macOS netstack quarantine is removed through the verified fd (never by path), at backend construction and now also
+  by `sandcrab libkrun install`; `doctor` warns (`lk:netstack`) while it is present (review N3).
 
 ### Fixed
 - libkrun helper: dropped `PR_SET_PDEATHSIG`, which fired when the *thread* that spawned the helper exited (tokio

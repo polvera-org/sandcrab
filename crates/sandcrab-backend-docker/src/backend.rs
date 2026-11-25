@@ -5,7 +5,7 @@
 use std::fs;
 use std::io::{self, Write as _};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -413,31 +413,23 @@ pub(crate) fn loopback_port(map: &PortMap, guest: u16) -> Option<u16> {
 /// directory (not a symlink) owned by this user, and private: a pre-existing, looser one is
 /// tightened to 0700, and one owned by someone else is refused.
 fn secure_state_dir(state: &Path, uid: u32) -> Result<()> {
-    let md = fs::symlink_metadata(state).map_err(|e| io_at(state, e))?;
-    let refuse = |why: &str| {
-        Err(SandboxError::InvalidConfig(format!(
-            "DockerConfig::state_dir `{}` {why}; it holds the sandboxes' auth tokens and \
-             sockets, so it must be a private (0700) directory owned by this user",
-            state.display()
-        )))
-    };
-    if md.file_type().is_symlink() {
-        return refuse("is a symlink");
-    }
-    if !md.is_dir() {
-        return refuse("is not a directory");
-    }
-    if md.uid() != uid {
-        return refuse(&format!("is owned by uid {}, not {uid}", md.uid()));
-    }
-    if md.permissions().mode() & 0o077 != 0 {
+    let purpose = format!(
+        "DockerConfig::state_dir holds the sandboxes' auth tokens and sockets, so it must be \
+         0700 (`{}`)",
+        state.display()
+    );
+    if let Some(t) = sandcrab_core::private_dir::secure_dir(
+        state,
+        uid,
+        sandcrab_core::private_dir::GROUP_WORLD_ANY,
+        false,
+        &purpose,
+    )? {
         tracing::warn!(
-            state_dir = %state.display(),
-            mode = format!("{:o}", md.permissions().mode() & 0o777),
-            "state_dir is accessible to other users; tightening it to 0700"
+            state_dir = %t.path.display(),
+            mode = format!("{:o}", t.was),
+            "state_dir is accessible to other users; tightened it to 0700"
         );
-        fs::set_permissions(state, fs::Permissions::from_mode(0o700))
-            .map_err(|e| io_at(state, e))?;
     }
     Ok(())
 }

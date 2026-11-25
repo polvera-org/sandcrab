@@ -32,7 +32,8 @@ pub use sandcrab_protocol::init::{
 
 /// Version of the [`HelperConfig`] wire format. The helper refuses any other version.
 /// 2: stat stamps on pinned files and disks, the pinned `passt.avx2` variant.
-pub const HELPER_PROTO_VERSION: u32 = 2;
+/// 3: stamps carry the digest they vouch for (`FileStamp::sha256`, review N2).
+pub const HELPER_PROTO_VERSION: u32 = 3;
 /// Upper bound on the config line (including the trailing newline).
 pub const MAX_HELPER_CONFIG_BYTES: usize = 64 * 1024;
 /// Longest Unix socket path, in bytes without the NUL: macOS `sun_path` is 104 bytes (Linux
