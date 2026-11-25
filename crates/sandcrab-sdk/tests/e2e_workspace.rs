@@ -261,7 +261,13 @@ async fn multi_mount_large_tree_then_write_into_both() {
             .unwrap();
 
         let top = sb.list_dir(Some("/data")).await.unwrap();
-        assert_eq!(top.entries.len(), DIRS, "{top:?}");
+        // Image-backed workspaces (Firecracker) have an ext4 `lost+found` at their root.
+        let dirs = top
+            .entries
+            .iter()
+            .filter(|e| e.path != "lost+found")
+            .count();
+        assert_eq!(dirs, DIRS, "{top:?}");
         let bytes = sh(&sb, "find /data -type f -exec cat {} + | wc -c").await;
         assert_eq!(bytes.trim(), (DIRS * PER_DIR).to_string());
 
