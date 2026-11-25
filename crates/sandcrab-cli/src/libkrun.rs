@@ -1,5 +1,6 @@
 //! libkrun backend plumbing for the CLI: config, preflight, `doctor` checks and
-//! `sandcrab libkrun install` (pinned libkrun + libkrunfw, signed `sandcrab-krun` helper).
+//! `sandcrab libkrun install` (pinned libkrun + libkrunfw, pinned userspace netstack, signed
+//! `sandcrab-krun` helper).
 //!
 //! Compiled with the `libkrun` feature (default on) on macOS aarch64 and Linux only.
 
@@ -14,7 +15,7 @@ use sandcrab_sdk::libkrun::artifacts::{self, Artifacts, ResolvedArtifacts};
 use sandcrab_sdk::libkrun::config::HELPER_BIN_NAME;
 #[cfg(target_os = "macos")]
 use sandcrab_sdk::libkrun::config::{ENTITLEMENTS_PLIST, HYPERVISOR_ENTITLEMENT};
-use sandcrab_sdk::libkrun::{RootfsSource, reap};
+use sandcrab_sdk::libkrun::{RootfsSource, netstack_pins, reap};
 use sandcrab_sdk::{LibkrunConfig, WorkspaceBacking};
 use serde_json::json;
 
@@ -372,11 +373,13 @@ pub fn doctor(g: &Global, r: &mut Report) {
     }
     workspace_case(g, r, selected);
     cgroup(&c, r, &mut blockers, bad);
+    netstack(&c, r);
     if c.allow_tsi_unrestricted {
         r.add(
             "lk:network",
             Status::Warn,
-            "--libkrun-tsi: `unrestricted` uses TSI; the guest can reach host loopback services",
+            "--libkrun-tsi (deprecated): `unrestricted` uses TSI; the guest can reach host \
+             loopback services",
         );
     }
 
@@ -412,6 +415,33 @@ pub fn doctor(g: &Global, r: &mut Report) {
     }
 }
 
+/// `lk:netstack`: the pinned userspace netstack for `--network unrestricted` (optional:
+/// without it that policy is refused, `disabled` works).
+fn netstack(c: &LibkrunConfig, r: &mut Report) {
+    match netstack_pins::resolve_config(c) {
+        Ok(Some(n)) => r.add(
+            "lk:netstack",
+            Status::Ok,
+            format!(
+                "{} {} (sha256 {}): `--network unrestricted` behind the egress filter",
+                n.kind,
+                n.binary.path.display(),
+                short(&n.binary.sha256)
+            ),
+        ),
+        Ok(None) => r.add(
+            "lk:netstack",
+            Status::Info,
+            format!(
+                "{} not installed: `--network unrestricted` is refused (run `sandcrab libkrun \
+                 install`)",
+                netstack_pins::host_pin().map_or("netstack", |p| p.kind.as_str())
+            ),
+        ),
+        Err(e) => r.add("lk:netstack", Status::Fail, e.to_string()),
+    }
+}
+
 #[derive(Debug, Subcommand)]
 pub enum LibkrunCmd {
     /// Install the pinned libkrun + libkrunfw into <state root>/artifacts/libkrun/<version>/
@@ -443,6 +473,11 @@ pub enum LibkrunCmd {
         #[arg(long)]
         no_helper: bool,
 
+        /// Skip the pinned userspace netstack (gvproxy on macOS, passt on Linux) that
+        /// `--network unrestricted` needs.
+        #[arg(long)]
+        no_netstack: bool,
+
         /// Print the steps without changing anything.
         #[arg(long)]
         dry_run: bool,
@@ -457,6 +492,7 @@ pub fn libkrun_cmd(g: &Global, cmd: LibkrunCmd) -> anyhow::Result<u8> {
             force,
             helper,
             no_helper,
+            no_netstack,
             dry_run,
         } => install(
             g,
@@ -466,6 +502,7 @@ pub fn libkrun_cmd(g: &Global, cmd: LibkrunCmd) -> anyhow::Result<u8> {
                 force,
                 helper,
                 no_helper,
+                no_netstack,
                 dry_run,
             },
         ),
@@ -478,6 +515,7 @@ struct InstallOpts {
     force: bool,
     helper: Option<PathBuf>,
     no_helper: bool,
+    no_netstack: bool,
     dry_run: bool,
 }
 
@@ -547,7 +585,10 @@ fn install(g: &Global, o: &InstallOpts) -> anyhow::Result<u8> {
     } else {
         let script = fetch_script()?;
         let mut cmd = Command::new("bash");
-        cmd.arg(&script).arg("--home").arg(&home);
+        cmd.arg(&script)
+            .arg("--home")
+            .arg(&home)
+            .arg("--no-netstack");
         if o.from_source {
             cmd.arg("--from-source");
         }
@@ -575,7 +616,14 @@ fn install(g: &Global, o: &InstallOpts) -> anyhow::Result<u8> {
         }
     };
 
-    // 2. Helper.
+    // 2. Netstack (network `unrestricted`).
+    let netstack = if o.no_netstack {
+        serde_json::Value::Null
+    } else {
+        install_netstack(&home, o)?
+    };
+
+    // 3. Helper.
     let helper = if o.no_helper {
         serde_json::Value::Null
     } else {
@@ -596,9 +644,77 @@ fn install(g: &Global, o: &InstallOpts) -> anyhow::Result<u8> {
     };
 
     if g.json {
-        print_json(&json!({ "libraries": libs, "helper": helper }))?;
+        print_json(&json!({ "libraries": libs, "netstack": netstack, "helper": helper }))?;
     }
     Ok(0)
+}
+
+/// The pinned netstack: the gvproxy release asset (macOS, downloaded and SHA-256 checked) or
+/// passt built from its pinned tag (Linux, `scripts/fetch-libkrun.sh --netstack-only`).
+fn install_netstack(home: &Path, o: &InstallOpts) -> anyhow::Result<serde_json::Value> {
+    let pin = netstack_pins::host_pin()?;
+    let dir = netstack_pins::default_dir(home, pin);
+    if !o.force
+        && let Ok(Some(n)) = netstack_pins::resolve_dir(&dir, pin)
+    {
+        eprintln!(
+            "libkrun: netstack already installed: {} {}",
+            n.kind,
+            n.path.display()
+        );
+        return Ok(
+            json!({ "mode": "present", "kind": n.kind, "path": n.path, "sha256": n.sha256 }),
+        );
+    }
+    if pin.release.is_some() {
+        if o.dry_run {
+            eprintln!(
+                "libkrun: would download {} {} into {}",
+                pin.kind,
+                pin.version,
+                dir.display()
+            );
+            return Ok(json!({ "mode": "release", "dry_run": true, "dir": dir }));
+        }
+        let n = netstack_pins::install_release(home)
+            .with_context(|| format!("installing {} {}", pin.kind, pin.version))?;
+        eprintln!(
+            "libkrun: netstack {} {} ({})",
+            n.kind,
+            n.path.display(),
+            short(&n.sha256)
+        );
+        return Ok(
+            json!({ "mode": "release", "kind": n.kind, "path": n.path, "sha256": n.sha256 }),
+        );
+    }
+    let script = fetch_script()?;
+    let mut cmd = Command::new("bash");
+    cmd.arg(&script)
+        .arg("--home")
+        .arg(home)
+        .arg("--netstack-only");
+    if o.dry_run {
+        cmd.arg("--dry-run");
+    }
+    eprintln!("libkrun: building {} via {}", pin.kind, script.display());
+    let status = cmd
+        .status()
+        .with_context(|| format!("running {}", script.display()))?;
+    if !status.success() {
+        bail!("{} --netstack-only failed ({status})", script.display());
+    }
+    if o.dry_run {
+        return Ok(json!({ "mode": "source", "dry_run": true, "dir": dir }));
+    }
+    let n = netstack_pins::resolve_dir(&dir, pin)?.context("the netstack build did not install")?;
+    eprintln!(
+        "libkrun: netstack {} {} ({})",
+        n.kind,
+        n.path.display(),
+        short(&n.sha256)
+    );
+    Ok(json!({ "mode": "source", "kind": n.kind, "path": n.path, "sha256": n.sha256 }))
 }
 
 /// `--helper`, else `sandcrab-krun` next to this executable.
