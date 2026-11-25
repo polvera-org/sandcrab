@@ -9,6 +9,10 @@ One JSON file per `sandcrab-bench run` (schema: `schema.json`). Summarise with `
 | `20261124T183907Z-kvm-dedicated.json` | kvm-dedicated (bare metal, Xeon D-2141I 8C/16T, 32 GB, **2x HDD RAID1**) | 65f4a2c | false: drift -11.9% (Docker got faster) | **first Docker vs Firecracker run** on real KVM. 0 failures, load 0.42 at start. Docker numbers are HDD-bound; see below |
 | `20261124T222350Z-mac-m2.json` | mac-m2 (Apple M2 8C, 16 GB, macOS 26.2, arm64, internal SSD/APFS; developer laptop) | 18aa046 | false: 1-min load 4.37 > 0.5 at start | **first libkrun run** (Hypervisor.framework). libkrun only: Docker cannot run on macOS (see below). Drift -2.1%, 0 failures. Its density section is void (budget clamped to 0); use the next file |
 | `20261125T020230Z-mac-m2.json` | mac-m2 | 18aa046 | false: 1-min load 1.22 > 0.5 at start | density-only rerun, same settings (75% budget, cap 16), after desktop memory pressure eased |
+| `20261125T014108Z-kvm-dedicated.json` | kvm-dedicated | 97d116c | false: resource n 10 < 30 (Standard tier, by design) | **libkrun on Linux KVM**, Standard tier. Combine with `20261124T183907Z` for Docker/Firecracker on the same host (separate run, not interleaved) |
+
+The report (`docs/site/bench-report.html`) shows all of these, grouped by host; see
+[`../README.md`](../README.md#the-bench-report-docssitebench-reporthtml).
 
 Command (both runs): `target/release/sandcrab-bench run --backends docker,firecracker --templates base,ts-dev --scenarios all --runs 30 --warmups 5 --noise-declared "..." --out docs/bench/results/` (density cap 16, budget 75%).
 Firecracker is recorded as unavailable/TODO (no /dev/kvm). Cold cells, cold-uncached and PSS are not measured (no root); see the `notes` in each file.
@@ -41,6 +45,23 @@ Storage is **2x HDD (7200 rpm) in mdadm RAID1** (`storage.type = hdd`), not SSD.
   `git.dirty` is true; no code differed from the recorded commit.
 - Cold cells, cold-uncached and Docker PSS are not measured (no root), as on dev-vps.
 
+## kvm-dedicated (libkrun on Linux KVM, 2026-11-25)
+
+`20261125T014108Z-kvm-dedicated.json`: `--backends libkrun --templates base,ts-dev --runs 30 --warmups 5
+--resource-runs 10 --allow-small-n` (Standard tier) on the same bare-metal host as the Docker/Firecracker run above,
+built from 97d116c. Docker and Firecracker were not rerun: reuse `20261124T183907Z-kvm-dedicated.json`.
+
+- **Not interleaved with Docker/Firecracker.** Same host, same n=30 per latency cell, but a different run, commit
+  and tier (resource n 10 vs 30). libkrun-vs-Docker on this host is a cross-run comparison: indicative only.
+- `valid: false` by design (resource n < 30). Drift +0.6%, 0 failures, load 0.38 at start.
+- **Memory is real PSS and cgroup** (the helper ran in a delegated cgroup leaf): `base` ~66 MiB PSS idle, ~139 MiB
+  post. The guest-RAM / VMM-overhead split (`mem.vmm_guest_pss_*`, `mem.vmm_overhead*`) is `not_measured`: the bench
+  did not find the guest-RAM mapping in the helper's `smaps`. `disk.*` is not implemented for libkrun.
+- **Spawn includes the per-spawn SHA-256 pin check** of libkrun/libkrunfw, slow on this Xeon without SHA
+  extensions (`docs/design/libkrun-backend.md` §12.2). That is most of the gap to the Mac's ~160 ms.
+- The HDD caveat above applies to Docker only; libkrun boots from a cached read-only rootfs image.
+- Cold cells not measured (no root). Hostname and home paths sanitized (`/home/dev`).
+
 ## mac-m2 (libkrun on macOS, 2026-11-24)
 
 `20261124T222350Z-mac-m2.json`: same matrix and settings as the canonical runs (`--templates base,ts-dev
@@ -48,7 +69,10 @@ Storage is **2x HDD (7200 rpm) in mdadm RAID1** (`storage.type = hdd`), not SSD.
 on an Apple M2 (8 cores, 16 GB, macOS 26.2, arm64), internal SSD (APFS). libkrun 1.19.8 / libkrunfw 5.6.4,
 signed `sandcrab-krun` helper. No reduced N: the full matrix took 1 h 19 min.
 
-- **Docker was not measured: the Docker backend cannot run on macOS.** `sandcrab --backend docker run` times out
+- **Update:** the Docker backend has since gained a `tcp` transport that works on macOS (`docs/hosting.md`,
+  "Docker on macOS"). Docker on mac-m2 is pending, scheduled for a reserved idle window. The paragraph below
+  describes the state at the time of this run.
+- **Docker was not measured: the Docker backend could not run on macOS.** `sandcrab --backend docker run` times out
   waiting for crabd. There are two causes, both in Docker Desktop's file sharing (virtiofs into its Linux VM):
   (1) crabd's `chmod 0660` on its socket in the bind-mounted run dir fails with `EINVAL`, so crabd exits at once;
   (2) even a guest listener that skips the chmod is unreachable: the host sees a socket inode, but `connect()`
