@@ -223,9 +223,15 @@ fn storage(path: &str) -> Storage {
 }
 
 /// `/sys/block/<dev>/queue/rotational` for a device node (`/dev/md3`, `/dev/sda1`): a
-/// partition reads its parent disk's queue. Fallback when `lsblk` is missing.
+/// partition reads its parent disk's queue. Fallback when `lsblk` is missing. A
+/// `/dev/mapper/*` link resolves to its `/dev/dm-N` node first.
 fn sys_rotational(device: &str) -> Option<String> {
-    let name = device.strip_prefix("/dev/")?;
+    let real = fs::canonicalize(device).ok();
+    let name = real
+        .as_deref()
+        .and_then(|p| p.to_str())
+        .unwrap_or(device)
+        .strip_prefix("/dev/")?;
     read_trim(format!("/sys/block/{name}/queue/rotational")).or_else(|| {
         let real = fs::canonicalize(format!("/sys/class/block/{name}")).ok()?;
         read_trim(real.parent()?.join("queue/rotational"))
