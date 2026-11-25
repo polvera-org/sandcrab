@@ -26,6 +26,13 @@ pub enum RootfsSource {
 /// [`FirecrackerConfig::from_env`] and adjust fields.
 #[derive(Debug, Clone)]
 pub struct FirecrackerConfig {
+    /// The Sandcrab state root (`~/.sandcrab`) the paths below default into. At construction
+    /// ([`crate::FirecrackerBackend::new`]) it and every directory from it down to the
+    /// `firecracker`, kernel, cache, run and recovery dirs must be private: a symlinked root or
+    /// another owner is refused, a group/world-writable one is tightened to `0700` with a
+    /// warning (review R18, `sandcrab_core::private_dir`). Directories outside it are only
+    /// checked. `None`: no state tree (every directory is checked, none changed).
+    pub state_root: Option<PathBuf>,
     /// `firecracker` binary (pinned v1.18.0 under the artifact cache by default).
     pub firecracker_bin: PathBuf,
     /// Uncompressed guest kernel (`vmlinux`, pinned 6.18).
@@ -97,6 +104,7 @@ impl FirecrackerConfig {
     pub fn with_home(home: &Path, crabd: impl Into<PathBuf>) -> Self {
         let cache_root = home.join("cache");
         Self {
+            state_root: Some(home.to_path_buf()),
             firecracker_bin: cache_root
                 .join("firecracker")
                 .join(FIRECRACKER_X86_64.version)

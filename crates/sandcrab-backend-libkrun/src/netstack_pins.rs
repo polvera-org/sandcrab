@@ -338,6 +338,18 @@ pub fn resolve_dir(
     }))
 }
 
+/// macOS: verify the installed netstack through one fd and, if it carries
+/// `com.apple.quarantine`, remove that through the same fd (review N3). `Ok(true)` when it was
+/// removed (the next resolve re-stamps the file: the removal changes its ctime).
+pub fn clear_quarantine(n: &ResolvedNetstack) -> Result<bool, ArtifactError> {
+    let v = stamp::open_verified(&n.path, &n.sha256, n.stamp.as_ref())
+        .map_err(|e| crate::artifacts::stamp_err(&n.path, &n.sha256, e))?;
+    crate::netstack::clear_quarantine_fd(&v.file).map_err(|source| ArtifactError::Io {
+        context: format!("clear quarantine on {}", n.path.display()),
+        source,
+    })
+}
+
 /// Resolve this host's netstack under `home` (`Ok(None)`: not installed, or no pin here).
 pub fn resolve(home: &Path) -> Result<Option<ResolvedNetstack>, ArtifactError> {
     match host_pin() {
@@ -429,16 +441,32 @@ pub fn install_file(
         fs::copy(src, &bin).map_err(io(format!("copy {}", src.display())))?;
         fs::set_permissions(&bin, fs::Permissions::from_mode(0o555))
             .map_err(io(format!("chmod {}", bin.display())))?;
-        // Hash + stamp the installed copy through one fd, after its last chmod.
-        let (sha, stamp) =
-            stamp::record(&bin).map_err(|e| crate::artifacts::stamp_err(&bin, "", e))?;
-        if sha != manifest.sha256 {
-            return Err(ArtifactError::DigestMismatch {
-                path: bin.clone(),
-                expected: manifest.sha256.clone(),
-                actual: sha,
-            });
+        // Hash + stamp the installed copy through one fd, after its last chmod. Once it
+        // matches, clear macOS quarantine through that same fd (review N3; `fs::copy` carries
+        // xattrs over), and stamp again: removing an xattr changes the ctime.
+        let f = fs::File::open(&bin).map_err(io(format!("open {}", bin.display())))?;
+        let hash = |f: &fs::File| -> Result<FileStamp, ArtifactError> {
+            let (sha, stamp) =
+                stamp::hash_and_stamp(f).map_err(io(format!("read {}", bin.display())))?;
+            if sha != manifest.sha256 {
+                return Err(ArtifactError::DigestMismatch {
+                    path: bin.clone(),
+                    expected: manifest.sha256.clone(),
+                    actual: sha,
+                });
+            }
+            stamp.ok_or_else(|| ArtifactError::Io {
+                context: format!("stamp {}", bin.display()),
+                source: io::Error::other("changed while it was hashed"),
+            })
+        };
+        let mut stamp = hash(&f)?;
+        if crate::netstack::clear_quarantine_fd(&f)
+            .map_err(io(format!("clear quarantine on {}", bin.display())))?
+        {
+            stamp = hash(&f)?;
         }
+        drop(f);
         manifest.stamp = Some(stamp);
         let mpath = staging.join(NETSTACK_MANIFEST);
         let mut json = serde_json::to_vec_pretty(&manifest).expect("manifest serializes");
@@ -674,6 +702,58 @@ mod tests {
             resolve_dir(&dir, &pin),
             Err(ArtifactError::DigestMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn manifest_edited_to_stamp_another_file_is_refused() {
+        // Review N2: a different binary is moved in under the pinned name and its genuine
+        // (sha, stamp) record is pasted into the manifest's stamp, keeping the compiled pin as
+        // the sha (`check` enforces it). The stamp vouches for the other digest: refused.
+        let home = tempfile::tempdir().unwrap();
+        let src = home.path().join("dl");
+        fs::write(&src, b"abc").unwrap();
+        let sha = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        let pin = test_pin(sha);
+        let dir = default_dir(home.path(), &pin);
+        let r = install_file(home.path(), &pin, &src, Origin::Release, None).unwrap();
+        let evil = dir.join("evil");
+        fs::write(&evil, b"xyz").unwrap();
+        fs::rename(&evil, &r.path).unwrap();
+        let (_, evil_stamp) = stamp::record(&r.path).unwrap();
+        let mpath = dir.join(NETSTACK_MANIFEST);
+        let mut m: NetstackManifest = serde_json::from_slice(&fs::read(&mpath).unwrap()).unwrap();
+        assert_eq!(m.sha256, sha);
+        m.stamp = Some(evil_stamp);
+        crate::artifacts::write_json(&mpath, &m).unwrap();
+        assert!(matches!(
+            resolve_dir(&dir, &pin),
+            Err(ArtifactError::DigestMismatch { .. })
+        ));
+    }
+
+    /// Review N3: install clears quarantine after the digest check (xattr API only: the file
+    /// is never executed, so no Gatekeeper dialog).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn install_clears_quarantine_after_the_digest_check() {
+        let home = tempfile::tempdir().unwrap();
+        let src = home.path().join("dl");
+        fs::write(&src, b"abc").unwrap();
+        crate::netstack::tests::set_quarantine(&src);
+        let pin = test_pin("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+        let r = install_file(home.path(), &pin, &src, Origin::Release, None).unwrap();
+        assert!(!crate::netstack::quarantined(&r.path).unwrap());
+        // The recorded stamp is the one after the removal: the next resolve is a stamp hit.
+        let again = resolve_dir(&default_dir(home.path(), &pin), &pin)
+            .unwrap()
+            .unwrap();
+        assert_eq!(again.stamp, r.manifest.stamp);
+        // A wrong download keeps its attribute (nothing installed, nothing trusted).
+        let bad = home.path().join("bad");
+        fs::write(&bad, b"not abc").unwrap();
+        crate::netstack::tests::set_quarantine(&bad);
+        assert!(install_file(home.path(), &pin, &bad, Origin::Release, None).is_err());
+        assert!(crate::netstack::quarantined(&bad).unwrap());
     }
 
     #[test]
