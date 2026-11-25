@@ -107,8 +107,9 @@ pub fn sandcrab(g: &Global) -> anyhow::Result<Sandcrab> {
             crate::libkrun::preflight(&config)?;
             if config.allow_tsi_unrestricted {
                 eprintln!(
-                    "warning: --libkrun-tsi: `--network unrestricted` uses TSI; the guest can \
-                     reach services on this host's loopback and LAN"
+                    "warning: --libkrun-tsi is deprecated: `--network unrestricted` uses TSI, \
+                     so the guest can reach services on this host's loopback and LAN; drop the \
+                     flag to use the pinned userspace netstack (`sandcrab libkrun install`)"
                 );
             }
             builder = builder.libkrun(config);

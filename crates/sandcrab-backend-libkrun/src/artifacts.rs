@@ -215,10 +215,11 @@ pub const LINUX_X86_64: PlatformPins = PlatformPins {
         git: LIBKRUN_GIT,
         homebrew: None,
         release: None,
-        // Reference build on the KVM host (Ubuntu 26.04, stable Rust), after `patchelf`;
-        // a second build there reproduced it byte for byte.
+        // Reference build on the KVM host (Ubuntu 26.04, stable Rust, `BLK=1 NET=1`), after
+        // `patchelf`. (The earlier `BLK=1`-only build was 16a1b77f…; it lacks
+        // `krun_add_net_unixstream`.)
         reference_build_sha256: Some(
-            "16a1b77f513836f18e3623388ebd7e582c7eb4b3cf34d923882092c3893ac648",
+            "5a302ed1640829d86a73e30a38eb78def99cdf6cec9489c682dbdc2b3493ed69",
         ),
     },
     libkrunfw: LibPin {
@@ -1202,6 +1203,7 @@ mod tests {
             .arg(&script)
             .arg("--home")
             .arg(&sh_home)
+            .arg("--no-netstack")
             .output()
             .unwrap();
         assert!(

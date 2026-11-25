@@ -79,9 +79,10 @@ pub struct Global {
     #[arg(long, global = true)]
     pub crabd: Option<PathBuf>,
 
-    /// libkrun only: allow `--network unrestricted` through libkrun's TSI socket proxy.
-    /// SECURITY: with TSI the guest can reach services listening on the HOST's loopback
-    /// (127.0.0.1) and LAN. Off by default, where `unrestricted` is refused as unenforceable.
+    /// DEPRECATED, libkrun only: run `--network unrestricted` through libkrun's TSI socket
+    /// proxy instead of the pinned userspace netstack (passt / gvproxy, installed by
+    /// `sandcrab libkrun install`). SECURITY: with TSI the guest can reach services listening
+    /// on the HOST's loopback (127.0.0.1) and LAN. Off by default; never used implicitly.
     #[arg(long, global = true)]
     pub libkrun_tsi: bool,
 

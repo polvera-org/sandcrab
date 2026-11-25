@@ -22,6 +22,8 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::netstack::{Ipv4Net, MAX_DENY_PREFIXES, NetstackKind};
+
 pub use sandcrab_protocol::init::{
     CONTROL_PORT, DEFAULT_TOOLS_PORT as TOOLS_PORT, ROOT_DRIVE_ID, SCRATCH_DRIVE_ID,
 };
@@ -74,6 +76,8 @@ pub mod exit_code {
     pub const LIBKRUN_LOAD: i32 = 74;
     /// `krun_start_enter` returned (it only returns on error, e.g. a missing entitlement).
     pub const START_FAILED: i32 = 75;
+    /// The userspace netstack (passt / gvproxy) could not be started.
+    pub const NETSTACK_START: i32 = 76;
 
     /// Human-readable meaning of a helper exit code, if it is one of ours or libkrun's.
     #[must_use]
@@ -85,6 +89,7 @@ pub mod exit_code {
             LIBKRUN_CONFIG => "libkrun configuration call failed",
             LIBKRUN_LOAD => "failed to load the pinned libkrun",
             START_FAILED => "krun_start_enter failed (missing com.apple.security.hypervisor?)",
+            NETSTACK_START => "the userspace netstack (passt / gvproxy) failed to start",
             125..=127 => "guest init failed",
             _ => return None,
         })
@@ -148,6 +153,9 @@ pub struct HelperConfig {
     pub tools_socket: PathBuf,
     #[serde(default)]
     pub network: HelperNetwork,
+    /// The netstack for [`HelperNetwork::Userspace`] (required then, absent otherwise).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub netstack: Option<NetstackSpec>,
     #[serde(default)]
     pub exec: GuestExec,
     /// libkrun log level, 0 (off) ..= [`MAX_LOG_LEVEL`].
@@ -218,9 +226,26 @@ pub enum HelperNetwork {
     /// `krun_disable_implicit_vsock` + `krun_add_vsock(0)`: vsock without TSI, no NIC.
     #[default]
     Disabled,
-    /// Explicit operator opt-in: TSI (`KRUN_TSI_HIJACK_INET`) with an empty port map. The
-    /// guest can reach host loopback services.
+    /// Explicit (deprecated) operator opt-in: TSI (`KRUN_TSI_HIJACK_INET`) with an empty port
+    /// map. The guest can reach host loopback services.
     TsiUnrestricted,
+    /// Phase B: a virtio-net NIC (`krun_add_net_unixstream`, DHCP by `init.krun`) backed by the
+    /// pinned userspace netstack in [`HelperConfig::netstack`], behind the helper's egress
+    /// filter ([`crate::netstack`]). TSI stays off.
+    Userspace,
+}
+
+/// The userspace netstack the helper spawns for [`HelperNetwork::Userspace`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetstackSpec {
+    pub kind: NetstackKind,
+    /// The netstack executable, hashed by the helper right before it is spawned.
+    pub binary: PinnedFile,
+    /// Destinations denied on top of [`crate::netstack::ALWAYS_DENIED`]: the host's own
+    /// addresses and on-link subnets ([`crate::netstack::host_prefixes`]).
+    #[serde(default)]
+    pub deny: Vec<Ipv4Net>,
 }
 
 /// The guest process `init.krun` execs. Every string lands on the kernel cmdline.
@@ -364,6 +389,25 @@ impl HelperConfig {
             if !tags.insert(s.tag.as_str()) {
                 return Err(invalid("virtiofs", format!("duplicate tag `{}`", s.tag)));
             }
+        }
+
+        match (self.network, &self.netstack) {
+            (HelperNetwork::Userspace, Some(ns)) => {
+                ns.binary.validate("netstack.binary")?;
+                if ns.deny.len() > MAX_DENY_PREFIXES {
+                    return Err(invalid(
+                        "netstack.deny",
+                        format!("at most {MAX_DENY_PREFIXES} prefixes"),
+                    ));
+                }
+            }
+            (HelperNetwork::Userspace, None) => {
+                return Err(invalid("netstack", "required for network `userspace`"));
+            }
+            (_, Some(_)) => {
+                return Err(invalid("netstack", "only valid with network `userspace`"));
+            }
+            (_, None) => {}
         }
 
         check_host_path("control_socket", &self.control_socket, MAX_SOCKET_PATH)?;
@@ -578,9 +622,62 @@ mod tests {
             control_socket: "/h/.sandcrab/run/krun/id/ctl.sock".into(),
             tools_socket: "/h/.sandcrab/run/krun/id/v.sock".into(),
             network: HelperNetwork::Disabled,
+            netstack: None,
             exec: GuestExec::default(),
             log_level: 0,
         }
+    }
+
+    fn userspace() -> HelperConfig {
+        let mut cfg = sample();
+        cfg.network = HelperNetwork::Userspace;
+        cfg.netstack = Some(NetstackSpec {
+            kind: NetstackKind::Passt,
+            binary: PinnedFile {
+                path: "/h/.sandcrab/artifacts/libkrun-net/passt/passt".into(),
+                sha256: SHA_A.into(),
+            },
+            deny: vec![
+                "203.0.113.7/32".parse().unwrap(),
+                "198.51.100.0/24".parse().unwrap(),
+            ],
+        });
+        cfg
+    }
+
+    #[test]
+    fn userspace_network_needs_exactly_one_netstack() {
+        let cfg = userspace();
+        cfg.validate().unwrap();
+        let back = HelperConfig::read_from(Cursor::new(cfg.to_line().unwrap())).unwrap();
+        assert_eq!(back, cfg);
+        let v = serde_json::to_value(&cfg).unwrap();
+        assert_eq!(v["network"], "userspace");
+        assert_eq!(v["netstack"]["kind"], "passt");
+        assert_eq!(v["netstack"]["deny"][0], "203.0.113.7/32");
+
+        let mut c = userspace();
+        c.netstack = None;
+        assert_invalid(&c, "netstack");
+        for net in [HelperNetwork::Disabled, HelperNetwork::TsiUnrestricted] {
+            let mut c = userspace();
+            c.network = net;
+            assert_invalid(&c, "netstack");
+        }
+        let mut c = userspace();
+        c.netstack.as_mut().unwrap().binary.path = "passt".into();
+        assert_invalid(&c, "netstack.binary.path");
+        let mut c = userspace();
+        c.netstack.as_mut().unwrap().deny =
+            vec!["10.0.0.0/8".parse().unwrap(); MAX_DENY_PREFIXES + 1];
+        assert_invalid(&c, "netstack.deny");
+        // A prefix with host bits set never parses, nor does an unknown netstack.
+        let mut v = serde_json::to_value(userspace()).unwrap();
+        v["netstack"]["deny"][0] = "10.0.0.1/8".into();
+        assert!(serde_json::from_value::<HelperConfig>(v).is_err());
+        let mut v = serde_json::to_value(userspace()).unwrap();
+        v["netstack"]["kind"] = "slirp".into();
+        assert!(serde_json::from_value::<HelperConfig>(v).is_err());
     }
 
     fn assert_invalid(cfg: &HelperConfig, field_prefix: &str) {
@@ -629,6 +726,7 @@ mod tests {
             "virtiofs",
             "virtiofs_semantics",
             "network",
+            "netstack",
             "exec",
             "log_level",
         ] {

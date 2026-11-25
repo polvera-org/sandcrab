@@ -45,6 +45,10 @@ pub struct LibkrunConfig {
     /// Directory holding the pinned libkrun + libkrunfw. `None` = the pinned artifact dir
     /// (`~/.sandcrab/artifacts/libkrun/<ver>/`); never a system or Homebrew path implicitly.
     pub lib_dir: Option<PathBuf>,
+    /// Directory holding the pinned userspace netstack install (passt on Linux, gvproxy on
+    /// macOS; `sandcrab libkrun install`) for network `unrestricted`. `None` = no netstack:
+    /// that policy is then refused. Default: `<home>/artifacts/libkrun-net/<kind>-<version>/`.
+    pub netstack_dir: Option<PathBuf>,
     pub rootfs: RootfsSource,
     /// Rootfs / blank-scratch image cache.
     pub cache_root: PathBuf,
@@ -90,6 +94,9 @@ impl LibkrunConfig {
         Self {
             helper: home.join("bin").join(HELPER_BIN_NAME),
             lib_dir: None,
+            netstack_dir: crate::netstack_pins::host_pin()
+                .ok()
+                .map(|pin| crate::netstack_pins::default_dir(home, pin)),
             rootfs: RootfsSource::Template {
                 crabd: crabd.into(),
             },

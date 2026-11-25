@@ -68,6 +68,8 @@ rustix = { version = "1", features = ["process"] }
 
 # libkrun backend: runtime dlopen of the pinned libkrun (helper only, no link-time dependency)
 libloading = "0.8"
+# libkrun backend: host interface addresses (getifaddrs) for the userspace-netstack egress filter
+nix = { version = "0.31", default-features = false, features = ["net"] }
 
 # Agent harness (crabagent): HTTP + SSE to the Anthropic API (rustls/ring, no OpenSSL), REPL, .env
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2"] }

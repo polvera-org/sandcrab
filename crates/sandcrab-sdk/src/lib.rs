@@ -133,6 +133,10 @@ pub use sandcrab_backend_libkrun::{self as libkrun, KrunLibs, LibkrunBackend, Li
 /// `<SANDCRAB_HOME>/artifacts/libkrun/<version>/`; never a system or Homebrew path) and verify
 /// the whole provenance chain (`manifest.json` against the compiled-in pins, file SHA-256s).
 /// Install them with `sandcrab libkrun install`.
+///
+/// Also resolves the pinned userspace netstack (passt / gvproxy) for `network.policy =
+/// unrestricted` from `<SANDCRAB_HOME>/artifacts/libkrun-net/`: not installed is `None`
+/// (that policy is then refused), a tampered or mismatched install is an error.
 #[cfg(all(
     feature = "libkrun",
     any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))
@@ -146,6 +150,7 @@ pub fn libkrun_libs(config: &LibkrunConfig) -> Result<KrunLibs> {
     Ok(KrunLibs {
         libkrun: pin(a.libkrun),
         libkrunfw: pin(a.libkrunfw),
+        netstack: libkrun::netstack_pins::resolve_config(config)?,
     })
 }
 
@@ -740,6 +745,7 @@ mod tests {
         let libs = KrunLibs {
             libkrun: pinned("libkrun"),
             libkrunfw: pinned("libkrunfw"),
+            netstack: None,
         };
         let backend = LibkrunBackend::new_unchecked(config, libs).unwrap();
         let sc = env

@@ -17,6 +17,8 @@
 //!   plus helper exit codes.
 //! - [`ffi`] — runtime-loaded libkrun table + safe wrapper (the only `unsafe`; used by the helper).
 //! - [`artifacts`] — libkrun / libkrunfw pins and resolution.
+//! - [`netstack`] — Phase B `unrestricted` networking: pinned passt / gvproxy behind the
+//!   helper's egress filter.
 //! - [`control`], [`workspace`], [`net`], [`reap`], [`ports`]: backend internals, see each module.
 
 // Module layout (design §15). Each later flow step owns its own file(s), so they can land in
@@ -31,14 +33,18 @@ pub mod control;
 pub mod ffi;
 pub mod helper_proto;
 pub mod net;
+pub mod netstack;
+pub mod netstack_pins;
 pub mod ports;
 pub mod reap;
 mod vm;
 pub mod workspace;
 
-pub use backend::{CAPABILITIES, KrunLibs, LibkrunBackend};
+pub use backend::{CAPABILITIES, KrunLibs, LibkrunBackend, NetstackBin};
 /// Linux: validate a delegated cgroup v2 parent for the helper leaves (`doctor`).
 #[cfg(target_os = "linux")]
 pub use cgroup::check_parent as check_cgroup_parent;
 pub use config::{LibkrunConfig, RootfsSource};
-pub use helper_proto::{HelperConfig, HelperConfigError, HelperNetwork, VirtiofsSemantics};
+pub use helper_proto::{
+    HelperConfig, HelperConfigError, HelperNetwork, NetstackSpec, VirtiofsSemantics,
+};

@@ -15,7 +15,9 @@
 //! - `libkrun`: the libkrun backend (Apple Silicon macOS or Linux KVM). Needs
 //!   `--features libkrun` (otherwise every test prints a SKIP line and passes), the signed
 //!   helper and pinned libraries (`sandcrab libkrun install`), `mke2fs` on `PATH` and the
-//!   template images pinned on this host. TSI is never enabled: `unrestricted` is refused.
+//!   template images pinned on this host. TSI is never enabled: `unrestricted` runs on the
+//!   pinned userspace netstack (gvproxy on macOS, passt on Linux; also installed by `sandcrab
+//!   libkrun install`) and needs internet access.
 //!
 //! All scenarios are `#[ignore]`d. Run with:
 //!

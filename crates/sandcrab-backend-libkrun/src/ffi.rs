@@ -31,6 +31,15 @@ use crate::helper_proto::{
 
 /// `KRUN_TSI_HIJACK_INET`: TSI for AF_INET/AF_INET6 sockets.
 pub const KRUN_TSI_HIJACK_INET: u32 = 1 << 0;
+/// `NET_FLAG_DHCP_CLIENT`: `init.krun` configures `eth0` by DHCP before exec'ing the guest
+/// init (Rapid Commit DISCOVER, falls back to the OFFER).
+pub const NET_FLAG_DHCP_CLIENT: u32 = 1 << 1;
+/// virtio-net features for the userspace NIC: none (no checksum/TSO offloads), so every frame
+/// is a complete, checksummed Ethernet frame of at most MTU + 14 bytes.
+pub const NET_FEATURES: u32 = 0;
+/// Symbol of `krun_add_net_unixstream`: optional at load time, because libkrun builds without
+/// the `net` cargo feature lack it; required only for [`HelperNetwork::Userspace`].
+pub const ADD_NET_UNIXSTREAM: &str = "krun_add_net_unixstream";
 /// `KRUN_SEMANTICS_LINUX_COMPLETE`.
 pub const KRUN_SEMANTICS_LINUX_COMPLETE: u32 = 0;
 /// `KRUN_SEMANTICS_LINUX_SIMPLIFIED`.
@@ -204,6 +213,14 @@ type FnSetExec = unsafe extern "C" fn(
     argv: *const *const c_char,
     envp: *const *const c_char,
 ) -> i32;
+type FnAddNetUnixstream = unsafe extern "C" fn(
+    ctx: u32,
+    path: *const c_char,
+    fd: i32,
+    mac: *const u8,
+    features: u32,
+    flags: u32,
+) -> i32;
 type FnGetMaxVcpus = unsafe extern "C" fn() -> i32;
 type FnStartEnter = unsafe extern "C" fn(ctx: u32) -> i32;
 
@@ -224,6 +241,8 @@ pub struct Krun {
     set_exec: FnSetExec,
     get_max_vcpus: FnGetMaxVcpus,
     start_enter: FnStartEnter,
+    /// `None` when libkrun was built without the `net` feature.
+    add_net_unixstream: Option<FnAddNetUnixstream>,
     libkrun_path: PathBuf,
     _libkrun: libloading::Library,
     _libkrunfw: libloading::Library,
@@ -306,11 +325,18 @@ impl Krun {
                 set_exec: sym(&lib, p, "krun_set_exec")?,
                 get_max_vcpus: sym(&lib, p, "krun_get_max_vcpus")?,
                 start_enter: sym(&lib, p, "krun_start_enter")?,
+                add_net_unixstream: sym(&lib, p, ADD_NET_UNIXSTREAM).ok(),
                 libkrun_path: libkrun.path.clone(),
                 _libkrun: lib,
                 _libkrunfw: fw,
             })
         }
+    }
+
+    /// Whether this libkrun build exports `krun_add_net_unixstream` (the `net` feature).
+    #[must_use]
+    pub fn has_net(&self) -> bool {
+        self.add_net_unixstream.is_some()
     }
 
     /// `krun_set_log_level` (global, call before creating a context).
@@ -428,6 +454,15 @@ pub enum KrunCall {
     AddVsock {
         tsi_features: u32,
     },
+    /// A virtio-net NIC on an already-connected unixstream socket (the helper's egress
+    /// filter). [`plan`] emits `fd: -1`; the helper substitutes its socket fd, whose ownership
+    /// then passes to libkrun.
+    AddNetUnixstream {
+        fd: i32,
+        mac: [u8; 6],
+        features: u32,
+        flags: u32,
+    },
     /// Always empty: an empty array publishes no guest port (`NULL` would publish all of
     /// them on the host wildcard address, design §9).
     SetPortMap(Vec<String>),
@@ -455,6 +490,7 @@ impl KrunCall {
             Self::AddVirtiofs { .. } => "krun_add_virtiofs4",
             Self::DisableImplicitVsock => "krun_disable_implicit_vsock",
             Self::AddVsock { .. } => "krun_add_vsock",
+            Self::AddNetUnixstream { .. } => "krun_add_net_unixstream",
             Self::SetPortMap(_) => "krun_set_port_map",
             Self::AddVsockPort { .. } => "krun_add_vsock_port2",
             Self::SetWorkdir(_) => "krun_set_workdir",
@@ -492,6 +528,19 @@ impl fmt::Display for KrunCall {
             ),
             Self::DisableImplicitVsock => write!(f, "{n}()"),
             Self::AddVsock { tsi_features } => write!(f, "{n}(tsi_features={tsi_features})"),
+            Self::AddNetUnixstream {
+                fd,
+                mac,
+                features,
+                flags,
+            } => {
+                let mac: Vec<String> = mac.iter().map(|b| format!("{b:02x}")).collect();
+                write!(
+                    f,
+                    "{n}(path=NULL, fd={fd}, mac={}, features={features:#x}, flags={flags:#x})",
+                    mac.join(":")
+                )
+            }
             Self::SetPortMap(m) => write!(f, "{n}({m:?})"),
             Self::AddVsockPort { port, path, listen } => {
                 write!(f, "{n}({port}, {path:?}, listen={listen})")
@@ -514,7 +563,9 @@ fn semantics_raw(s: VirtiofsSemantics) -> u32 {
 ///
 /// Order: VM size → disks (root first, so it is `/dev/vda`; then scratch; then workspace
 /// volumes) → block-root remount → virtio-fs shares → vsock device (TSI off unless the config
-/// opts in) → empty port map → vsock port → UDS mappings → workdir → exec.
+/// opts in) → empty port map → userspace NIC (`userspace` only; libkrun refuses a port map
+/// after it) → vsock port → UDS mappings
+/// → workdir → exec.
 #[must_use]
 pub fn plan(cfg: &HelperConfig) -> Vec<KrunCall> {
     let mut calls = vec![KrunCall::SetVmConfig {
@@ -542,13 +593,25 @@ pub fn plan(cfg: &HelperConfig) -> Vec<KrunCall> {
         });
     }
     let tsi_features = match cfg.network {
-        HelperNetwork::Disabled => 0,
+        HelperNetwork::Disabled | HelperNetwork::Userspace => 0,
         HelperNetwork::TsiUnrestricted => KRUN_TSI_HIJACK_INET,
     };
     calls.extend([
         KrunCall::DisableImplicitVsock,
         KrunCall::AddVsock { tsi_features },
         KrunCall::SetPortMap(Vec::new()),
+    ]);
+    if cfg.network == HelperNetwork::Userspace {
+        // After the (empty) port map: libkrun refuses `krun_set_port_map` once a NIC exists
+        // (`net_index != 0` → EINVAL).
+        calls.push(KrunCall::AddNetUnixstream {
+            fd: -1,
+            mac: crate::netstack::GUEST_MAC,
+            features: NET_FEATURES,
+            flags: NET_FLAG_DHCP_CLIENT,
+        });
+    }
+    calls.extend([
         KrunCall::AddVsockPort {
             port: CONTROL_PORT,
             path: cfg.control_socket.clone(),
@@ -627,6 +690,31 @@ impl Ctx<'_> {
             }
             KrunCall::DisableImplicitVsock => unsafe { (k.disable_implicit_vsock)(id) },
             KrunCall::AddVsock { tsi_features } => unsafe { (k.add_vsock)(id, *tsi_features) },
+            KrunCall::AddNetUnixstream {
+                fd,
+                mac,
+                features,
+                flags,
+            } => {
+                let Some(add) = k.add_net_unixstream else {
+                    return Err(FfiError::InvalidArgument {
+                        call: n,
+                        reason: format!(
+                            "`{}` lacks {ADD_NET_UNIXSTREAM}: rebuild libkrun with NET=1 \
+                             (scripts/fetch-libkrun.sh)",
+                            k.libkrun_path.display()
+                        ),
+                    });
+                };
+                if *fd < 0 {
+                    return Err(FfiError::InvalidArgument {
+                        call: n,
+                        reason: "no netstack socket fd".into(),
+                    });
+                }
+                // libkrun takes ownership of `fd` (path is NULL, mac is 6 bytes it copies).
+                unsafe { add(id, std::ptr::null(), *fd, mac.as_ptr(), *features, *flags) }
+            }
             KrunCall::SetPortMap(map) => {
                 let a = CStrArray::new(n, map)?;
                 unsafe { (k.set_port_map)(id, a.as_ptr()) }
@@ -716,8 +804,52 @@ mod tests {
             control_socket: "/r/id/ctl.sock".into(),
             tools_socket: "/r/id/v.sock".into(),
             network: HelperNetwork::Disabled,
+            netstack: None,
             exec: GuestExec::default(),
             log_level: 0,
+        }
+    }
+
+    #[test]
+    fn userspace_network_adds_one_nic_and_no_tsi() {
+        let mut c = cfg();
+        c.network = HelperNetwork::Userspace;
+        c.netstack = Some(crate::helper_proto::NetstackSpec {
+            kind: crate::netstack::NetstackKind::Gvproxy,
+            binary: PinnedFile {
+                path: "/a/gvproxy".into(),
+                sha256: SHA_ZERO.into(),
+            },
+            deny: vec![],
+        });
+        c.validate().unwrap();
+        let rendered: Vec<String> = plan(&c).iter().map(ToString::to_string).collect();
+        let at = |s: &str| rendered.iter().position(|x| x.starts_with(s)).unwrap();
+        assert_eq!(
+            rendered[at("krun_add_vsock(")],
+            "krun_add_vsock(tsi_features=0)"
+        );
+        assert_eq!(
+            rendered[at("krun_add_net_unixstream")],
+            "krun_add_net_unixstream(path=NULL, fd=-1, mac=5a:94:ef:e4:0c:ee, features=0x0, flags=0x2)"
+        );
+        assert!(at("krun_disable_implicit_vsock") < at("krun_add_vsock("));
+        assert!(at("krun_set_port_map([])") < at("krun_add_net_unixstream"));
+        assert_eq!(
+            rendered
+                .iter()
+                .filter(|x| x.starts_with("krun_add_net"))
+                .count(),
+            1
+        );
+        // No NIC without `userspace`.
+        for net in [HelperNetwork::Disabled, HelperNetwork::TsiUnrestricted] {
+            c.network = net;
+            assert!(
+                !plan(&c)
+                    .iter()
+                    .any(|x| matches!(x, KrunCall::AddNetUnixstream { .. }))
+            );
         }
     }
 
