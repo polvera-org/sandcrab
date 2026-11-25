@@ -392,7 +392,14 @@ fn backend_at(home: &Path, tweak: impl FnOnce(&mut LibkrunConfig)) -> LibkrunBac
     // suite needs no e2fsprogs there. Linux always runs mke2fs (checked in `harness`).
     let blank = home.join("cache/krun-scratch");
     fs::create_dir_all(&blank).unwrap();
-    fs::write(blank.join(format!("blank-{DISK_MB}.ext4")), b"blank").unwrap();
+    fs::write(
+        blank.join(format!(
+            "blank-{DISK_MB}-v{}.ext4",
+            sandcrab_rootfs::SCRATCH_FORMAT_VERSION
+        )),
+        b"blank",
+    )
+    .unwrap();
 
     let mut cfg = LibkrunConfig::with_home(home, "/unused/crabd");
     cfg.helper = helper;

@@ -324,10 +324,13 @@ pub fn cached_ro_image(
 }
 
 /// Per-sandbox scratch drive: sparse copy of a cached pre-formatted blank image
-/// (`cache/blank/<mib>.ext4`, created once). Falls back to formatting in place.
+/// (`cache/blank/<mib>-v<format>.ext4`, created once). Falls back to formatting in place.
 pub fn scratch_drive(cache_root: &Path, size_mib: u64, dest: &Path) -> Result<()> {
     let blank_dir = cache_root.join("blank");
-    let blank = blank_dir.join(format!("{size_mib}.ext4"));
+    let blank = blank_dir.join(format!(
+        "{size_mib}-v{}.ext4",
+        crate::rootfs::SCRATCH_FORMAT_VERSION
+    ));
     if !blank.is_file() {
         create_private_dir_all(&blank_dir)?;
         let tmp = blank_dir.join(format!(".{size_mib}.ext4.{}.part", std::process::id()));
@@ -887,11 +890,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("scratch.ext4");
         scratch_drive(dir.path(), 512, &dest).unwrap();
-        assert!(dir.path().join("blank/512.ext4").is_file());
+        assert!(dir.path().join("blank/512-v2.ext4").is_file());
         let md = fs::metadata(&dest).unwrap();
         assert_eq!(md.len(), 512 * MIB);
         assert!(md.blocks() * 512 < 64 * MIB);
-        let a = fs::read(dir.path().join("blank/512.ext4")).unwrap();
+        let a = fs::read(dir.path().join("blank/512-v2.ext4")).unwrap();
         assert!(a == fs::read(&dest).unwrap(), "copy is byte-identical");
         let dest2 = dir.path().join("scratch2.ext4");
         scratch_drive(dir.path(), 512, &dest2).unwrap();

@@ -35,6 +35,10 @@ pub const ROOTFS_LABEL: &str = "sc-root";
 /// Equal to the scratch `drive_id`: guest init falls back to this label when no virtio-blk
 /// serial matches (`sandcrab_protocol::init::SCRATCH_DRIVE_ID`).
 pub const SCRATCH_LABEL: &str = "scratch";
+/// Format version of [`create_scratch`] images. Backends that cache a blank scratch image put
+/// it in the file name, so a format change never reuses an old blank.
+/// v2: inode tables zeroed at format time (no guest `ext4lazyinit` after boot).
+pub const SCRATCH_FORMAT_VERSION: u32 = 2;
 pub const ROOTFS_FILE: &str = "rootfs.ext4";
 pub const MANIFEST_FILE: &str = "manifest.json";
 const MIB: u64 = 1024 * 1024;
@@ -440,7 +444,13 @@ impl Drop for ExportContainer {
 }
 
 /// Create a sparse, journal-less ext4 scratch drive of `size_mib` MiB at `path` (label
-/// [`SCRATCH_LABEL`]). Physical size is a few MiB thanks to lazy inode-table init.
+/// [`SCRATCH_LABEL`]).
+///
+/// Inode tables are zeroed now (`lazy_itable_init=0`), not by the guest: otherwise the guest
+/// kernel's `ext4lazyinit` thread zeroes them in the first seconds after every boot, which
+/// is VMM device-emulation CPU (Firecracker: ~0.04 CPU-s/s on its main thread for ~5 s) and
+/// scratch writes. On Linux mke2fs zeroes by punching holes, so the image stays sparse (a
+/// 2 GiB image is ~1.2 MiB on disk either way) and formatting stays instant.
 pub fn create_scratch(path: &Path, size_mib: u64) -> Result<Duration> {
     let t0 = Instant::now();
     if size_mib < 8 {
@@ -467,7 +477,7 @@ pub fn create_scratch(path: &Path, size_mib: u64) -> Result<Duration> {
                 "-O",
                 "^has_journal",
                 "-E",
-                "lazy_itable_init=1,lazy_journal_init=1,nodiscard",
+                "lazy_itable_init=0,lazy_journal_init=1,nodiscard",
                 "-L",
                 SCRATCH_LABEL,
             ])
