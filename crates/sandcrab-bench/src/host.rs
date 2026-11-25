@@ -34,7 +34,14 @@ pub fn sha256_file(path: &Path) -> Option<String> {
 /// `/proc/meminfo` in bytes.
 #[must_use]
 pub fn meminfo() -> BTreeMap<String, u64> {
-    parse_meminfo(&fs::read_to_string("/proc/meminfo").unwrap_or_default())
+    #[cfg(target_os = "macos")]
+    {
+        macos::meminfo()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        parse_meminfo(&fs::read_to_string("/proc/meminfo").unwrap_or_default())
+    }
 }
 
 #[must_use]
@@ -57,6 +64,12 @@ pub fn mem_available() -> u64 {
 
 #[must_use]
 pub fn loadavg() -> [f64; 3] {
+    #[cfg(target_os = "macos")]
+    let s = macos::sysctl("vm.loadavg")
+        .unwrap_or_default()
+        .trim_matches(|c| c == '{' || c == '}' || char::is_whitespace(c))
+        .to_owned();
+    #[cfg(not(target_os = "macos"))]
     let s = read_trim("/proc/loadavg").unwrap_or_default();
     let mut it = s.split_whitespace().map(|v| v.parse().unwrap_or(f64::NAN));
     [
@@ -68,6 +81,11 @@ pub fn loadavg() -> [f64; 3] {
 
 #[must_use]
 pub fn top_cpu() -> Vec<String> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::top_cpu()
+    }
+    #[cfg(not(target_os = "macos"))]
     cmd(
         "ps",
         &["-eo", "pid,pcpu,pmem,comm", "--sort=-pcpu", "--no-headers"],
@@ -257,7 +275,8 @@ pub fn collect(kind_override: Option<&str>, crabd: &Path, fc: &FcPaths) -> HostI
         .write(true)
         .open("/dev/kvm")
         .is_ok();
-    HostInfo {
+    #[allow(unused_mut)]
+    let mut info = HostInfo {
         hostname: hostname(),
         kind: kind_override.map_or(detected_kind, str::to_owned),
         kind_overridden: kind_override.is_some(),
@@ -293,7 +312,10 @@ pub fn collect(kind_override: Option<&str>, crabd: &Path, fc: &FcPaths) -> HostI
             sha256: sha256_file(crabd).unwrap_or_default(),
             version: String::new(),
         },
-    }
+    };
+    #[cfg(target_os = "macos")]
+    macos::fill_host(&mut info);
+    info
 }
 
 #[must_use]
@@ -455,9 +477,224 @@ fn short(s: &str) -> String {
     s.chars().take(12).collect()
 }
 
+/// macOS equivalents of the `/proc`/`/sys` probes (no procfs there). Same contract: read-only,
+/// best-effort, `unknown`/empty when a value cannot be read. Commands run with `LC_ALL=C`
+/// (sysctl and vm_stat otherwise print the locale's decimal comma).
+#[cfg(target_os = "macos")]
+pub(crate) mod macos {
+    use std::collections::BTreeMap;
+    use std::process::Command;
+
+    use crate::results::{HostInfo, Storage};
+
+    fn cmd_c(program: &str, args: &[&str]) -> Option<String> {
+        let out = Command::new(program)
+            .args(args)
+            .env("LC_ALL", "C")
+            .output()
+            .ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned())
+    }
+
+    pub fn sysctl(name: &str) -> Option<String> {
+        cmd_c("sysctl", &["-n", name])
+    }
+
+    fn sysctl_u64(name: &str) -> Option<u64> {
+        sysctl(name)?.parse().ok()
+    }
+
+    /// A `/proc/meminfo`-shaped map (bytes) with the keys the bench reads: `MemTotal`
+    /// (`hw.memsize`), `MemAvailable` (free + file-backed + purgeable pages from `vm_stat`, an
+    /// approximation: macOS has no MemAvailable), `SwapTotal`/`SwapFree` (`vm.swapusage`).
+    pub fn meminfo() -> BTreeMap<String, u64> {
+        let mut m = BTreeMap::new();
+        if let Some(t) = sysctl_u64("hw.memsize") {
+            m.insert("MemTotal".into(), t);
+        }
+        if let Some(a) = cmd_c("vm_stat", &[])
+            .as_deref()
+            .and_then(parse_vm_stat_available)
+        {
+            m.insert("MemAvailable".into(), a);
+        }
+        if let Some((total, free)) = sysctl("vm.swapusage").as_deref().and_then(parse_swapusage) {
+            m.insert("SwapTotal".into(), total);
+            m.insert("SwapFree".into(), free);
+        }
+        m
+    }
+
+    pub(crate) fn parse_vm_stat_available(text: &str) -> Option<u64> {
+        let page: u64 = text
+            .lines()
+            .next()?
+            .split("page size of ")
+            .nth(1)?
+            .split_whitespace()
+            .next()?
+            .parse()
+            .ok()?;
+        let get = |key: &str| -> Option<u64> {
+            text.lines()
+                .find_map(|l| l.strip_prefix(key))?
+                .trim()
+                .trim_end_matches('.')
+                .parse()
+                .ok()
+        };
+        // Linux MemAvailable ~ free + reclaimable page cache: free + file-backed + purgeable.
+        // Older vm_stat without the file-backed line: free + inactive + speculative.
+        let pages = match get("File-backed pages:") {
+            Some(file) => get("Pages free:")? + file + get("Pages purgeable:").unwrap_or(0),
+            None => get("Pages free:")? + get("Pages inactive:")? + get("Pages speculative:")?,
+        };
+        Some(pages * page)
+    }
+
+    /// `total = 2048.00M  used = 1213.25M  free = 834.75M  (encrypted)` → (total, free) bytes.
+    pub(crate) fn parse_swapusage(text: &str) -> Option<(u64, u64)> {
+        let field = |key: &str| -> Option<u64> {
+            let v = text.split(key).nth(1)?.split_whitespace().next()?;
+            let (num, unit) = v.split_at(v.len().checked_sub(1)?);
+            let mult = match unit {
+                "K" => 1u64 << 10,
+                "M" => 1 << 20,
+                "G" => 1 << 30,
+                _ => return None,
+            };
+            Some((num.replace(',', ".").parse::<f64>().ok()? * mult as f64) as u64)
+        };
+        Some((field("total = ")?, field("free = ")?))
+    }
+
+    /// Top 10 processes by CPU as `pid pcpu pmem name`. Only the executable's base name is
+    /// kept: macOS `comm` is the full path, which can carry user names and home directories.
+    pub fn top_cpu() -> Vec<String> {
+        cmd_c("ps", &["-Aro", "pid,pcpu,pmem,comm"])
+            .map(|s| {
+                s.lines()
+                    .skip(1)
+                    .take(10)
+                    .filter_map(|l| {
+                        let mut it = l.split_whitespace();
+                        let (pid, cpu, mem) = (it.next()?, it.next()?, it.next()?);
+                        let comm = it.collect::<Vec<_>>().join(" ");
+                        let base = comm.rsplit('/').next().unwrap_or(&comm);
+                        Some(format!("{pid} {cpu} {mem} {base}"))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// CPU, kind and storage for a Mac. The storage probe is the volume holding the Sandcrab
+    /// state dir (rootfs cache, scratch drives), recorded by mount point, never by home path.
+    pub fn fill_host(h: &mut HostInfo) {
+        h.cpu_model = sysctl("machdep.cpu.brand_string").unwrap_or_default();
+        h.sockets = sysctl_u64("hw.packages").map_or(1, |v| v as u32);
+        h.cores = sysctl_u64("hw.physicalcpu").unwrap_or(0) as u32;
+        h.threads = sysctl_u64("hw.logicalcpu").unwrap_or(0) as u32;
+        h.smt = h.threads > h.cores;
+        let in_vm = sysctl_u64("kern.hv_vmm_present") == Some(1);
+        if !h.kind_overridden {
+            h.kind = if in_vm { "vm" } else { "bare-metal" }.into();
+        }
+        h.virt = if in_vm { "apple-vm" } else { "none" }.into();
+        h.hypervisor = in_vm.then(|| "apple-vm".into());
+        h.kernel = format!(
+            "Darwin {} (macOS {})",
+            sysctl("kern.osrelease").unwrap_or_default(),
+            cmd_c("sw_vers", &["-productVersion"]).unwrap_or_default()
+        );
+        h.governor = "n/a (macOS)".into();
+        h.thp = "n/a (macOS)".into();
+        h.storage = storage();
+    }
+
+    fn storage() -> Storage {
+        let state = std::env::var_os("SANDCRAB_HOME")
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME").map(|h| std::path::Path::new(&h).join(".sandcrab"))
+            })
+            .filter(|p| p.exists())
+            .unwrap_or_else(|| "/".into());
+        let df = cmd_c("df", &[&state.to_string_lossy()]).unwrap_or_default();
+        let line = df.lines().nth(1).unwrap_or_default();
+        let device = line
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .to_owned();
+        let mount = line
+            .split_whitespace()
+            .last()
+            .unwrap_or_default()
+            .to_owned();
+        let info = cmd_c("diskutil", &["info", &mount]).unwrap_or_default();
+        let field = |k: &str| {
+            info.lines()
+                .find_map(|l| l.trim().strip_prefix(k))
+                .map(|v| v.trim().to_owned())
+                .unwrap_or_default()
+        };
+        let ssd = field("Solid State:");
+        let location = field("Device Location:");
+        let kind = match ssd.as_str() {
+            "Yes" if location == "Internal" => "ssd (internal)".to_owned(),
+            "Yes" => "ssd".to_owned(),
+            "No" => "hdd".to_owned(),
+            _ => "unknown".to_owned(),
+        };
+        let fs = field("File System Personality:");
+        Storage {
+            reflink: fs.eq_ignore_ascii_case("apfs"),
+            device,
+            kind,
+            fs,
+            probed_path: mount,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_vm_stat_and_swapusage_parse() {
+        let vm = "Mach Virtual Memory Statistics: (page size of 16384 bytes)\n\
+                  Pages free:                                4056.\n\
+                  Pages active:                            266890.\n\
+                  Pages inactive:                          263195.\n\
+                  Pages speculative:                         2805.\n";
+        assert_eq!(
+            macos::parse_vm_stat_available(vm),
+            Some((4056 + 263_195 + 2805) * 16384)
+        );
+        let vm2 = format!(
+            "{vm}Pages purgeable:                            770.\n\
+             File-backed pages:                       186655.\n"
+        );
+        assert_eq!(
+            macos::parse_vm_stat_available(&vm2),
+            Some((4056 + 186_655 + 770) * 16384)
+        );
+        assert_eq!(
+            macos::parse_swapusage(
+                "total = 2048.00M  used = 1024.00M  free = 1024.00M  (encrypted)"
+            ),
+            Some((2048 << 20, 1024 << 20))
+        );
+        assert_eq!(
+            macos::parse_swapusage("total = 0.00M  used = 0.00M  free = 0.00M  (encrypted)"),
+            Some((0, 0))
+        );
+    }
 
     #[test]
     fn meminfo_parses_kb() {

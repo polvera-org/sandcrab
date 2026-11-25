@@ -153,7 +153,9 @@ first:
     VMM's own cost, **excluding** guest RAM.
   - `mem.vmm_rss_*` (libkrun: `mem.helper_rss_*`) = whole VMM **RSS**, including guest RAM;
     shared pages (binary, libraries) count fully.
-  - `cpu.idle_60s` = VMM `utime + stime` delta over the idle window (clock-tick resolution).
+  - `cpu.idle_60s` = VMM process CPU (`utime + stime`, all threads incl. vCPUs) over the idle
+    window: `/proc/<pid>/stat` on Linux (clock-tick resolution), `ps -o time=` on macOS (10 ms).
+    macOS results recorded before this was unified use the id `cpu.helper_idle_60s`.
   - Docker has no VMM, so `mem.vmm_overhead` is `not_measured` there by design.
 - **`mem.guest_available` on Docker** reads the host's `/proc/meminfo` (there is no lxcfs). It
   is recorded but is not a per-sandbox figure.

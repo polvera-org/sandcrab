@@ -1238,16 +1238,21 @@ async fn vmm_proc_iter(
         Ok(v) => out.bytes("mem.guest_available_idle", v),
         Err(e) => out.fail("mem.guest_available_idle", e),
     }
-    // idle CPU of the VMM process (all threads, clock-tick resolution)
-    match sample::proc_cpu_ticks(pid) {
-        Some(a) => {
+    // idle CPU of the whole VMM process (VMM + vCPU threads): /proc/<pid>/stat ticks on Linux,
+    // `ps -o time=` on macOS (10 ms resolution). Same id as the cgroup path so hosts compare;
+    // macOS results before this merge recorded it as `cpu.helper_idle_60s`.
+    match sample::process_cpu_s(pid) {
+        Ok(a) => {
             tokio::time::sleep(plan.idle_window).await;
-            match sample::proc_cpu_ticks(pid) {
-                Some(z) => out.cpu("cpu.idle_60s", sample::ticks_to_s(z.saturating_sub(a))),
-                None => out.skip("cpu.idle_60s", format!("VMM {pid} gone during idle window")),
+            match sample::process_cpu_s(pid) {
+                Ok(z) => out.cpu("cpu.idle_60s", (z - a).max(0.0)),
+                Err(e) => out.skip(
+                    "cpu.idle_60s",
+                    format!("VMM {pid} gone during idle window ({e})"),
+                ),
             }
         }
-        None => out.skip("cpu.idle_60s", "no /proc/<pid>/stat on this host"),
+        Err(e) => out.skip("cpu.idle_60s", e),
     }
     let touch = format!(
         "head -c {}M /dev/urandom > /tmp/bench-touch && cat /tmp/bench-touch > /dev/null",
@@ -1799,7 +1804,9 @@ pub async fn run(plan: &Plan) -> anyhow::Result<(RunResult, PathBuf)> {
         notes.push(
             "libkrun: workspaces are live virtio-fs shares (no attach / sync-back cost); without \
              a cgroup leaf (always on macOS) memory is the helper's RSS (mem.helper_rss_*), \
-             which counts shared pages fully: not comparable with the Linux PSS columns"
+             which counts shared pages fully: not comparable with the Linux PSS columns; \
+             cpu.idle_60s is the helper process's CPU time (VMM + vCPU threads; macOS: \
+             `ps -o time=`, 10 ms resolution)"
                 .into(),
         );
     }
