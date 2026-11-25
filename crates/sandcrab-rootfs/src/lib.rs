@@ -13,6 +13,8 @@
 //! - [`augment`]: streaming tar rewriter that injects `crabd` and the guest mountpoints.
 //! - [`mkfs`]: rootless `mke2fs` strategies (native tar, helper container, fakeroot).
 //! - [`hash`]: SHA-256 helpers.
+//! - [`stamp`]: stat stamps, so a pinned file is verified with one `fstat` and used through
+//!   the verified fd.
 //! - [`error`]: the [`Error`] type, shared with the backends' artifact plumbing.
 
 pub mod arch;
@@ -21,11 +23,13 @@ pub mod cache;
 pub mod error;
 pub mod hash;
 pub mod mkfs;
+pub mod stamp;
 
 pub use arch::Arch;
 pub use cache::*;
 pub use error::{Error, IoCtx, Result};
 pub use mkfs::MkfsStrategy;
+pub use stamp::FileStamp;
 
 use std::path::PathBuf;
 
