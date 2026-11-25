@@ -6,15 +6,12 @@
 name: CI
 
 on:
+  # No `paths-ignore`: some files under docs/ are compiled into the build (include_str!), and a
+  # path-filtered workflow never reports its required checks on docs-only PRs. The `changes` job
+  # decides instead, and `ci-ok` always reports.
   pull_request:
-    paths-ignore:
-      - "docs/**"
-      - "**/*.md"
   push:
     branches: [main]
-    paths-ignore:
-      - "docs/**"
-      - "**/*.md"
   workflow_dispatch:
 
 permissions:
@@ -31,8 +28,53 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  # Decides whether the Rust jobs need to run. Pure docs/markdown PRs skip them; everything else,
+  # and every push / manual run, runs them.
+  changes:
+    name: changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      rust: ${{ steps.diff.outputs.rust }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Classify changed files
+        id: diff
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "rust=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Fail safe: if the diff cannot be computed, run everything.
+          if ! files=$(git diff --name-only "$BASE_SHA" HEAD); then
+            echo "rust=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          printf '%s\n' "$files"
+          rust=false
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            case "$f" in
+              # Compiled into the build: include_str! in sandcrab-bench (results.rs, validity.rs).
+              # Re-grep `include_str!\|include_bytes!` under crates/ when adding paths outside crates/.
+              docs/bench/results/*) rust=true ;;
+              docs/*|*.md) ;;
+              *) rust=true ;;
+            esac
+          done <<< "$files"
+          echo "rust=$rust" | tee -a "$GITHUB_OUTPUT"
+
   fmt:
     name: rustfmt
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -47,12 +89,14 @@ jobs:
 
   check:
     name: clippy + test (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-latest]
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-26]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -77,6 +121,8 @@ jobs:
 
   crabd-musl:
     name: crabd static musl (${{ matrix.arch }})
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     strategy:
@@ -119,3 +165,23 @@ jobs:
             target/${{ matrix.arch }}-unknown-linux-musl/release/crabd.sha256
           retention-days: 3
           if-no-files-found: error
+
+  # branch protection: require only `ci-ok`.
+  # Always reports; skipped jobs (docs-only PRs) count as success, failed or cancelled ones do not.
+  ci-ok:
+    name: ci-ok
+    needs: [changes, fmt, check, crabd-musl]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check needed job results
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "results: $RESULTS"
+          for r in $RESULTS; do
+            case "$r" in
+              failure|cancelled) echo "::error::a required job ended with: $r"; exit 1 ;;
+            esac
+          done
