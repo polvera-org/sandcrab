@@ -538,13 +538,17 @@ impl SandboxHandle for KrunSandbox {
 ///
 /// macOS: a blank image cached per size under `<cache_root>/krun-scratch/` is copied with
 /// `std::fs::copy`, which clones on APFS (instant copy-on-write) and needs `mke2fs` only
-/// once. Linux: a fresh sparse image straight from `mke2fs` (lazy inode tables, a few ms).
+/// once. Linux: a fresh sparse image straight from `mke2fs` (a few ms). Both are
+/// [`sandcrab_rootfs::create_scratch`] images: inode tables pre-zeroed, no guest lazy init.
 pub(crate) fn scratch_disk(cache_root: &Path, size_mib: u64, dest: &Path) -> Result<()> {
     let rootfs_err = |e: sandcrab_rootfs::Error| krun_err("scratch disk", e);
     if cfg!(target_os = "macos") {
         let dir = cache_root.join("krun-scratch");
         fs::create_dir_all(&dir).map_err(|e| io_at(&dir, e))?;
-        let blank = dir.join(format!("blank-{size_mib}.ext4"));
+        let blank = dir.join(format!(
+            "blank-{size_mib}-v{}.ext4",
+            sandcrab_rootfs::SCRATCH_FORMAT_VERSION
+        ));
         if !blank.is_file() {
             let tmp = dir.join(format!(
                 ".blank-{size_mib}.{}.{}.tmp",

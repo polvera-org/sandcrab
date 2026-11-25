@@ -227,6 +227,56 @@ async fn multi_mount_rw_ro_and_default_cwd() {
     .await;
 }
 
+/// Two rw workspaces, one holding a tree larger than a default soft `RLIMIT_NOFILE` (1024):
+/// list it, read every file, then write into both. On libkrun the VMM holds a host fd per
+/// guest-looked-up inode; this used to fail the writes with `EMFILE` (bench W2 cell).
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "e2e: needs a sandbox backend (SANDCRAB_E2E_BACKEND, default docker)"]
+async fn multi_mount_large_tree_then_write_into_both() {
+    const DIRS: usize = 30;
+    const PER_DIR: usize = 100;
+    run("multi-mount-large", |h| async move {
+        let ws = h.ws();
+        let a = h.name("a");
+        let big = h.name("big");
+        ws.create(&a).unwrap();
+        let tree = h.tmp().join("big-tree");
+        for d in 0..DIRS {
+            let dir = tree.join(format!("d{d:02}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            for f in 0..PER_DIR {
+                std::fs::write(dir.join(format!("f{f:03}.bin")), "x").unwrap();
+            }
+        }
+        ws.register_host_dir(&big, &tree).unwrap();
+
+        let sb =
+            h.sc.spawn(
+                SandboxConfig::from_template("base")
+                    .mount(a.as_str(), "/workspace", MountMode::ReadWrite)
+                    .mount(big.as_str(), "/data", MountMode::ReadWrite)
+                    .default_cwd("/workspace"),
+            )
+            .await
+            .unwrap();
+
+        let top = sb.list_dir(Some("/data")).await.unwrap();
+        assert_eq!(top.entries.len(), DIRS, "{top:?}");
+        let bytes = sh(&sb, "find /data -type f -exec cat {} + | wc -c").await;
+        assert_eq!(bytes.trim(), (DIRS * PER_DIR).to_string());
+
+        sb.file_write("/workspace/.sync", "a").await.unwrap();
+        sb.file_write("/data/.sync", "b").await.unwrap();
+        sb.file_write("/data/new/dir/c.txt", "c").await.unwrap();
+        sb.destroy().await.unwrap();
+
+        assert_eq!(ws.read_file(a.as_str(), ".sync").unwrap(), b"a");
+        assert_eq!(std::fs::read(tree.join(".sync")).unwrap(), b"b");
+        assert_eq!(std::fs::read(tree.join("new/dir/c.txt")).unwrap(), b"c");
+    })
+    .await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "e2e: needs a sandbox backend (SANDCRAB_E2E_BACKEND, default docker)"]
 async fn host_side_path_safety() {

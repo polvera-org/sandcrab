@@ -98,9 +98,12 @@ sandcrab/<tpl>:0.1.0 ──docker create+export──▶ rootfs.tar ──augmen
 | Reflink copy | ~ms | Rejected as the default because it is FS-dependent. It can come back as an optimisation |
 | **ro base + scratch + overlayfs** | **~2–5 ms** (sparse copy of a cached, pre-formatted blank ext4) | The base page cache is shared across sandboxes on the host, which helps density. Chosen |
 
-The scratch drive is created by a sparse copy (`SEEK_DATA`/`SEEK_HOLE` via `rustix`) of `cache/blank/<disk_mb>.ext4`.
-That image is made once with `mke2fs -O ^has_journal -E lazy_itable_init=1,lazy_journal_init=1`. Its logical size is
-`ResourceLimits.disk_mb` and its physical size is a few MiB. It is deleted at teardown.
+The scratch drive is created by a sparse copy (`SEEK_DATA`/`SEEK_HOLE` via `rustix`) of `cache/blank/<disk_mb>-v<format>.ext4`.
+That image is made once with `mke2fs -O ^has_journal -E lazy_itable_init=0,lazy_journal_init=1`. Its logical size is
+`ResourceLimits.disk_mb` and its physical size is a few MiB (mke2fs zeroes the inode tables by punching holes). Zeroing
+them at format time keeps the guest's `ext4lazyinit` thread idle: with lazy init, it zeroed them in the first ~5 s after
+every boot, which cost ~0.04 CPU-s/s on the Firecracker main (device-emulation) thread. The per-sandbox copy is deleted
+at teardown.
 
 ## 3. `crabd` as PID 1
 

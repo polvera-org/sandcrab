@@ -33,8 +33,8 @@ use sandcrab_core::{
     SandboxManager, TemplateRegistry, TimingMarks, WorkspaceRegistry,
 };
 use sandcrab_protocol::{
-    BashParams, BashResult, FileWriteParams, FileWriteResult, ProcessPollParams, ProcessPollResult,
-    ProcessStartParams, ProcessStartResult,
+    BashParams, BashResult, FileWriteParams, FileWriteResult, ListDirParams, ListDirResult,
+    ProcessPollParams, ProcessPollResult, ProcessStartParams, ProcessStartResult,
 };
 
 fn root() -> PathBuf {
@@ -437,6 +437,88 @@ async fn share_root_is_pinned_by_fd() {
         "after\n"
     );
     assert!(!env.project.join("after.txt").exists());
+    sb.destroy().await.unwrap();
+    assert!(leftovers(&env).is_empty());
+    assert!(no_helper_left());
+}
+
+/// Two workspaces, one of them holding more files than the host's default soft
+/// `RLIMIT_NOFILE` (1024). Linux libkrun's passthrough server keeps one `O_PATH` fd per inode
+/// the guest has looked up, until the guest forgets it, so walking the big tree used to exhaust
+/// the helper's fd table: the next host `openat` (a guest create) failed with `EMFILE`
+/// ("No file descriptors available", the bench W2 cell). The helper raises its soft limit.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "real libkrun: signed helper, pinned libkrun, pinned sandcrab/base:0.1.0, static crabd"]
+async fn two_workspaces_many_files_then_write_into_both() {
+    const DIRS: usize = 30;
+    const PER_DIR: usize = 100;
+    let env = env();
+    let bulk = env.tmp.path().join("bulk");
+    for d in 0..DIRS {
+        let dir = bulk.join(format!("d{d:02}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        for f in 0..PER_DIR {
+            std::fs::write(dir.join(format!("f{f:03}.txt")), "x").unwrap();
+        }
+    }
+    env.manager
+        .workspaces()
+        .register_host_dir("bulk", &bulk)
+        .unwrap();
+    let sb = env
+        .manager
+        .spawn(
+            SandboxConfig::from_template("base")
+                .mount("project", "/workspace", MountMode::ReadWrite)
+                .mount("bulk", "/data", MountMode::ReadWrite),
+        )
+        .await
+        .unwrap();
+
+    // What the bench W2 cell does first: crabd list_dir (depth 1) of both shares.
+    for path in ["/workspace", "/data"] {
+        let l = sb
+            .call::<ListDirResult>(ListDirParams {
+                path: Some(path.into()),
+                depth: Some(1),
+                respect_gitignore: false,
+            })
+            .await;
+        assert!(l.is_ok(), "list_dir {path}: {l:?}");
+    }
+    // Then look up (and keep cached) every inode of the big share: `find -type f` alone
+    // reads d_type and never stats a file, so open each one.
+    let r = bash(&sb, "find /data -type f -exec cat {} + | wc -c").await;
+    assert_eq!(r.exit_code, Some(0), "{r:?}");
+    assert_eq!(r.stdout.trim(), (DIRS * PER_DIR).to_string(), "{r:?}");
+
+    for (path, host) in [
+        ("/workspace/.bench-sync", env.project.join(".bench-sync")),
+        ("/data/.bench-sync", bulk.join(".bench-sync")),
+    ] {
+        let w = sb
+            .call::<FileWriteResult>(FileWriteParams {
+                path: path.into(),
+                content: "sync".into(),
+                append: false,
+            })
+            .await;
+        assert!(w.is_ok(), "write {path}: {w:?}");
+        assert_eq!(std::fs::read_to_string(&host).unwrap(), "sync", "{path}");
+    }
+    // And a fresh file in a new dir of each share, through the shell.
+    let r = bash(
+        &sb,
+        "mkdir -p /workspace/n /data/n && echo a > /workspace/n/a && echo b > /data/n/b",
+    )
+    .await;
+    assert_eq!(r.exit_code, Some(0), "{r:?}");
+    assert_eq!(
+        std::fs::read_to_string(env.project.join("n/a")).unwrap(),
+        "a\n"
+    );
+    assert_eq!(std::fs::read_to_string(bulk.join("n/b")).unwrap(), "b\n");
+
     sb.destroy().await.unwrap();
     assert!(leftovers(&env).is_empty());
     assert!(no_helper_left());
