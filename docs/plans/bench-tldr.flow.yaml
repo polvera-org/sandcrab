@@ -32,7 +32,7 @@ steps:
     title: "sandcrab-bench: (1) preflight (~2 min: load, disk type, short drift probe) that predicts an invalid run before a long one starts; (2) tier-aware validity (valid for smoke/standard/full by each tier's own rules; 'full' stays the publish bar); recompute for committed results; full report shows it"
     depends_on: [tldr-plan]
     artifacts: [crates/sandcrab-bench/, docs/bench/results/schema.json, scripts/bench-report-data.py, docs/site/bench-report.html, docs/bench/README.md]
-    status: doing
+    status: done
 
   - id: tldr-links
     phase: implement
@@ -47,14 +47,14 @@ steps:
     agent: nebula
     title: "Review: every number traces to the JSON, host/hardware labels present and comparisons within-host, no private hostnames, links work; bench-validity preflight + tier validity logic"
     depends_on: [tldr-links, bench-validity]
-    status: todo
+    status: doing
 
   - id: tldr-live
     phase: verify
     agent: nova
     title: "Live check in the browser: light + dark, phone width, landing → TL;DR → full report"
     depends_on: [tldr-links]
-    status: todo
+    status: doing
 
   - id: tldr-docs
     phase: document
