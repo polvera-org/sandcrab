@@ -13,6 +13,12 @@
 //!   `TMPDIR=$HOME/.tmp` (or a dir under the workspace) instead;
 //! - core dumps disabled (`RLIMIT_CORE` soft = hard = 0): a crashing process must not
 //!   drop `core.*` files into the cwd, which is usually a persistent workspace;
+//! - no `sysctls`: the hardening sysctls `crabd init` sets in the microVM guests
+//!   (`sandcrab_protocol::init::HARDENING_SYSCTLS`) are not network/IPC-namespaced, so
+//!   Docker refuses them per container and they stay host-level. Docker's own defaults cover
+//!   the same ground: its seccomp profile (no `unshare`/`clone` of namespaces, `bpf`,
+//!   `userfaultfd`, `perf_event_open`, `io_uring` without capabilities), a read-only `/sys`
+//!   and read-only `/proc/sys` (`ReadonlyPaths`). See `docs/design/guest-seccomp.md`;
 //! - runs as the **host** uid:gid unless the spec overrides it, so files written to
 //!   bind-mounted workspaces stay editable on the host;
 //! - network `none` unless the policy is `unrestricted`; published ports bind to

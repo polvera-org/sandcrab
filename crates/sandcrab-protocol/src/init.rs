@@ -49,6 +49,91 @@ pub const SANDBOX_PIDS_MAX: u32 = 1024;
 /// `tmp_size_mb`; `crabd init` mounts the same tmpfs in microVM guests.
 pub const SANDBOX_TMP_SIZE_MB: u64 = 256;
 
+/// One guest kernel sysctl that `crabd init` hardens before any sandbox code runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HardeningSysctl {
+    /// Dotted name (`kernel.kptr_restrict`), the file under `/proc/sys` with `.` → `/`.
+    pub key: &'static str,
+    /// Accepted hardened values, most preferred first: init writes them in order until one
+    /// sticks. A value outside this list read back from a guest is a hardening failure.
+    pub values: &'static [&'static str],
+}
+
+/// The guest sysctls `crabd init` sets on the microVM backends (Docker cannot: they are not
+/// namespaced, so they stay host-level there; its seccomp profile covers the same syscalls).
+/// Each is set only if the kernel has it; one that is missing or refused is logged, never
+/// fatal. `/proc/sys` is then made read-only, so not even a uid-0 sandbox user can undo them.
+pub const HARDENING_SYSCTLS: &[HardeningSysctl] = &[
+    // No unprivileged user namespaces (the gate to most "unprivileged" kernel attack
+    // surface). The first is a Debian/Ubuntu patch; the second is mainline.
+    HardeningSysctl {
+        key: "kernel.unprivileged_userns_clone",
+        values: &["0"],
+    },
+    HardeningSysctl {
+        key: "user.max_user_namespaces",
+        values: &["0"],
+    },
+    // 1 is sticky (cannot be reset until reboot); 2 is the kernel's "off, but resettable".
+    HardeningSysctl {
+        key: "kernel.unprivileged_bpf_disabled",
+        values: &["1", "2"],
+    },
+    HardeningSysctl {
+        key: "vm.unprivileged_userfaultfd",
+        values: &["0"],
+    },
+    // 2: io_uring_setup fails for everyone; 1: only for unprivileged processes.
+    HardeningSysctl {
+        key: "kernel.io_uring_disabled",
+        values: &["2", "1"],
+    },
+    // 3 (Debian patch: no perf_event_open for unprivileged users); mainline treats >= 2
+    // as 2 (no kernel profiling).
+    HardeningSysctl {
+        key: "kernel.perf_event_paranoid",
+        values: &["3", "2"],
+    },
+    HardeningSysctl {
+        key: "kernel.kptr_restrict",
+        values: &["2"],
+    },
+    HardeningSysctl {
+        key: "kernel.dmesg_restrict",
+        values: &["1"],
+    },
+    HardeningSysctl {
+        key: "fs.protected_symlinks",
+        values: &["1"],
+    },
+    HardeningSysctl {
+        key: "fs.protected_hardlinks",
+        values: &["1"],
+    },
+    HardeningSysctl {
+        key: "fs.protected_fifos",
+        values: &["2", "1"],
+    },
+    HardeningSysctl {
+        key: "fs.protected_regular",
+        values: &["2", "1"],
+    },
+    HardeningSysctl {
+        key: "fs.suid_dumpable",
+        values: &["0"],
+    },
+];
+
+/// `/proc` paths `crabd init` bind-mounts read-only over themselves: Docker's default
+/// `ReadonlyPaths`. Missing ones are skipped.
+pub const PROC_READONLY_PATHS: &[&str] = &[
+    "/proc/bus",
+    "/proc/fs",
+    "/proc/irq",
+    "/proc/sys",
+    "/proc/sysrq-trigger",
+];
+
 /// `init.configure` params: everything the guest needs that is not baked into the rootfs.
 ///
 /// Delivered over vsock (not the kernel cmdline or MMDS): `env` may carry secrets, and the
@@ -563,5 +648,27 @@ mod tests {
         let b: MountSource =
             serde_json::from_value(json!({ "source": "block", "drive_id": "ws0" })).unwrap();
         assert_eq!(b.drive_id(), Some("ws0"));
+    }
+
+    #[test]
+    fn hardening_sysctls_are_well_formed() {
+        let mut keys = std::collections::BTreeSet::new();
+        for s in HARDENING_SYSCTLS {
+            assert!(keys.insert(s.key), "duplicate {}", s.key);
+            assert!(!s.values.is_empty(), "{}", s.key);
+            assert!(
+                s.key.split('.').all(|p| !p.is_empty()
+                    && p.bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')),
+                "{}",
+                s.key
+            );
+            for v in s.values {
+                assert!(v.parse::<i64>().is_ok(), "{}={v}", s.key);
+            }
+        }
+        for p in PROC_READONLY_PATHS {
+            assert!(p.starts_with("/proc/") && !p.contains(".."), "{p}");
+        }
     }
 }

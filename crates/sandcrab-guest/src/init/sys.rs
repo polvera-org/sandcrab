@@ -288,12 +288,39 @@ pub fn enter_cgroup(dir: &Path) -> io::Result<()> {
 /// sandbox user is uid 0: without capabilities it could still write `pids.max` through the
 /// owner permission bits, but it can neither write a read-only mount nor remount it.
 pub fn seal_cgroupfs() -> io::Result<()> {
-    rustix::mount::mount_remount(
-        CGROUP_ROOT,
-        MountFlags::BIND | MountFlags::RDONLY | NOSUID_NODEV_NOEXEC,
-        "",
-    )
-    .map_err(|e| ctx(e, "remount cgroupfs read-only"))
+    rustix::mount::mount_remount(CGROUP_ROOT, SEALED, "")
+        .map_err(|e| ctx(e, "remount cgroupfs read-only"))
+}
+
+/// sysfs mount point.
+pub const SYSFS: &str = "/sys";
+
+/// Flags of the read-only bind remounts below.
+const SEALED: MountFlags = MountFlags::BIND
+    .union(MountFlags::RDONLY)
+    .union(NOSUID_NODEV_NOEXEC);
+
+/// Make `/sys` read-only, as Docker mounts sysfs in a container. Its per-mount flag only:
+/// the cgroup v2 mount below it is a separate mount, sealed by [`seal_cgroupfs`]. PID 1 is
+/// done with sysfs by now (block devices are scanned, the pids cgroup is set up).
+/// Without capabilities the sandbox cannot remount it, even as uid 0, who would otherwise
+/// pass the permission bits of root-owned attributes.
+pub fn seal_sysfs() -> io::Result<()> {
+    rustix::mount::mount_remount(SYSFS, SEALED, "").map_err(|e| ctx(e, "remount /sys read-only"))
+}
+
+/// Bind-mount `path` read-only over itself (Docker's `ReadonlyPaths`, see
+/// [`sandcrab_protocol::init::PROC_READONLY_PATHS`]). Works on files and directories.
+/// `Ok(false)` when `path` does not exist.
+pub fn seal_readonly_path(path: &Path) -> io::Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    rustix::mount::mount_bind(path, path)
+        .map_err(|e| ctx(e, format!("bind {}", path.display())))?;
+    rustix::mount::mount_remount(path, SEALED, "")
+        .map_err(|e| ctx(e, format!("remount {} read-only", path.display())))?;
+    Ok(true)
 }
 
 /// The `RLIMIT_NPROC` fallback when there is no `pids` controller: set on PID 1 (root is
