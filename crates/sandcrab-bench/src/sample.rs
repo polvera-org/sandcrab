@@ -253,23 +253,22 @@ pub async fn sample_memory(dir: &Path, window: Duration) -> Vec<u64> {
 }
 
 /// Sampler self-overhead: run the 10 Hz cgroup read loop on a dedicated thread for `window`
-/// and return its CPU use as % of one core.
+/// and return its CPU use as % of one core; `None` without a per-thread CPU clock (macOS).
 #[must_use]
-pub fn sampler_cpu_pct(dir: &Path, window: Duration) -> f64 {
+pub fn sampler_cpu_pct(dir: &Path, window: Duration) -> Option<f64> {
     let dir = dir.to_path_buf();
     std::thread::spawn(move || {
-        let (Some(c0), t0) = (thread_cpu_ns(), Instant::now()) else {
-            return f64::NAN;
-        };
+        let (c0, t0) = (thread_cpu_ns()?, Instant::now());
         while t0.elapsed() < window {
             let _ = read_cgroup(&dir);
             std::thread::sleep(Duration::from_millis(100));
         }
         let c1 = thread_cpu_ns().unwrap_or(c0);
-        (c1 - c0) as f64 / t0.elapsed().as_nanos() as f64 * 100.0
+        Some((c1 - c0) as f64 / t0.elapsed().as_nanos() as f64 * 100.0)
     })
     .join()
-    .unwrap_or(f64::NAN)
+    .ok()
+    .flatten()
 }
 
 #[cfg(test)]

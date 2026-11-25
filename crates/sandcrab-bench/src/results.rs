@@ -144,8 +144,9 @@ pub struct Noise {
 pub struct HarnessOverhead {
     /// Median cost of timing an empty future.
     pub noop_overhead_ns: f64,
-    /// CPU used by the 10 Hz cgroup sampler, % of one core.
-    pub sampler_cpu_pct: f64,
+    /// CPU used by the 10 Hz cgroup sampler, % of one core. `None` (JSON `null`) where it
+    /// cannot be measured: no cgroups and no per-thread CPU clock in procfs (macOS).
+    pub sampler_cpu_pct: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -437,6 +438,18 @@ mod tests {
         assert_eq!(v["backends"][0]["todo"], true);
         assert!(v["cells"][0]["metrics"]["spawn_ready"]["stats"]["p50_ci95"].is_array());
         assert!(v["host"]["storage"]["type"].is_string());
+    }
+
+    #[test]
+    fn sampler_cpu_pct_null_round_trips() {
+        // macOS has no cgroup sampler: the value is `null` on the wire and must read back.
+        let mut r = sample();
+        r.harness.sampler_cpu_pct = None;
+        let json = serde_json::to_string(&r).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(v["harness"]["sampler_cpu_pct"].is_null());
+        let back: RunResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.harness.sampler_cpu_pct, None);
     }
 
     #[test]
