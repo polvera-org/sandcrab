@@ -47,7 +47,7 @@ steps:
     agent: nebula
     title: "Review: every number traces to the JSON, host/hardware labels present and comparisons within-host, no private hostnames, links work; bench-validity preflight + tier validity logic"
     depends_on: [tldr-links, bench-validity]
-    status: doing
+    status: done
 
   - id: tldr-live
     phase: verify
@@ -56,10 +56,18 @@ steps:
     depends_on: [tldr-links]
     status: done
 
+  - id: tldr-fixes
+    phase: implement
+    agent: ada
+    title: "Review fixes: R1 takeaway 03 claim + check_claims over all measured microVMs, R2 name host in agent-turn range, R3 label the separate libkrun run, R9/R10 preflight probe-samples floor + transient spawn retry"
+    depends_on: [tldr-review]
+    artifacts: [scripts/bench-tldr-data.py, docs/site/benchmarks.html, crates/sandcrab-bench/]
+    status: doing
+
   - id: tldr-docs
     phase: document
     agent: rosetta
     title: "docs/bench/README.md: TL;DR page generation, preflight, tier validity; AGENTS.md bench tiers note; CHANGELOG"
-    depends_on: [tldr-review, tldr-live]
+    depends_on: [tldr-fixes, tldr-live]
     artifacts: [docs/bench/README.md, CHANGELOG.md]
     status: todo
