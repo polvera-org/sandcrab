@@ -165,7 +165,7 @@ Prints the LLM tool definitions: name, description, input and output JSON Schema
 | Variable | Used by | |
 | --- | --- | --- |
 | `SANDCRAB_HOME` | CLI, SDK, crabagent | State root (default `~/.sandcrab`) |
-| `SANDCRAB_BACKEND` | CLI, crabagent | `docker` or `firecracker` |
+| `SANDCRAB_BACKEND` | CLI, crabagent | `docker`, `firecracker` (Linux) or `libkrun` (macOS Apple Silicon, Linux) |
 | `SANDCRAB_ALLOW_INSECURE` | CLI, crabagent | **Deprecated no-op**: prints a warning, no other effect |
 | `SANDCRAB_CRABD` | CLI, SDK, crabagent, bench | Path of the static `crabd` |
 | `RUST_LOG` | `crabd` | Log filter (default `info`) |
