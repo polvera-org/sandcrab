@@ -38,6 +38,7 @@ PAGES = {
     "index.html": None,
     "walkthrough.html": "walkthrough",
     "bench-report.html": "bench",
+    "benchmarks.html": "bench",
     "symbology.html": "symbology",
     "presentation.html": "presentation",
 }

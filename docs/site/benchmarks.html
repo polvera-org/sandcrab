@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sandcrab Benchmarks</title>
+<meta name="description" content="Sandcrab backend benchmarks at a glance: time to a ready sandbox, memory and idle CPU for Docker, Firecracker and libkrun, host by host. Every number is rendered from the committed results JSON.">
+<meta name="color-scheme" content="light">
+<meta name="theme-color" content="#FAFAF7">
+<link rel="icon" href="assets/brand/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="assets/brand/favicon-32.png" type="image/png" sizes="32x32">
+<link rel="apple-touch-icon" href="assets/brand/apple-touch-icon.png" sizes="180x180">
+<link rel="stylesheet" href="assets/brand/brand.css">
+<script src="assets/brand/theme.js"></script>
+<style>
+.wrap { max-width:1280px; margin:0 auto; padding:0 var(--gutter); }
+body { overflow-x:hidden; }
+h1, h2, h3 { margin:0; }
+h2 { font-size:clamp(28px,3.4vw,46px); font-weight:800; font-stretch:86%; letter-spacing:-.03em; line-height:.98; }
+p { margin:10px 0; }
+.muted { color:var(--ink-2); }
+
+/* hero */
+.hero { padding-top:clamp(36px,6vw,80px); }
+.hero .kicker { margin:0 0 16px; }
+.hero h1 { font-size:clamp(38px,6vw,84px); font-stretch:78%; line-height:.92; letter-spacing:-.01em; text-transform:uppercase; max-width:16ch; }
+.hero .lede { font-size:clamp(18px,1.6vw,21px); line-height:1.5; color:var(--ink-2); max-width:42em; margin-top:22px; }
+.hero .lede strong { color:var(--ink); }
+.hero .go { margin-top:22px; display:flex; flex-wrap:wrap; gap:10px; }
+
+section { padding:clamp(48px,6vw,88px) 0 0; }
+.sec-head { display:flex; gap:16px; align-items:flex-end; margin-bottom:10px; padding-top:16px; border-top:2px solid var(--ink); }
+.sec-head .g { width:48px; height:48px; flex:none; color:var(--ink); }
+.sec-head .g svg { width:100%; height:100%; display:block; }
+.sec-head .num { font:400 11.5px/1.4 var(--mono); text-transform:uppercase; letter-spacing:.16em; color:var(--ink-3); display:block; margin-bottom:8px; }
+.intro { max-width:52em; font-size:15.5px; }
+
+/* host blocks */
+#hosts { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:0 28px; }
+.host { margin-top:26px; min-width:0; grid-column:span var(--n); }
+.host-h { display:flex; flex-wrap:wrap; align-items:baseline; gap:4px 14px; padding-bottom:8px; border-bottom:1px solid var(--line); }
+.host-h .hid { font:800 21px/1.1 var(--display); font-stretch:88%; letter-spacing:-.015em; }
+.host-h .hw { font:400 12px/1.4 var(--mono); color:var(--ink-2); }
+.tiles { display:grid; grid-template-columns:repeat(var(--n),minmax(0,1fr)); gap:0 28px; }
+.tile { padding:16px 0 18px; border-bottom:1px solid var(--line); min-width:0; }
+.tile .k { font:400 11px/1.4 var(--mono); text-transform:uppercase; letter-spacing:.14em; color:var(--ink-3); display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.tile .k b { font-weight:500; color:var(--ink); }
+.bdot { display:inline-block; width:10px; height:10px; border-radius:3px; flex:none; }
+.iso { font:500 10px/1 var(--mono); letter-spacing:.08em; padding:4px 7px; border-radius:999px; border:1px solid var(--line-2); color:var(--ink-2); }
+.iso.hw { border-color:var(--teal); color:var(--teal-text); background:var(--teal-soft); }
+.tile .v { font:800 clamp(46px,5vw,72px)/.95 var(--display); font-stretch:80%; letter-spacing:-.03em; margin:12px 0 8px; font-variant-numeric:tabular-nums; }
+.tile .v small { font-size:.36em; font-weight:600; font-stretch:100%; letter-spacing:0; color:var(--ink-2); margin-left:.2em; }
+.tile .bar { height:6px; border-radius:3px; background:var(--bg-2); overflow:hidden; margin:0 0 8px; }
+.tile .bar i { display:block; height:100%; border-radius:3px; }
+.tile .p95 { font:400 12px/1.4 var(--mono); color:var(--ink-3); }
+.tile .row { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; margin-top:12px; padding-top:10px; border-top:1px dashed var(--line); }
+.tile .row dt { font:400 10px/1.3 var(--mono); text-transform:uppercase; letter-spacing:.1em; color:var(--ink-3); }
+.tile .row dd { margin:3px 0 0; font:600 15px/1.2 var(--font); font-variant-numeric:tabular-nums; }
+.tile .note { font-size:13px; color:var(--warn); margin:10px 0 0; }
+.tile.soon .v { color:var(--ink-3); font-size:clamp(30px,3vw,40px); font-stretch:84%; text-transform:uppercase; margin-top:18px; }
+.tile.soon p { font-size:13.5px; color:var(--ink-2); margin:6px 0 0; }
+
+/* footprint */
+.fp { margin-top:22px; border-top:2px solid var(--ink); }
+.fp-row { display:grid; grid-template-columns:minmax(0,1.25fr) repeat(3,minmax(0,1fr)); gap:16px; padding:14px 0; border-bottom:1px solid var(--line); align-items:start; }
+.fp-head { font:400 10.5px/1.4 var(--mono); text-transform:uppercase; letter-spacing:.14em; color:var(--ink-3); padding:10px 0; }
+.fp-who b { display:flex; align-items:center; gap:8px; font:700 17px/1.2 var(--display); font-stretch:92%; }
+.fp-who span { display:block; font:400 11.5px/1.4 var(--mono); color:var(--ink-3); margin-top:3px; }
+.fp-v { font:800 30px/1 var(--display); font-stretch:82%; letter-spacing:-.02em; font-variant-numeric:tabular-nums; }
+.fp-v small { font-size:.5em; font-weight:600; font-stretch:100%; color:var(--ink-2); margin-left:.15em; letter-spacing:0; }
+.fp-s { font-size:12.5px; color:var(--ink-2); margin-top:4px; line-height:1.4; }
+.fp-na { font-size:13.5px; color:var(--ink-3); padding-top:6px; }
+.fp-l { display:none; }
+
+/* conclusions */
+.means { list-style:none; padding:0; margin:22px 0 0; display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr)); gap:0 28px; counter-reset:m; }
+.means li { border-top:2px solid var(--rust); padding:16px 0 4px; font-size:16.5px; line-height:1.5; }
+.means li::before { counter-increment:m; content:counter(m, decimal-leading-zero); display:block; font:800 32px/1 var(--display); font-stretch:80%; color:var(--rust-text); margin-bottom:10px; }
+.means strong { color:var(--ink); }
+
+/* footer block */
+.full { margin-top:clamp(48px,6vw,80px); padding:26px 0 0; border-top:2px solid var(--ink); display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1.6fr); gap:20px 40px; align-items:start; }
+.full h2 { font-size:clamp(26px,3vw,38px); }
+.full p { font-size:15px; color:var(--ink-2); }
+.runs { list-style:none; margin:0; padding:0; font-size:14px; }
+.runs li { padding:10px 0; border-bottom:1px solid var(--line); }
+.runs li:first-child { padding-top:0; }
+.runs b { font-weight:600; }
+.runs .hw { color:var(--ink-2); }
+.runs .r { display:block; font:400 12px/1.6 var(--mono); color:var(--ink-3); overflow-wrap:anywhere; }
+
+@media (max-width:980px) {
+  #hosts { grid-template-columns:1fr; }
+  .host { grid-column:auto; }
+}
+@media (max-width:640px) {
+  .tiles { grid-template-columns:1fr; }
+}
+@media (max-width:760px) {
+  .fp-head { display:none; }
+  .fp-row { grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px 12px; }
+  .fp-who { grid-column:1 / -1; }
+  .fp-l { display:block; font:400 9.5px/1.3 var(--mono); text-transform:uppercase; letter-spacing:.1em; color:var(--ink-3); margin-bottom:5px; }
+  .fp-v { font-size:24px; }
+  .full { grid-template-columns:1fr; }
+}
+@media (max-width:420px) {
+  .tile .row dd { font-size:14px; }
+  .sec-head .g { width:40px; height:40px; }
+}
+</style>
+</head>
+<body>
+<!-- SITE-HEADER:BEGIN -->
+<a class="sr-only" href="#main" onfocus="this.classList.remove('sr-only')" onblur="this.classList.add('sr-only')">Skip to content</a>
+<header class="site-bar">
+  <div class="site-bar-in">
+    <a class="site-brand" href="landing/index.html" aria-label="Sandcrab home"><svg class="site-logo" viewBox="-21 -17 42 31" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M-9 4l-5 5M-5 6l-3 6M9 4l5 5M5 6l3 6"/><path d="M-9 -1l-5 -5M9 -1l5 -5"/><circle cx="-16" cy="-8" r="4.2" fill="currentColor"/><circle cx="16" cy="-8" r="4.2" fill="currentColor"/><path d="M-4 -7l-1 -4M4 -7l1 -4"/><path d="M-12 3a12 10 0 0 1 24 0q0 4 -12 4t-12 -4z" fill="currentColor"/><g stroke="none"><circle cx="-5" cy="-12" r="2.8" fill="currentColor"/><circle cx="5" cy="-12" r="2.8" fill="currentColor"/><circle class="eye" cx="-5" cy="-12" r="1.15"/><circle class="eye" cx="5" cy="-12" r="1.15"/></g></svg><span>Sandcrab</span></a>
+    <nav class="site-nav" aria-label="Site"><a href="landing/index.html">Home</a><a href="walkthrough.html">Walkthrough</a><a href="bench-report.html" aria-current="page">Benchmarks</a><a href="symbology.html">Symbology</a><a href="presentation.html">Presentation</a><a href="https://github.com/polvera-org/sandcrab/tree/main/docs" target="_blank" rel="noopener">Docs<span class="sr-only"> (opens in a new tab)</span></a></nav>
+    <div class="site-actions"><a class="icon-btn" href="https://github.com/polvera-org/sandcrab" target="_blank" rel="noopener" aria-label="Sandcrab on GitHub (opens in a new tab)"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" d="M12 .5a11.5 11.5 0 0 0-3.64 22.41c.58.1.79-.25.79-.56v-2c-3.2.7-3.88-1.37-3.88-1.37-.52-1.33-1.28-1.69-1.28-1.69-1.05-.71.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.69 0-1.26.45-2.28 1.18-3.09-.12-.29-.51-1.46.11-3.04 0 0 .97-.31 3.17 1.18a11 11 0 0 1 5.76 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.58.23 2.75.11 3.04.74.81 1.18 1.83 1.18 3.09 0 4.42-2.7 5.4-5.27 5.68.41.36.78 1.06.78 2.14v3.17c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .5Z"/></svg></a><button class="icon-btn" type="button" data-theme-toggle aria-pressed="false" aria-label="Light theme on. Switch to dark theme"><svg class="ico ico-light" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2.5M12 19v2.5M2.5 12H5M19 12h2.5M5.3 5.3l1.8 1.8M16.9 16.9l1.8 1.8M5.3 18.7l1.8-1.8M16.9 7.1l1.8-1.8"/></svg><svg class="ico ico-dark" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z"/></svg></button><a class="pill pill-sm" href="landing/index.html#start">Quickstart</a></div>
+  </div>
+</header>
+<!-- SITE-HEADER:END -->
+<main id="main">
+
+<div class="wrap hero">
+  <p class="kicker">Benchmarks · the short version</p>
+  <h1>How fast is a Sandcrab sandbox?</h1>
+  <p class="lede" id="lede"></p>
+  <div class="go"><a class="pill pill-quiet pill-sm" href="bench-report.html">See full benchmark →</a></div>
+</div>
+
+<div class="wrap">
+
+<section id="speed">
+  <div class="sec-head"><span class="g" data-glyph="tide-clock"></span><div><span class="num">01 · Speed</span><h2>Time to a ready sandbox</h2></div></div>
+  <p class="muted intro">Median (p50) from <code>spawn()</code> until the agent inside the sandbox answers, p95 in small print. Backends are compared within a host only; each host is labelled with its hardware.</p>
+  <div id="hosts"></div>
+</section>
+
+<section id="footprint">
+  <div class="sec-head"><span class="g" data-glyph="reef"></span><div><span class="num">02 · Footprint</span><h2>What an idle sandbox costs</h2></div></div>
+  <p class="muted intro" id="fp-intro"></p>
+  <div class="fp" id="fp"></div>
+</section>
+
+<section id="means">
+  <div class="sec-head"><span class="g" data-glyph="isolation"></span><div><span class="num">03 · What it means</span><h2>The takeaways</h2></div></div>
+  <ol class="means" id="means-list"></ol>
+</section>
+
+<div class="full">
+  <div>
+    <h2>Want the details?</h2>
+    <p>Distributions, phase breakdowns, every metric, the method and how to reproduce it.</p>
+    <a class="pill" href="bench-report.html">See full benchmark →</a>
+  </div>
+  <ul class="runs" id="runs"></ul>
+</div>
+</div>
+</main>
+<!-- SITE-FOOTER:BEGIN note="Sandcrab benchmarks · every number is rendered from the committed results JSON." -->
+<footer class="site-foot">
+  <div class="site-foot-in">
+    <svg class="site-logo" viewBox="-21 -17 42 31" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M-9 4l-5 5M-5 6l-3 6M9 4l5 5M5 6l3 6"/><path d="M-9 -1l-5 -5M9 -1l5 -5"/><circle cx="-16" cy="-8" r="4.2" fill="currentColor"/><circle cx="16" cy="-8" r="4.2" fill="currentColor"/><path d="M-4 -7l-1 -4M4 -7l1 -4"/><path d="M-12 3a12 10 0 0 1 24 0q0 4 -12 4t-12 -4z" fill="currentColor"/><g stroke="none"><circle cx="-5" cy="-12" r="2.8" fill="currentColor"/><circle cx="5" cy="-12" r="2.8" fill="currentColor"/><circle class="eye" cx="-5" cy="-12" r="1.15"/><circle class="eye" cx="5" cy="-12" r="1.15"/></g></svg>
+    <nav aria-label="Footer"><a href="landing/index.html">Home</a><a href="walkthrough.html">Walkthrough</a><a href="bench-report.html">Benchmarks</a><a href="symbology.html">Symbology</a><a href="presentation.html">Presentation</a><a href="https://github.com/polvera-org/sandcrab/tree/main/docs" target="_blank" rel="noopener">Docs<span class="sr-only"> (opens in a new tab)</span></a><a href="https://github.com/polvera-org/sandcrab" target="_blank" rel="noopener">GitHub<span class="sr-only"> (opens in a new tab)</span></a></nav>
+    <p>Sandcrab benchmarks · every number is rendered from the committed results JSON.</p>
+  </div>
+</footer>
+<!-- SITE-FOOTER:END -->
+
+<!-- TLDR-DATA:BEGIN -->
+<script id="tldr-data" type="application/json">{"generator":"scripts/bench-tldr-data.py","hosts":[{"id":"kvm-dedicated","label":"Bare-metal Xeon D-2141I, HDD","kind":"bare-metal","cpu":"Xeon D-2141I","storage":"HDD","cores":8,"threads":16,"mem_gib":31,"backends":[{"backend":"libkrun","spawn_ready":{"p50":424081190.0,"p95":436430940.95,"n":30},"teardown":{"p50":67884745.5,"p95":87513979.74999997,"n":30},"first_call":{"p50":10844531.5,"p95":11623929.55,"n":30},"agent_turn":{"p50":793457121.0,"p95":830372224.35,"n":30},"mem_idle":{"bytes":66050048.0,"kind":"cgroup memory","n":10},"cpu_idle":{"cpu_s":0.043424500000000005,"window_s":60},"shared_daemons_bytes":null,"density":{"max_n":16,"cap":16,"reps":3,"all_capped":true},"hardware_isolated":true,"multi_tenant_safe":false,"file":"20261125T014108Z-kvm-dedicated.json"},{"backend":"firecracker","spawn_ready":{"p50":685173921.5,"p95":693769100.55,"n":30},"teardown":{"p50":62106431.0,"p95":80299710.65,"n":30},"first_call":{"p50":24044365.0,"p95":24466792.9,"n":30},"agent_turn":{"p50":995088578.5,"p95":1018205097.55,"n":30},"mem_idle":null,"cpu_idle":null,"shared_daemons_bytes":null,"density":{"max_n":16,"cap":16,"reps":3,"all_capped":true},"hardware_isolated":true,"multi_tenant_safe":false,"file":"20261124T183907Z-kvm-dedicated.json"},{"backend":"docker","spawn_ready":{"p50":1543454896.0,"p95":1976295326.4999998,"n":30},"teardown":{"p50":1122623253.5,"p95":1353244037.05,"n":30},"first_call":{"p50":3434985.5,"p95":4410704.35,"n":30},"agent_turn":{"p50":2701651924.5,"p95":2923004560.45,"n":30},"mem_idle":{"bytes":2095104.0,"kind":"cgroup memory","n":30},"cpu_idle":{"cpu_s":0.0022605000000000004,"window_s":60},"shared_daemons_bytes":173277184,"density":{"max_n":16,"cap":16,"reps":3,"all_capped":true},"hardware_isolated":false,"multi_tenant_safe":false,"file":"20261124T183907Z-kvm-dedicated.json"}],"runs":[{"file":"20261124T183907Z-kvm-dedicated.json","role":"primary","date":"2026-11-24","commit":"65f4a2c-dirty","backends":["docker","firecracker"]},{"file":"20261125T014108Z-kvm-dedicated.json","role":"primary","date":"2026-11-25","commit":"97d116c","backends":["libkrun"]}]},{"id":"mac-m2","label":"Apple M2 laptop, SSD","kind":"bare-metal","cpu":"Apple M2","storage":"SSD","cores":8,"threads":8,"mem_gib":16,"backends":[{"backend":"libkrun","spawn_ready":{"p50":159012645.5,"p95":166106226.9,"n":30},"teardown":{"p50":29117062.0,"p95":30815720.65,"n":30},"first_call":{"p50":2913187.5,"p95":12501717.0,"n":30},"agent_turn":{"p50":403387500.5,"p95":415440894.29999995,"n":30},"mem_idle":{"bytes":119005184.0,"kind":"helper RSS","n":30},"cpu_idle":{"cpu_s":0.06,"window_s":60},"shared_daemons_bytes":null,"density":{"max_n":16,"cap":16,"reps":3,"all_capped":true},"hardware_isolated":true,"multi_tenant_safe":false,"file":"20261124T222350Z-mac-m2.json"},{"backend":"docker","pending":true}],"runs":[{"file":"20261124T222350Z-mac-m2.json","role":"primary","date":"2026-11-24","commit":"18aa046","backends":["libkrun"]},{"file":"20261125T020230Z-mac-m2.json","role":"density","date":"2026-11-25","commit":"18aa046","backends":["libkrun"]}]},{"id":"dev-vps","label":"2-vCPU VPS (EPYC 9354P), SSD","kind":"vm","cpu":"EPYC 9354P","storage":"SSD","cores":2,"threads":2,"mem_gib":8,"backends":[{"backend":"docker","spawn_ready":{"p50":227422507.5,"p95":347571646.29999983,"n":30},"teardown":{"p50":98287290.0,"p95":187900275.39999992,"n":30},"first_call":{"p50":3589593.5,"p95":5303112.049999999,"n":30},"agent_turn":{"p50":390017001.0,"p95":456245338.15,"n":30},"mem_idle":{"bytes":905216.0,"kind":"cgroup memory","n":30},"cpu_idle":{"cpu_s":0.0037654999999999998,"window_s":60},"shared_daemons_bytes":648491008,"density":{"max_n":16,"cap":16,"reps":3,"all_capped":true},"hardware_isolated":false,"multi_tenant_safe":false,"file":"20261123T091401Z-dev-vps.json"}],"runs":[{"file":"20261123T091401Z-dev-vps.json","role":"primary","date":"2026-11-23","commit":"0d85b83","backends":["docker"]}]}],"claims":{"ok":true,"fleet_n":16},"glyphs":{"tide-clock":"<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 64 64\" width=\"64\" height=\"64\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\" aria-label=\"Tide clock — TTL, timeouts & killpg\">\n<path d=\"M23 28V12A16 16 0 0 1 36.9 20Z\" fill=\"#FF6B4A\" stroke=\"none\"/><circle cx=\"23\" cy=\"28\" r=\"16\"/><path d=\"M23 28 36 20.5\"/><circle cx=\"23\" cy=\"28\" r=\"2\" fill=\"currentColor\"/><path d=\"M51 58V46M51 46l-6 -7M51 46l6 -7M45 39l-3 -5M45 39l2 -6M57 39l-2 -6M57 39l3 -5\" stroke-width=\"2\"/><path d=\"M44 50l14 0\" stroke=\"#FF6B4A\" stroke-width=\"3\"/><path d=\"M4 56q4-3 8 0t8 0 8 0\" opacity=\".55\" stroke-width=\"2\"/>\n<\/svg>","reef":"<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 64 64\" width=\"64\" height=\"64\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\" aria-label=\"Reef — template marketplace (future)\">\n<path d=\"M4 28h56M4 50h56\"/><path d=\"M5 28a7 7 0 0 1 14 0z\"/><path d=\"M8.5 28l1-4M12 28v-5.5M15.5 28l-1-4\" stroke-width=\"1.6\"/><path d=\"M25 28a7 7 0 0 1 14 0z\"/><path d=\"M28.5 28l1-4M32 28v-5.5M35.5 28l-1-4\" stroke-width=\"1.6\"/><path d=\"M45 28a7 7 0 0 1 14 0z\"/><path d=\"M48.5 28l1-4M52 28v-5.5M55.5 28l-1-4\" stroke-width=\"1.6\"/><path d=\"M5 50a7 7 0 0 1 14 0z\"/><path d=\"M8.5 50l1-4M12 50v-5.5M15.5 50l-1-4\" stroke-width=\"1.6\"/><path d=\"M25 50a7 7 0 0 1 14 0z\" fill=\"#FF6B4A\"/><path d=\"M28.5 50l1-4M32 50v-5.5M35.5 50l-1-4\" stroke-width=\"1.6\"/><path d=\"M45 50a7 7 0 0 1 14 0z\"/><path d=\"M48.5 50l1-4M52 50v-5.5M55.5 50l-1-4\" stroke-width=\"1.6\"/><path d=\"M8 12h48\" stroke-width=\"2\" opacity=\".55\"/><path d=\"M12 12v4M32 12v4M52 12v4\" stroke-width=\"2\" opacity=\".55\"/>\n<\/svg>","isolation":"<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 64 64\" width=\"64\" height=\"64\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\" aria-label=\"Sealed jar — hardware isolation\">\n<rect x=\"18\" y=\"6\" width=\"28\" height=\"7\" rx=\"2\" fill=\"#1F7A8C\"/><path d=\"M20 13v3c-4 2-6 5-6 9v27a5 5 0 0 0 5 5h26a5 5 0 0 0 5-5V25c0-4-2-7-6-9v-3\"/><path d=\"M19.5 28v14\" opacity=\".45\"/><g transform=\"translate(33 44) scale(0.62)\" stroke-width=\"3.23\">\n<path d=\"M-9 4l-5 5M-5 6l-3 6M9 4l5 5M5 6l3 6\"/>\n<path d=\"M-9 -1l-5 -5M9 -1l5 -5\"/>\n<circle cx=\"-16\" cy=\"-8\" r=\"4.2\" fill=\"#FF6B4A\"/><circle cx=\"16\" cy=\"-8\" r=\"4.2\" fill=\"#FF6B4A\"/>\n<path d=\"M-4 -7l-1 -4M4 -7l1 -4\"/>\n<path d=\"M-12 3a12 10 0 0 1 24 0q0 4 -12 4t-12 -4z\" fill=\"#FF6B4A\"/>\n<circle cx=\"-5\" cy=\"-12\" r=\"1.9\" fill=\"currentColor\" stroke=\"none\"/><circle cx=\"5\" cy=\"-12\" r=\"1.9\" fill=\"currentColor\" stroke=\"none\"/>\n<\/g>\n<\/svg>"}}</script>
+<!-- TLDR-DATA:END -->
+
+<script>
+(() => {
+'use strict';
+const D = JSON.parse(document.getElementById('tldr-data').textContent);
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+const BLABEL = { docker: 'Docker', firecracker: 'Firecracker', libkrun: 'libkrun' };
+const BCOLOR = { docker: 'var(--ink-2)', firecracker: 'var(--series-1)', libkrun: 'var(--series-2)' };
+const bdot = (b) => `<i class="bdot" style="background:${BCOLOR[b]}"></i>`;
+
+/* formatting: ns → "424 ms" / "1.54 s"; bytes → MiB; cpu seconds → ms */
+function nsParts(v) {
+  if (v >= 1e9) return [(v / 1e9).toFixed(2), 's'];
+  const ms = v / 1e6;
+  return [ms >= 100 ? ms.toFixed(0) : ms >= 10 ? ms.toFixed(0) : ms.toFixed(1), 'ms'];
+}
+const ns = (v) => nsParts(v).join(' ');
+function mibParts(b) { const m = b / 1048576; return [m >= 10 ? m.toFixed(0) : m.toFixed(1), 'MiB']; }
+const mib = (b) => mibParts(b).join(' ');
+function cpuParts(s) { const ms = s * 1000; return [ms >= 10 ? ms.toFixed(0) : ms.toFixed(1), 'ms']; }
+const cpu = (s) => cpuParts(s).join(' ');
+const big = ([v, u]) => `${v}<small>${u}</small>`;
+
+const H = Object.fromEntries(D.hosts.map((h) => [h.id, h]));
+const col = (hid, b) => H[hid].backends.find((c) => c.backend === b && !c.pending);
+
+/* glyphs */
+document.querySelectorAll('[data-glyph]').forEach((el) => { el.innerHTML = D.glyphs[el.dataset.glyph] || ''; });
+
+/* hero */
+{
+  const ml = col('mac-m2', 'libkrun'), kl = col('kvm-dedicated', 'libkrun');
+  $('lede').innerHTML = `Three backends, three hosts, one SDK. A hardware-isolated <strong>libkrun</strong> microVM is ready in <strong>${ns(ml.spawn_ready.p50)}</strong> on an ${esc(H['mac-m2'].cpu)} and <strong>${ns(kl.spawn_ready.p50)}</strong> on a bare-metal ${esc(H['kvm-dedicated'].cpu)}. Here are the numbers that matter, in one minute.`;
+}
+
+/* 01 · speed */
+const isoTag = (c) => c.hardware_isolated ? '<span class="iso hw">microVM</span>' : '<span class="iso">container</span>';
+function tile(h, c, max) {
+  if (c.pending) {
+    return `<div class="tile soon"><div class="k">${bdot(c.backend)}<b>${BLABEL[c.backend]}</b></div><div class="v">Coming soon</div><p>Docker on macOS is measured next on this host.</p></div>`;
+  }
+  const s = c.spawn_ready;
+  const mini = [['teardown', c.teardown], ['first call', c.first_call], ['agent turn', c.agent_turn]]
+    .map(([k, m]) => `<div><dt>${k}</dt><dd>${m ? ns(m.p50) : '—'}</dd></div>`).join('');
+  const note = c.backend === 'docker' && h.storage === 'HDD' ? `<p class="note">Docker on this host is slowed by HDD storage.</p>` : '';
+  return `<div class="tile"><div class="k">${bdot(c.backend)}<b>${BLABEL[c.backend]}</b>${isoTag(c)}</div>
+    <div class="v">${big(nsParts(s.p50))}</div>
+    ${max ? `<div class="bar" aria-hidden="true"><i style="width:${Math.max(3, 100 * s.p50 / max).toFixed(1)}%;background:${BCOLOR[c.backend]}"></i></div>` : ''}
+    <div class="p95">p95 ${ns(s.p95)} · n=${s.n}</div>
+    <dl class="row">${mini}</dl>${note}</div>`;
+}
+const hwLine = (h) => `${esc(h.label)} · ${h.kind === 'vm' ? `${h.threads} vCPU` : `${h.cores} cores / ${h.threads} threads`} · ${h.mem_gib} GiB`;
+$('hosts').innerHTML = D.hosts.map((h) => {
+  const live = h.backends.filter((c) => !c.pending);
+  // the bar compares backends within a host, so a host with one measured backend gets none
+  const max = live.length > 1 ? Math.max(...live.map((c) => c.spawn_ready.p50)) : 0;
+  return `<div class="host" style="--n:${h.backends.length}"><div class="host-h"><span class="hid">${esc(h.id)}</span><span class="hw">${hwLine(h)}</span></div>
+    <div class="tiles">${h.backends.map((c) => tile(h, c, max)).join('')}</div></div>`;
+}).join('');
+
+/* 02 · footprint */
+{
+  const anyCol = D.hosts.flatMap((h) => h.backends).find((c) => c.density);
+  const allCapped = D.hosts.every((h) => h.backends.every((c) => c.pending || !c.density || c.density.all_capped));
+  $('fp-intro').innerHTML = `Per sandbox, idle, after spawn. Memory is the backend's own process or cgroup, named under each number. ${allCapped ? `Every density run reached the ${anyCol.density.cap}-sandbox test cap before memory ran out, so density shows a floor, not a limit.` : ''}`;
+  const head = `<div class="fp-row fp-head"><div>Host · backend</div><div>Memory / idle sandbox</div><div>Idle CPU / ${anyCol.cpu_idle ? anyCol.cpu_idle.window_s : 60} s</div><div>Sandboxes alive at once</div></div>`;
+  const na = (lbl) => `<div><span class="fp-l">${lbl}</span><div class="fp-na">not probed in this run</div></div>`;
+  const rows = D.hosts.flatMap((h) => h.backends.filter((c) => !c.pending).map((c) => {
+    const mem = c.mem_idle
+      ? `<div><span class="fp-l">Memory / idle sandbox</span><div class="fp-v">${big(mibParts(c.mem_idle.bytes))}</div><div class="fp-s">${esc(c.mem_idle.kind)}${c.shared_daemons_bytes ? `, plus ${mib(c.shared_daemons_bytes)} shared daemons per host` : ''}</div></div>`
+      : na('Memory / idle sandbox');
+    const cp = c.cpu_idle
+      ? `<div><span class="fp-l">Idle CPU / ${c.cpu_idle.window_s} s</span><div class="fp-v">${big(cpuParts(c.cpu_idle.cpu_s))}</div><div class="fp-s">CPU time per idle minute</div></div>`
+      : na(`Idle CPU / ${anyCol.cpu_idle ? anyCol.cpu_idle.window_s : 60} s`);
+    const dn = c.density
+      ? `<div><span class="fp-l">Sandboxes alive at once</span><div class="fp-v">${c.density.max_n}${c.density.all_capped ? '+' : ''}</div><div class="fp-s">${c.density.all_capped ? 'test cap reached' : 'until memory ran out'}</div></div>`
+      : na('Sandboxes alive at once');
+    return `<div class="fp-row"><div class="fp-who"><b>${bdot(c.backend)}${BLABEL[c.backend]}</b><span>${esc(h.id)} · ${esc(h.label)}</span></div>${mem}${cp}${dn}</div>`;
+  }));
+  $('fp').innerHTML = head + rows.join('');
+}
+
+/* 03 · what it means (each claim is re-checked by scripts/bench-tldr-data.py) */
+{
+  const k = (b) => col('kvm-dedicated', b), ml = col('mac-m2', 'libkrun');
+  const kl = k('libkrun'), kf = k('firecracker'), kd = k('docker');
+  const items = [
+    `<strong>libkrun is the fastest to a ready sandbox.</strong> ${ns(kl.spawn_ready.p50)} on the bare-metal ${esc(H['kvm-dedicated'].cpu)}, ahead of Firecracker (${ns(kf.spawn_ready.p50)}) and Docker (${ns(kd.spawn_ready.p50)}) on the same machine, and ${ns(ml.spawn_ready.p50)} on an ${esc(H['mac-m2'].cpu)}.`,
+    `<strong>MicroVMs give hardware isolation at sub-second spawn.</strong> Firecracker and libkrun are ready in under a second even at p95 (${ns(kf.spawn_ready.p95)} and ${ns(kl.spawn_ready.p95)}), and a whole agent turn of spawn, 10 tool calls and teardown takes ${ns(Math.min(kl.agent_turn.p50, kf.agent_turn.p50))} to ${ns(Math.max(kl.agent_turn.p50, kf.agent_turn.p50))}.`,
+    `<strong>Docker is the lightest.</strong> An idle container uses ${mib(kd.mem_idle.bytes)} and ${cpu(kd.cpu_idle.cpu_s)} of CPU a minute, against ${mib(kl.mem_idle.bytes)} and ${cpu(kl.cpu_idle.cpu_s)} for a libkrun microVM on the same host. It shares the host kernel, so it fits trusted, single-tenant work.`,
+  ];
+  $('means-list').innerHTML = items.map((t) => `<li>${t}</li>`).join('');
+}
+
+/* footer: runs */
+{
+  const BL = (bs) => bs.map((b) => BLABEL[b]).join(' + ');
+  $('runs').innerHTML = D.hosts.map((h) => {
+    const rs = h.runs.map((r) => `${BL(r.backends)}${r.role === 'density' ? ' (density rerun)' : ''}: ${esc(r.date)}, commit ${esc(r.commit)}`).join('<br>');
+    return `<li><b>${esc(h.id)}</b> <span class="hw">· ${esc(h.label)}</span><span class="r">${rs}</span></li>`;
+  }).join('');
+}
+})();
+</script>
+</body>
+</html>
