@@ -214,7 +214,7 @@ steps:
     title: "Phase B: unrestricted via passt (--no-map-gw, Linux) / gvproxy (macOS) with host-loopback-unreachable regression; deprecate TSI flag"
     depends_on: [lk-e2e-linux]
     artifacts: [crates/sandcrab-backend-libkrun/src/net.rs]
-    status: doing
+    status: done
 
   # ---- verify / document
   # ---- follow-ups for issues found during e2e/bench (not in the original plan)
