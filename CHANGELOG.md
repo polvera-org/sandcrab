@@ -53,6 +53,15 @@ All notable changes to Sandcrab. The format follows [Keep a Changelog](https://k
 - `--allow-insecure` and `SANDCRAB_ALLOW_INSECURE`: accepted, hidden from `--help`, print a warning, and do nothing.
 
 ### Added
+- microVM guest kernel hardening (Firecracker, libkrun): `crabd init` sets hardening sysctls before any sandbox code
+  runs (`user.max_user_namespaces=0`, `kernel.unprivileged_bpf_disabled=1`, `vm.unprivileged_userfaultfd=0`,
+  `kernel.io_uring_disabled=2`, `kernel.perf_event_paranoid=3`, `kernel.kptr_restrict=2`, `kernel.dmesg_restrict=1`,
+  `fs.protected_*`, `fs.suid_dumpable=0`; each only if the kernel has it, warning otherwise), then makes `/proc/sys`
+  (and Docker's other `ReadonlyPaths`) and `/sys` read-only, as Docker does. User namespaces are now unavailable in
+  microVM sandboxes, as on Docker: rootless container tools and `bwrap` do not work, and Chromium-based browsers need
+  `--no-sandbox`. The Docker backend sets no sysctls (they are host-level there). List in
+  `sandcrab_protocol::init::HARDENING_SYSCTLS`; details in
+  [docs/design/guest-seccomp.md](docs/design/guest-seccomp.md).
 - Docker backend on macOS (Docker Desktop): a `tcp` transport (`DockerTransport`, default on macOS, `unix` elsewhere,
   override with `SANDCRAB_DOCKER_TRANSPORT=unix|tcp`). `crabd` serves a Unix socket in a per-sandbox tmpfs volume and a
   hardened relay container (`crabd relay`) publishes it on `127.0.0.1` only, with an ephemeral port. The sandbox
