@@ -121,14 +121,31 @@ def rename_metrics(cells: list) -> list:
     return sorted(done)
 
 
-def tier_of(cfg: dict) -> str:
-    """Benchmark tier (docs/bench/README.md, "Benchmark tiers") from the recorded config."""
-    if cfg.get("quick"):
-        return "Smoke"
-    full = cfg.get("runs", 0) >= 30 and cfg.get("resource_runs", 0) >= 30 and not cfg.get("allow_small_n")
-    if cfg.get("scenarios") == ["density"]:
-        return ("Full" if full else "Standard") + " (density only)"
-    return "Full" if full else "Standard"
+TIER_NAMES = {"smoke": "Smoke", "standard": "Standard", "full": "Full"}
+
+
+def tier_of(d: dict, path: Path) -> tuple[str, str]:
+    """(tier id, display label) as recorded by the bench (docs/bench/README.md,
+    "Benchmark tiers"). Files written before tiers were recorded need
+    `sandcrab-bench recheck --write` first: the report never guesses validity."""
+    if d.get("tier") not in TIER_NAMES or not isinstance(d.get("valid_for_tier"), bool):
+        sys.exit(f"{path.name}: no tier / valid_for_tier recorded; run "
+                 f"`sandcrab-bench recheck --write {path.relative_to(ROOT)}`")
+    label = TIER_NAMES[d["tier"]]
+    if d["config"].get("scenarios") == ["density"]:
+        label += " (density only)"
+    return d["tier"], label
+
+
+def slim_preflight(p: dict | None) -> dict | None:
+    """The preflight's verdict and findings (raw probe samples are left out)."""
+    if not p:
+        return None
+    return {k: p.get(k) for k in ("tier", "at", "load", "max_load", "would_be_valid", "forced",
+                                  "findings", "storage")} | {
+        "drift_probe": [{k: x.get(k) for k in ("backend", "start_p50_ns", "end_p50_ns",
+                                                "drift_pct", "cv_pct", "error")}
+                        for x in p.get("drift_probe") or []]}
 
 
 def arch_of(host: dict) -> str | None:
@@ -166,13 +183,16 @@ def slim_run(path: Path, role: str, keep_samples: bool) -> dict:
         })
     host = {k: d["host"].get(k) for k in HOST_KEYS}
     host["arch"] = arch_of(d["host"])
+    tier_id, tier_label = tier_of(d, path)
     return normalise_backends({
         "file": f"docs/bench/results/{path.name}",
         "sha256": hashlib.sha256(raw).hexdigest(),
-        "role": role, "tier": tier_of(d["config"]), "renamed": renamed,
+        "role": role, "tier": tier_label, "tier_id": tier_id, "renamed": renamed,
         "run_id": d["run_id"], "git": d["git"], "seed": d["seed"],
         "started_at": d["started_at"], "finished_at": d["finished_at"],
-        "valid": d["valid"], "invalid_reasons": d["invalid_reasons"], "notes": d["notes"],
+        "valid": d["valid"], "invalid_reasons": d["invalid_reasons"],
+        "valid_for_tier": d["valid_for_tier"], "tier_invalid_reasons": d["tier_invalid_reasons"],
+        "preflight": slim_preflight(d.get("preflight")), "notes": d["notes"],
         "host": host,
         "noise": d["noise"], "harness": d["harness"], "drift_check": d["drift_check"],
         "shared_overhead": d["shared_overhead"],
