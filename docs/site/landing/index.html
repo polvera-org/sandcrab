@@ -23,8 +23,8 @@
     }
   } catch (e) {}
 </script>
-  <script type="module" crossorigin src="./assets/index-DqLjTuzQ.js"></script>
-  <link rel="stylesheet" crossorigin href="./assets/index-BpGPlpGQ.css">
+  <script type="module" crossorigin src="./assets/index-Cl5XGY89.js"></script>
+  <link rel="stylesheet" crossorigin href="./assets/index-If1rYMqY.css">
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
@@ -78,7 +78,8 @@
         </div>
         <dl class="status">
           <div><dt>Docker</dt><dd>Production-ready</dd></div>
-          <div><dt>Firecracker</dt><dd>Built, KVM tests pending</dd></div>
+          <div><dt>Firecracker</dt><dd>KVM tests pass</dd></div>
+          <div><dt>libkrun</dt><dd>microVMs on macOS and Linux</dd></div>
           <div><dt>Spawn</dt><dd>About 250&nbsp;ms (Docker, SSD VPS)</dd></div>
         </dl>
       </div>
@@ -215,6 +216,7 @@
         <p class="sr-only">Scene: the crab stands between two shells. On one side an open glass jar on a shared shore, where two grey crabs already live: the container. On the other a sealed glass sphere with its own teal core: the microVM. The crab looks from one to the other.</p>
         <ul class="chooser" aria-label="Which backend when">
           <li><span>Running your own agents</span><b>Docker</b></li>
+          <li><span>A microVM on your Mac</span><b>libkrun</b></li>
           <li><span>Running strangers’ code</span><b>Firecracker</b></li>
         </ul>
 
@@ -238,7 +240,7 @@
             </ul>
           </article>
           <article class="be">
-            <p class="be-status">Built, KVM tests pending</p>
+            <p class="be-status">KVM tests pass</p>
             <h3>Firecracker microVMs</h3>
             <p class="be-tag">Own kernel behind KVM, hardware isolation</p>
             <p>Its own kernel per sandbox, for hostile multi-tenant code. First real-KVM benchmarks are in the bench report: one bare-metal host whose HDD storage skews the Docker comparison, so no general speed claim yet.</p>
@@ -249,18 +251,31 @@
               <li>Jailer confinement for multi-tenant hosts is still to land</li>
             </ul>
           </article>
+          <article class="be be-wide">
+            <p class="be-status">macOS and Linux tests pass</p>
+            <h3>libkrun microVMs</h3>
+            <p class="be-tag">Own kernel on Apple Silicon or Linux KVM</p>
+            <p>A real guest kernel on a developer Mac (Hypervisor.framework) or a Linux KVM host, with your workspace shared live over virtio-fs. Spawn to ready in about 160&nbsp;ms on an M2 laptop (indicative: a busy desktop). Its device model runs as your user, so it is not for hostile multi-tenant code.</p>
+            <ul class="ticks">
+              <li>Same <code>crabd</code>, same frames, same tools</li>
+              <li>Live workspaces: no copy in, no sync back</li>
+              <li>Network off by default; <code>unrestricted</code> goes through a pinned netstack behind a filter that blocks host and private addresses</li>
+              <li>libkrun, its kernel and the helper are SHA-256 pinned</li>
+            </ul>
+          </article>
         </div>
-        <p class="planned"><b>Planned:</b> Cloud Hypervisor, libkrun.</p>
+        <p class="planned"><b>Planned:</b> Cloud Hypervisor.</p>
 
         <div class="table-wrap" role="region" aria-label="Backend capability comparison" tabindex="0">
       <table class="cmp">
-        <thead><tr><th scope="col">Capability</th><th scope="col">Docker</th><th scope="col">Firecracker</th></tr></thead>
+        <thead><tr><th scope="col">Capability</th><th scope="col">Docker</th><th scope="col">Firecracker</th><th scope="col">libkrun</th></tr></thead>
         <tbody>
-          <tr><th scope="row">Status</th><td>Production-ready</td><td>Built, KVM tests pending</td></tr>
-          <tr><th scope="row">Hardware isolated</th><td>No, shares the host kernel</td><td>Yes, own kernel</td></tr>
-          <tr><th scope="row">Multi-tenant safe</th><td>No</td><td>Not yet</td></tr>
-          <tr><th scope="row">Host-directory mounts</th><td>Live bind mount</td><td>Copy in, sync back</td></tr>
-          <tr><th scope="row">Network policies</th><td colspan="2">Off or unrestricted. Anything stricter is refused at spawn, never faked.</td></tr>
+          <tr><th scope="row">Status</th><td>Production-ready</td><td>KVM tests pass</td><td>macOS and Linux tests pass</td></tr>
+          <tr><th scope="row">Hosts</th><td>Linux, macOS (Docker Desktop)</td><td>Linux KVM</td><td>Apple Silicon macOS, Linux KVM</td></tr>
+          <tr><th scope="row">Hardware isolated</th><td>No, shares the host kernel</td><td>Yes, own kernel</td><td>Yes, own kernel</td></tr>
+          <tr><th scope="row">Multi-tenant safe</th><td>No</td><td>Not yet</td><td>No</td></tr>
+          <tr><th scope="row">Host-directory mounts</th><td>Live bind mount</td><td>Copy in, sync back</td><td>Live virtio-fs</td></tr>
+          <tr><th scope="row">Network policies</th><td colspan="3">Off or unrestricted. Anything stricter is refused at spawn, never faked.</td></tr>
         </tbody>
       </table>
     </div>
@@ -432,7 +447,7 @@ sandcrab run -t python-dev -m demo:/workspace -- <span class="s">'python3 hello.
             <a class="pill" href="#start">Spawn your first sandbox</a>
             <a class="pill pill-quiet" href="https://github.com/polvera-org/sandcrab" target="_blank" rel="noopener">Star on GitHub<span class="sr-only"> (opens in a new tab)</span></a>
           </div>
-          <p class="closing-note">Docker in production today. Firecracker microVMs built, KVM validation pending.</p>
+          <p class="closing-note">Docker in production today. Firecracker and libkrun microVMs pass their end-to-end tests.</p>
           <blockquote class="epigraph">
             <p>An architect of the impermanent, born of iron and grit, carving safe harbors from the chaotic shoreline.</p>
           </blockquote>
