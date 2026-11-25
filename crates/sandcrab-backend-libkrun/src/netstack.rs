@@ -666,7 +666,7 @@ pub fn clear_quarantine_fd(file: &std::fs::File) -> io::Result<bool> {
         let mode = file.metadata()?.permissions().mode() & 0o7777;
         let widen = mode & 0o200 == 0;
         if widen {
-            rustix::fs::fchmod(file, rustix::fs::Mode::from_raw_mode(mode | 0o200))?;
+            file.set_permissions(std::fs::Permissions::from_mode(mode | 0o200))?;
         }
         let removed = match rustix::fs::fremovexattr(file, QUARANTINE_XATTR) {
             Ok(()) => Ok(true),
@@ -674,7 +674,7 @@ pub fn clear_quarantine_fd(file: &std::fs::File) -> io::Result<bool> {
             Err(e) => Err(io::Error::from(e)),
         };
         if widen {
-            rustix::fs::fchmod(file, rustix::fs::Mode::from_raw_mode(mode))?;
+            file.set_permissions(std::fs::Permissions::from_mode(mode))?;
         }
         removed
     }

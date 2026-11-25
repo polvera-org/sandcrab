@@ -243,6 +243,9 @@ mod tests {
         let root = tmp.path().join("home");
         mkdir(&root, 0o775);
         mkdir(&root.join("bin"), 0o775);
+        // Each level explicitly (create_dir_all's parents follow the umask).
+        mkdir(&root.join("artifacts"), 0o775);
+        mkdir(&root.join("artifacts/libkrun"), 0o775);
         mkdir(&root.join("artifacts/libkrun/1.0"), 0o775);
         mkdir(&root.join("artifacts/other"), 0o777);
         mkdir(&root.join("cache"), 0o755);
