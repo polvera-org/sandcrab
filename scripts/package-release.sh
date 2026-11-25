@@ -102,7 +102,7 @@ version="$(cargo metadata --no-deps --format-version 1 --offline \
   | tr ',' '\n' | grep -A1 -x '{"name":"sandcrab-cli"' | sed -n 's/^"version":"\(.*\)"$/\1/p' | head -n1)"
 if [ -z "$version" ]; then
   # Field order differs (or the package moved): ask cargo for the package id instead.
-  version="$(cargo pkgid --offline -p sandcrab-cli | sed 's/.*[#@]//')"
+  version="$(cargo pkgid -p sandcrab-cli | sed 's/.*[#@]//')"
 fi
 case "$version" in
   [0-9]*.[0-9]*.[0-9]*) ;;
@@ -216,8 +216,24 @@ $libkrun_install
 Host setup for every backend: https://github.com/polvera-org/sandcrab/blob/v$version/docs/hosting.md
 EOF
 
-# COPYFILE_DISABLE: no AppleDouble (._*) entries from macOS tar.
-(cd "$out" && COPYFILE_DISABLE=1 tar -czf "$name.tar.gz" "$name")
+case "$target" in
+  *-linux-*)
+    cat >>"$stage/INSTALL.md" <<'NOTE'
+
+Linux binaries are built on Ubuntu 24.04 and need glibc 2.39 or newer
+(Ubuntu 24.04+, Debian 13+). `crabd` is static and runs anywhere.
+NOTE
+    ;;
+esac
+
+# COPYFILE_DISABLE: no AppleDouble (._*) entries from macOS tar. GNU tar (Linux): root-owned
+# entries instead of the build user's uid/gid.
+tar_owner=""
+if tar --version 2>/dev/null | grep -q 'GNU tar'; then
+  tar_owner="--owner=0 --group=0 --numeric-owner"
+fi
+# shellcheck disable=SC2086 # tar_owner is intentionally word-split (empty or three flags)
+(cd "$out" && COPYFILE_DISABLE=1 tar $tar_owner -czf "$name.tar.gz" "$name")
 if command -v sha256sum >/dev/null 2>&1; then
   (cd "$out" && sha256sum "$name.tar.gz" >"$name.tar.gz.sha256")
 else
