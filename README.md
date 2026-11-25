@@ -1,7 +1,7 @@
 # Sandcrab
 
 <p align="center">
-  <img src="docs/assets/sandcrab-hero-v2.jpg" alt="A rust-orange sand crab among white sandcastle blocks on the shoreline" width="100%">
+  <img src="docs/assets/sandcrab-hero.png" alt="The Sandcrab mascot, a coral crab, sealed inside its own glass jar with a teal screw lid" width="320">
 </p>
 
 **Sandcrab** is an open-source, self-hostable, Rust-based ephemeral sandbox manager and SDK for running untrusted agent code.
