@@ -62,7 +62,7 @@ and the hosts differ, so read these as indicative, not as a ranking:
 | libkrun | kvm-dedicated | 424 ms in the Standard-tier run; ~238 ms in a later smoke run, after the per-spawn library hash was removed |
 | Docker | kvm-dedicated | ~1.5 s: HDD-bound, not comparable (a bare `docker create` takes ~1 s there) |
 
-Full report with every host's caveats: [docs/site/bench-report.html](docs/site/bench-report.html).
+Benchmarks at a glance: [docs/site/benchmarks.html](docs/site/benchmarks.html). Full report with every host's caveats: [docs/site/bench-report.html](docs/site/bench-report.html).
 
 ## Choosing a backend
 
