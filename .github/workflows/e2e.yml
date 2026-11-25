@@ -1,0 +1,200 @@
+# End-to-end tests: the `#[ignore]`d suites that need real Docker containers, the curated
+# template images, a static musl `crabd`, or Firecracker on KVM. Nightly + manual only; PR CI
+# (ci.yml) runs the non-ignored tests. GitHub-hosted runners only, no secrets.
+#
+# Not here:
+# - libkrun e2e (`sandcrab-backend-libkrun --test libkrun_vm`, `sandcrab-agent --test
+#   libkrun_e2e`, SDK suite with SANDCRAB_E2E_BACKEND=libkrun): hosted macOS runners have no
+#   nested virtualization (no Hypervisor.framework guests), so these stay a local run on an
+#   Apple Silicon Mac (docs/hosting.md §2).
+# - Anything that calls the real Anthropic API: this workflow has no secrets. The agent's
+#   `docker_e2e` below drives a scripted fake LLM, so it needs none.
+name: E2E
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      backend:
+        description: Backend suites to run
+        type: choice
+        options: [all, docker, firecracker]
+        default: all
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
+jobs:
+  docker-e2e:
+    name: Docker e2e (linux x86_64)
+    # Schedule runs every suite; a manual run only the selected one(s).
+    if: github.event_name == 'schedule' || inputs.backend == 'all' || inputs.backend == 'docker'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      # Read by every suite (SANDCRAB_CRABD) and by sandcrab-rootfs (SANDCRAB_TEST_CRABD).
+      SANDCRAB_CRABD: ${{ github.workspace }}/target/x86_64-unknown-linux-musl/release/crabd
+      SANDCRAB_TEST_CRABD: ${{ github.workspace }}/target/x86_64-unknown-linux-musl/release/crabd
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Template images + rootfs + a debug test build do not fit the stock free space comfortably.
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+      # rustup ships on GitHub-hosted runners; `rustup toolchain install` with no argument installs
+      # what rust-toolchain.toml pins (stable + rustfmt + clippy).
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install && rustc --version
+          rustup target add x86_64-unknown-linux-musl
+      # musl-tools: static crabd. e2fsprogs (debugfs, e2fsck, dumpe2fs) + fakeroot: rootfs_docker.
+      - name: Install system tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools e2fsprogs fakeroot
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: e2e-docker
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Build static crabd
+        id: crabd
+        run: scripts/build-crabd.sh x86_64
+      # base: every suite; python-dev: SDK cross-template workspace test; ts-dev: published-port
+      # tests. Pins land host-locally in ~/.sandcrab/template-pins (never committed).
+      - name: Build + pin template images
+        id: templates
+        run: |
+          docker version
+          templates/build.sh base python-dev ts-dev
+
+      # Each suite runs even when an earlier one failed, but only once its prerequisites built.
+      - name: sandcrab-backend-docker docker_e2e
+        if: ${{ !cancelled() && steps.crabd.outcome == 'success' && steps.templates.outcome == 'success' }}
+        run: cargo test --locked -p sandcrab-backend-docker --test docker_e2e -- --ignored --nocapture
+      - name: sandcrab-sdk e2e suite (docker)
+        if: ${{ !cancelled() && steps.crabd.outcome == 'success' && steps.templates.outcome == 'success' }}
+        env:
+          SANDCRAB_E2E_BACKEND: docker
+        run: >-
+          cargo test --locked -p sandcrab-sdk
+          --test e2e_harness --test e2e_lifecycle --test e2e_security --test e2e_tools --test e2e_workspace
+          -- --ignored --test-threads=2
+      - name: sandcrab-cli Docker smoke tests
+        if: ${{ !cancelled() && steps.crabd.outcome == 'success' && steps.templates.outcome == 'success' }}
+        run: cargo test --locked -p sandcrab-cli --test cli -- --ignored --nocapture
+      - name: sandcrab-rootfs rootfs_docker
+        if: ${{ !cancelled() && steps.crabd.outcome == 'success' && steps.templates.outcome == 'success' }}
+        run: cargo test --locked -p sandcrab-rootfs --test rootfs_docker -- --ignored --nocapture
+      - name: sandcrab-agent docker_e2e (scripted fake LLM, no API key)
+        if: ${{ !cancelled() && steps.crabd.outcome == 'success' && steps.templates.outcome == 'success' }}
+        run: cargo test --locked -p sandcrab-agent --test docker_e2e -- --ignored --nocapture
+
+  firecracker-e2e:
+    name: Firecracker e2e (linux x86_64, KVM)
+    if: github.event_name == 'schedule' || inputs.backend == 'all' || inputs.backend == 'firecracker'
+    # The pinned kernel + firecracker binary are x86_64 only.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      SANDCRAB_CRABD: ${{ github.workspace }}/target/x86_64-unknown-linux-musl/release/crabd
+    steps:
+      # KVM on standard hosted Linux runners works but is not a documented guarantee: fail fast
+      # with a clear message instead of failing deep inside a test.
+      - name: Enable /dev/kvm
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          if ! test -r /dev/kvm || ! test -w /dev/kvm; then
+            echo "::error title=No KVM::/dev/kvm is missing or not read-writable on this runner; Firecracker e2e cannot run here."
+            ls -l /dev/kvm || true
+            exit 1
+          fi
+          ls -l /dev/kvm
+          grep -cE 'vmx|svm' /proc/cpuinfo
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+      # rustup ships on GitHub-hosted runners; `rustup toolchain install` with no argument installs
+      # what rust-toolchain.toml pins (stable + rustfmt + clippy).
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install && rustc --version
+          rustup target add x86_64-unknown-linux-musl
+      # Ubuntu 24.04 ships e2fsprogs 1.47.0 (< 1.47.1, no tar input for `mke2fs -d`): the rootfs
+      # pipeline then uses its helper-container strategy (Docker), else fakeroot. nftables + iproute2:
+      # scripts/fc-net-setup.sh.
+      - name: Install system tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools e2fsprogs fakeroot nftables iproute2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: e2e-firecracker
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Build static crabd
+        id: crabd
+        run: scripts/build-crabd.sh x86_64
+      # Rootfs images are built from these on first spawn (cached in ~/.sandcrab/cache).
+      - name: Build + pin template images
+        id: templates
+        run: templates/build.sh base python-dev ts-dev
+      # Same as scripts/fetch-artifacts.sh, but in the dev profile so it shares the test build.
+      # Downloads + SHA-256-verifies the pinned kernel and firecracker into ~/.sandcrab/cache.
+      - name: Fetch pinned Firecracker artifacts
+        id: artifacts
+        run: cargo run --locked -p sandcrab-backend-firecracker --bin sandcrab-fc-fetch
+      # Tap pool + `inet sandcrab` nftables table for the `unrestricted` tests. Passwordless sudo
+      # is available on hosted runners; the runner is ephemeral, so no --persist / --uninstall.
+      - name: Tap pool + egress policy
+        id: net
+        run: sudo scripts/fc-net-setup.sh --user "$USER" --count 8
+
+      - name: firecracker artifacts fetch test
+        if: ${{ !cancelled() }}
+        run: >-
+          cargo test --locked -p sandcrab-backend-firecracker --lib --
+          --ignored --exact artifacts::tests::fetch_real_artifacts
+      - name: sandcrab-backend-firecracker firecracker_kvm
+        if: ${{ !cancelled() && steps.crabd.outcome == 'success' && steps.templates.outcome == 'success' && steps.artifacts.outcome == 'success' && steps.net.outcome == 'success' }}
+        run: >-
+          cargo test --locked -p sandcrab-backend-firecracker --test firecracker_kvm --
+          --ignored --nocapture --test-threads=1
+      - name: sandcrab-sdk e2e suite (firecracker)
+        if: ${{ !cancelled() && steps.crabd.outcome == 'success' && steps.templates.outcome == 'success' && steps.artifacts.outcome == 'success' && steps.net.outcome == 'success' }}
+        env:
+          SANDCRAB_E2E_BACKEND: firecracker
+        run: >-
+          cargo test --locked -p sandcrab-sdk --features firecracker
+          --test e2e_harness --test e2e_lifecycle --test e2e_security --test e2e_tools --test e2e_workspace
+          -- --ignored --test-threads=2
+      # crabd's vsock listener over the host's vsock_loopback transport. The module may not ship
+      # with the runner's kernel: skip (with a notice) rather than fail when it cannot be loaded.
+      - name: sandcrab-guest vsock loopback
+        if: ${{ !cancelled() }}
+        run: |
+          if ! sudo modprobe vsock_loopback; then
+            echo "::notice title=vsock_loopback unavailable::kernel module not loadable on this runner; skipping sandcrab-guest vsock test"
+            exit 0
+          fi
+          cargo test --locked -p sandcrab-guest --lib -- --ignored --exact vsock::tests::serve_over_vsock_loopback
