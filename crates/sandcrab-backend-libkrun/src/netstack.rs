@@ -40,6 +40,7 @@ use std::process::{Child, Command, Stdio};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -407,6 +408,11 @@ const PROTO_TCP: u8 = 6;
 const PROTO_UDP: u8 = 17;
 const DNS_PORT: u16 = 53;
 const DHCP_SERVER_PORT: u16 = 67;
+/// IPv4 "more fragments" flag and fragment offset mask (in the flags/offset word).
+const IP_MF: u16 = 0x2000;
+const IP_FRAG_OFFSET: u16 = 0x1fff;
+/// Minimum L4 bytes for a TCP/UDP packet to be forwarded (the UDP header; TCP's is longer).
+const L4_PORTS_HDR: usize = 8;
 
 /// Why a guest frame was dropped.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -423,6 +429,9 @@ pub enum Denial {
     Denied { dst: Ipv4Addr, net: Ipv4Net },
     /// TCP to an SMTP port.
     Smtp { dst: Ipv4Addr, port: u16 },
+    /// A fragmented TCP/UDP packet (any fragment), or a TCP/UDP packet too short to carry
+    /// its ports: the port checks could not see the ports, so it is never forwarded.
+    Fragment { dst: Ipv4Addr, proto: u8 },
 }
 
 impl fmt::Display for Denial {
@@ -440,6 +449,9 @@ impl fmt::Display for Denial {
             Self::Broadcast => f.write_str("broadcast other than DHCP"),
             Self::Denied { dst, net } => write!(f, "{dst} is in denied {net}"),
             Self::Smtp { dst, port } => write!(f, "SMTP to {dst}:{port}"),
+            Self::Fragment { dst, proto } => {
+                write!(f, "fragmented or truncated proto {proto} packet to {dst}")
+            }
         }
     }
 }
@@ -489,10 +501,18 @@ impl EgressPolicy {
         }
         let proto = ip[9];
         let dst = Ipv4Addr::new(ip[16], ip[17], ip[18], ip[19]);
-        let frag_offset = u16::from_be_bytes([ip[6], ip[7]]) & 0x1fff;
-        // Destination port, only in the first (or only) fragment of TCP/UDP.
+        let flags_frag = u16::from_be_bytes([ip[6], ip[7]]);
+        let fragmented = flags_frag & (IP_MF | IP_FRAG_OFFSET) != 0;
+        // TCP/UDP must be unfragmented and carry a full 8-byte L4 header, so the port checks
+        // below always see the destination port. A tiny first fragment (offset 0, MF set,
+        // < 4 L4 bytes) would otherwise slip past the SMTP block, and later fragments carry
+        // no port at all. The guest has no reason to fragment: MTU 1500, PMTU in the
+        // netstack. Other protocols (ICMP) may fragment; only their destination matters.
         let port = match proto {
-            PROTO_TCP | PROTO_UDP if frag_offset == 0 && total >= ihl + 4 => {
+            PROTO_TCP | PROTO_UDP => {
+                if fragmented || total < ihl + L4_PORTS_HDR {
+                    return Err(Denial::Fragment { dst, proto });
+                }
                 Some(u16::from_be_bytes([ip[ihl + 2], ip[ihl + 3]]))
             }
             _ => None,
@@ -604,12 +624,117 @@ pub struct Started {
     pub stats: Arc<Stats>,
 }
 
+/// macOS download-quarantine attribute. On an unnotarized binary such as the upstream gvproxy
+/// it makes Gatekeeper block `exec` behind a user dialog.
+pub const QUARANTINE_XATTR: &str = "com.apple.quarantine";
+
+/// Whether `path` carries [`QUARANTINE_XATTR`] (always `false` off macOS).
+pub fn quarantined(path: &Path) -> io::Result<bool> {
+    #[cfg(target_os = "macos")]
+    {
+        match rustix::fs::getxattr_query(path, QUARANTINE_XATTR) {
+            Ok(_) => Ok(true),
+            Err(rustix::io::Errno::NOATTR) => Ok(false),
+            Err(e) => Err(e.into()),
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = path;
+        Ok(false)
+    }
+}
+
+/// Remove [`QUARANTINE_XATTR`] from exactly `path` (no-op when absent or off macOS). Call it
+/// only after the file matched its pinned SHA-256: it tells macOS to trust the file.
+pub fn clear_quarantine(path: &Path) -> io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        match rustix::fs::removexattr(path, QUARANTINE_XATTR) {
+            Ok(()) | Err(rustix::io::Errno::NOATTR) => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = path;
+        Ok(())
+    }
+}
+
+/// How long [`start`] waits for the netstack to answer; then the helper fails (exit 76).
+pub const READY_TIMEOUT: Duration = Duration::from_secs(10);
+/// Interval between readiness probes.
+const READY_PROBE_EVERY: Duration = Duration::from_millis(250);
+
+/// An ARP request from the guest's own MAC/IP for the gateway. Both netstacks answer it, so
+/// the first frame back means the netstack is serving.
+#[must_use]
+pub fn arp_probe() -> Vec<u8> {
+    let mut f = vec![0xff; 6];
+    f.extend_from_slice(&GUEST_MAC);
+    f.extend_from_slice(&ETHERTYPE_ARP.to_be_bytes());
+    f.extend_from_slice(&[0, 1, 0x08, 0x00, 6, 4, 0, 1]); // Ethernet/IPv4, request
+    f.extend_from_slice(&GUEST_MAC);
+    f.extend_from_slice(&GUEST_IP.octets());
+    f.extend_from_slice(&[0; 6]);
+    f.extend_from_slice(&GATEWAY_IP.octets());
+    f
+}
+
+/// Wait until the netstack answers: send [`arp_probe`] (again every 250 ms) and return once
+/// the ingress shuttle has delivered any frame (`stats.to_guest > 0`). Errors when the child
+/// exits or `timeout` passes.
+///
+/// Why: on its first run after install, macOS scans the new gvproxy binary (Gatekeeper /
+/// XProtect) before it starts reading, and a guest that booted meanwhile ran DHCP and DNS
+/// into the void (no egress for ~20 s). Waiting here, before the VM exists, makes the
+/// network ready by the time `init` brings `eth0` up. The pinned-hash check is unchanged.
+/// The netstack's reply reaches the guest NIC's queue once the VM starts; an unsolicited ARP
+/// reply is ignored by the guest kernel.
+pub fn wait_ready(
+    netstack: &UnixStream,
+    framing: Framing,
+    stats: &Stats,
+    child: &mut Child,
+    timeout: Duration,
+) -> io::Result<Duration> {
+    let t0 = Instant::now();
+    let probe = arp_probe();
+    let mut w = netstack;
+    let mut next_probe = t0;
+    loop {
+        if stats.to_guest.load(Ordering::Relaxed) > 0 {
+            return Ok(t0.elapsed());
+        }
+        if let Some(status) = child.try_wait()? {
+            return Err(io::Error::other(format!(
+                "exited before it was ready: {status}"
+            )));
+        }
+        let now = Instant::now();
+        if now >= t0 + timeout {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("no answer within {} ms", timeout.as_millis()),
+            ));
+        }
+        if now >= next_probe {
+            framing.write_frame(&mut w, &probe)?;
+            next_probe = now + READY_PROBE_EVERY;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 /// Spawn `binary` (already verified by the caller; on Linux the `/proc/self/fd/<n>` of the
 /// verified fd) as `kind`, with `argv0` (the pinned path: passt picks its mode from the
 /// name) and an empty environment, its stdin (gvproxy: also stdout) on a fresh socketpair,
-/// stderr inherited; start the two filter threads. The netstack exits when the helper's end
-/// closes (EOF), i.e. when the helper process dies for any reason. It inherits the helper's
-/// process group (torn down with it) and, on Linux, its cgroup leaf.
+/// stderr inherited; start the two filter threads, then wait (bounded by [`READY_TIMEOUT`])
+/// until the netstack answers ([`wait_ready`]), so the VM never boots before its network is
+/// served. The netstack exits when the helper's end closes (EOF), i.e. when the helper
+/// process dies for any reason. It inherits the helper's process group (torn down with it)
+/// and, on Linux, its cgroup leaf.
 pub fn start(
     kind: NetstackKind,
     binary: &Path,
@@ -631,9 +756,10 @@ pub fn start(
     if kind == NetstackKind::Gvproxy {
         cmd.stdout(Stdio::from(OwnedFd::from(ns_child_end.try_clone()?)));
     }
-    let child = cmd.spawn()?;
+    let mut child = cmd.spawn()?;
     drop(ns_child_end);
     drop(cmd);
+    let probe_end = ns_helper_end.try_clone()?;
 
     let stats = Arc::new(Stats::default());
     let framing = kind.framing();
@@ -662,6 +788,25 @@ pub fn start(
                 }
             })?;
     }
+    match wait_ready(&probe_end, framing, &stats, &mut child, READY_TIMEOUT) {
+        Ok(d) => log(format!("net: {kind} ready after {} ms", d.as_millis())),
+        Err(e) => {
+            // Fail fast and loudly instead of booting a guest with a dead NIC.
+            let _ = child.kill();
+            let _ = child.wait();
+            let hint = if kind == NetstackKind::Gvproxy {
+                " (on macOS a `com.apple.quarantine` attribute makes Gatekeeper block the \
+                 unnotarized gvproxy behind a dialog; `sandcrab libkrun install` clears it)"
+            } else {
+                ""
+            };
+            return Err(io::Error::new(
+                e.kind(),
+                format!("{kind} netstack not ready: {e}{hint}"),
+            ));
+        }
+    }
+    drop(probe_end);
     Ok(Started {
         guest_fd: OwnedFd::from(guest_vm_end),
         child,
@@ -762,10 +907,7 @@ mod tests {
         ));
         // A non-first fragment has no ports: never trusted as DNS.
         let frag = ipv4(GATEWAY_IP, PROTO_UDP, 53, 0x0010);
-        assert!(matches!(
-            p.check(&frag),
-            Err(Denial::GatewayService { port: None, .. })
-        ));
+        assert!(matches!(p.check(&frag), Err(Denial::Fragment { .. })));
     }
 
     #[test]
@@ -860,6 +1002,152 @@ mod tests {
         let total = u16::try_from(f.len() - 14).unwrap();
         f[16..18].copy_from_slice(&total.to_be_bytes());
         assert!(matches!(p.check(&f), Err(Denial::Smtp { port: 25, .. })));
+    }
+
+    /// xattr presence only (never executes the file, so no Gatekeeper dialog).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn quarantine_is_detected_and_cleared() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("gvproxy");
+        std::fs::write(&f, b"not a binary").unwrap();
+        assert!(!quarantined(&f).unwrap());
+        rustix::fs::setxattr(
+            &f,
+            QUARANTINE_XATTR,
+            b"0081;00000000;curl;",
+            rustix::fs::XattrFlags::empty(),
+        )
+        .unwrap();
+        assert!(quarantined(&f).unwrap());
+        clear_quarantine(&f).unwrap();
+        assert!(!quarantined(&f).unwrap());
+        clear_quarantine(&f).unwrap(); // absent: no-op
+    }
+
+    #[test]
+    fn arp_probe_passes_the_filter_and_asks_for_the_gateway() {
+        let f = arp_probe();
+        assert_eq!(f.len(), 42);
+        assert_eq!(policy().check(&f), Ok(()));
+        assert_eq!(&f[38..42], &GATEWAY_IP.octets());
+        assert_eq!(&f[6..12], &GUEST_MAC);
+    }
+
+    /// A fake netstack that only starts answering after a delay (first-run scan): the wait
+    /// returns once the first frame comes back, after re-probing; a silent one times out.
+    #[test]
+    fn wait_ready_waits_for_a_late_netstack() {
+        let spawn_sleeper = || {
+            Command::new("sleep")
+                .arg("30")
+                .stdin(Stdio::null())
+                .spawn()
+                .unwrap()
+        };
+        for (delay, timeout, ok) in [
+            (Duration::from_millis(600), Duration::from_secs(5), true),
+            (Duration::from_secs(60), Duration::from_millis(300), false),
+        ] {
+            let (helper, ns) = UnixStream::pair().unwrap();
+            let stats = Arc::new(Stats::default());
+            let (s2, h2) = (Arc::clone(&stats), helper.try_clone().unwrap());
+            let (guest_a, _guest_b) = UnixStream::pair().unwrap();
+            std::thread::spawn(move || {
+                let _ = shuttle_ingress(h2, guest_a, Framing::Le16, &s2);
+            });
+            std::thread::spawn(move || {
+                std::thread::sleep(delay);
+                let mut r = BufReader::new(&ns);
+                let mut buf = Vec::new();
+                let mut probes = 0;
+                while Framing::Le16.read_frame(&mut r, &mut buf).unwrap_or(false) {
+                    probes += 1;
+                    if probes == 1 {
+                        Framing::Le16.write_frame(&mut &ns, &buf).unwrap();
+                    }
+                }
+            });
+            let mut child = spawn_sleeper();
+            let res = wait_ready(&helper, Framing::Le16, &stats, &mut child, timeout);
+            let _ = child.kill();
+            let _ = child.wait();
+            assert_eq!(res.is_ok(), ok, "{res:?}");
+            if ok {
+                // Measured from inside `wait_ready`, which starts just after the fake.
+                assert!(res.unwrap() + Duration::from_millis(200) >= delay);
+            }
+        }
+        // A netstack that dies is reported at once, not after the timeout.
+        let (helper, _ns) = UnixStream::pair().unwrap();
+        let mut child = Command::new("true").spawn().unwrap();
+        let t0 = Instant::now();
+        let e = wait_ready(
+            &helper,
+            Framing::Le16,
+            &Stats::default(),
+            &mut child,
+            Duration::from_secs(10),
+        )
+        .unwrap_err();
+        assert!(e.to_string().contains("exited"), "{e}");
+        assert!(t0.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn fragmented_tcp_udp_is_dropped() {
+        let p = policy();
+        let dst: Ipv4Addr = "1.1.1.1".parse().unwrap();
+        for proto in [PROTO_TCP, PROTO_UDP] {
+            // Any fragment: first (MF, offset 0), middle (MF, offset > 0), last (offset > 0).
+            for frag in [IP_MF, IP_MF | 1, 1, 0x1fff] {
+                assert_eq!(
+                    p.check(&ipv4(dst, proto, 443, frag)),
+                    Err(Denial::Fragment { dst, proto }),
+                    "proto {proto} frag {frag:#06x}"
+                );
+            }
+            // DF alone is not fragmentation.
+            assert_eq!(p.check(&ipv4(dst, proto, 443, 0x4000)), Ok(()));
+        }
+        // ICMP may fragment (big pings); its destination is still checked.
+        assert_eq!(p.check(&ipv4(dst, 1, 0, IP_MF)), Ok(()));
+        assert!(matches!(
+            p.check(&ipv4("127.0.0.1".parse().unwrap(), 1, 0, IP_MF | 3)),
+            Err(Denial::Denied { .. })
+        ));
+    }
+
+    #[test]
+    fn tiny_first_fragment_cannot_bypass_the_smtp_block() {
+        let p = policy();
+        let dst: Ipv4Addr = "1.1.1.1".parse().unwrap();
+        // Offset 0 + MF with only 2 L4 bytes (source port, no destination port).
+        let mut f = ipv4(dst, PROTO_TCP, 25, IP_MF);
+        f.truncate(14 + 20 + 2);
+        let total = u16::try_from(f.len() - 14).unwrap();
+        f[16..18].copy_from_slice(&total.to_be_bytes());
+        assert_eq!(
+            p.check(&f),
+            Err(Denial::Fragment {
+                dst,
+                proto: PROTO_TCP
+            })
+        );
+        // Same size without MF: truncated L4 header, still never forwarded.
+        f[20..22].copy_from_slice(&0u16.to_be_bytes());
+        assert_eq!(
+            p.check(&f),
+            Err(Denial::Fragment {
+                dst,
+                proto: PROTO_TCP
+            })
+        );
+        // ...and the follow-up fragment (no port at all) is dropped too.
+        assert!(matches!(
+            p.check(&ipv4(dst, PROTO_TCP, 0, 1)),
+            Err(Denial::Fragment { .. })
+        ));
     }
 
     #[test]

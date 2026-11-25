@@ -6,6 +6,7 @@
 //!
 //! Layout:
 //! - [`auth`] — the `auth` frame every connection must open with when a token is set.
+//! - [`preauth`] — the pre-authentication budget (evict-oldest queue, short deadline).
 //! - [`relay`] — `crabd relay`, the TCP → Unix-socket pump of the Docker TCP transport.
 //! - [`codec`] — async adapter over the protocol crate's synchronous frame helpers.
 //! - [`server`] — listeners (UDS / TCP / vsock), per-connection request multiplexing,
@@ -22,6 +23,7 @@ pub mod codec;
 pub mod context;
 pub mod hardening;
 pub mod init;
+pub mod preauth;
 pub mod relay;
 pub mod server;
 pub mod tools;

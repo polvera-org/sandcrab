@@ -111,6 +111,15 @@ pub fn other_guests() -> Vec<String> {
     out
 }
 
+/// Replace the recorded hostname with `label` (`--host-label`). The hostname is the only
+/// host-identifying name [`HostInfo`] carries, so after this the label is the only name in
+/// the result.
+pub fn apply_label(info: &mut HostInfo, label: Option<&str>) {
+    if let Some(l) = label {
+        info.hostname = l.to_owned();
+    }
+}
+
 #[must_use]
 pub fn hostname() -> String {
     read_trim("/proc/sys/kernel/hostname")
@@ -663,6 +672,28 @@ pub(crate) mod macos {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_label_is_the_only_host_name_in_the_output() {
+        let real = "real-box-0042.internal.example";
+        let mut info = HostInfo {
+            hostname: real.into(),
+            kind: "bare-metal".into(),
+            ..HostInfo::default()
+        };
+        apply_label(&mut info, Some("kvm-dedicated"));
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(json.contains("\"hostname\":\"kvm-dedicated\""), "{json}");
+        assert!(!json.contains(real), "{json}");
+        assert!(!json.contains("real-box"), "{json}");
+        // No label: the real hostname is kept.
+        let mut info = HostInfo {
+            hostname: real.into(),
+            ..HostInfo::default()
+        };
+        apply_label(&mut info, None);
+        assert_eq!(info.hostname, real);
+    }
 
     #[cfg(target_os = "macos")]
     #[test]

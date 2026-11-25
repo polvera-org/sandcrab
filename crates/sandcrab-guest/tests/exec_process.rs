@@ -316,7 +316,11 @@ async fn pty_process_has_a_terminal() {
     p.pty = true;
     let s = process_start(&ctx, p).await.unwrap();
     let (out, _) = poll_until(&ctx, &s.process_id, |acc, _| acc.contains("term=")).await;
-    assert!(out.starts_with("/dev/pts/"), "{out:?}");
+    // Linux: /dev/pts/N; macOS: /dev/ttysNNN.
+    assert!(
+        out.starts_with("/dev/pts/") || out.starts_with("/dev/tty"),
+        "{out:?}"
+    );
     assert!(out.contains("term=xterm-256color"), "{out:?}");
     stdin(&ctx, &s.process_id, "abc\n").await.unwrap();
     let (out, r) = poll_until(&ctx, &s.process_id, |_, r| !r.running).await;

@@ -293,6 +293,95 @@ async fn unauthenticated_connections_are_refused_and_run_nothing() {
     assert_gone(&env, id).await;
 }
 
+/// Can a throwaway container on `network` open a TCP connection to `ip:port`?
+fn probe_from_container(network: &str, ip: &str, port: u16) -> bool {
+    let out = Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "--label",
+            "sandcrab.test=relay-probe",
+            "--network",
+            network,
+            "--cap-drop",
+            "ALL",
+            "sandcrab/base:0.1.0",
+            "timeout",
+            "5",
+            "bash",
+            "-c",
+            &format!("exec 3<>/dev/tcp/{ip}/{port} && echo OPEN"),
+        ])
+        .output()
+        .expect("run docker");
+    String::from_utf8_lossy(&out.stdout).contains("OPEN")
+}
+
+fn docker_desktop() -> bool {
+    Command::new("docker")
+        .args(["info", "--format", "{{.OperatingSystem}}"])
+        .output()
+        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("Docker Desktop"))
+}
+
+/// Security (review R1): with the `tcp` transport the relay is on its own ICC-off bridge, not
+/// the default one, so other containers cannot reach its crabd port: not a container on the
+/// relay network, and (Docker Engine) not one on the default bridge. Docker Desktop routes
+/// other networks to published ports, so there only the first holds (the token and crabd's
+/// pre-auth budget cover the rest).
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Docker, sandcrab/base:0.1.0 and a static crabd"]
+async fn relay_is_unreachable_from_other_containers() {
+    use sandcrab_backend_docker::spec::{RELAY_NETWORK, RELAY_PORT};
+
+    let _serial = SERIAL.lock().await;
+    let env = env();
+    if env.backend.transport() != DockerTransport::Tcp {
+        println!("SKIP relay_is_unreachable_from_other_containers: unix transport has no relay");
+        return;
+    }
+    let sb = env
+        .manager
+        .spawn(SandboxConfig::from_template("base"))
+        .await
+        .unwrap();
+    let id = sb.id();
+    let relay = docker()
+        .inspect_container(&relay_name(id), None)
+        .await
+        .unwrap();
+    let nets = relay.network_settings.unwrap().networks.unwrap();
+    assert_eq!(
+        nets.keys().collect::<Vec<_>>(),
+        [RELAY_NETWORK],
+        "relay only on its own network"
+    );
+    let ip = nets[RELAY_NETWORK].ip_address.clone().unwrap();
+    let net = docker().inspect_network(RELAY_NETWORK, None).await.unwrap();
+    assert_eq!(
+        net.options.unwrap()["com.docker.network.bridge.enable_icc"],
+        "false"
+    );
+
+    // The host path still works (the sandbox was reached through it to spawn).
+    assert_eq!(bash(&sb, "echo ok").await.stdout.trim(), "ok");
+    assert!(
+        !probe_from_container(RELAY_NETWORK, &ip, RELAY_PORT),
+        "a container on the relay network reached the relay"
+    );
+    let from_bridge = probe_from_container("bridge", &ip, RELAY_PORT);
+    if docker_desktop() {
+        println!(
+            "NOTE Docker Desktop: default-bridge container reaches the relay: {from_bridge} \
+             (Desktop routes to published ports across networks)"
+        );
+    } else {
+        assert!(!from_bridge, "a default-bridge container reached the relay");
+    }
+    sb.destroy().await.unwrap();
+    assert_gone(&env, id).await;
+}
+
 fn host_ids() -> (u32, u32) {
     (
         rustix::process::getuid().as_raw(),

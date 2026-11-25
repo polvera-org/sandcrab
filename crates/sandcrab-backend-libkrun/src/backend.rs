@@ -121,8 +121,36 @@ impl KrunLibs {
                 f.stamp = verify_pinned(f)?.stamp;
             }
         }
+        if let Some(n) = &self.netstack {
+            check_quarantine(&n.binary.path, verify)?;
+        }
         Ok(())
     }
+}
+
+/// macOS: a netstack binary carrying `com.apple.quarantine` would be blocked by Gatekeeper
+/// behind a dialog (the upstream gvproxy is not notarized), leaving the guest without a
+/// network. When its pin was just verified, the attribute is removed from that exact file;
+/// unverified, it is refused with the fix.
+fn check_quarantine(path: &Path, verified: bool) -> Result<()> {
+    let io = |e: std::io::Error| SandboxError::Backend {
+        backend: "libkrun".into(),
+        message: format!("{}: {e}", path.display()),
+    };
+    if !netstack::quarantined(path).map_err(io)? {
+        return Ok(());
+    }
+    if verified {
+        netstack::clear_quarantine(path).map_err(io)?;
+        tracing::info!(netstack = %path.display(), "cleared com.apple.quarantine after the pin check");
+        return Ok(());
+    }
+    Err(SandboxError::InvalidConfig(format!(
+        "netstack `{}` carries com.apple.quarantine, so macOS would block it behind a \
+         Gatekeeper dialog; re-run `sandcrab libkrun install` (or `xattr -d \
+         com.apple.quarantine` on that file once you trust it)",
+        path.display()
+    )))
 }
 
 /// Open `pin` once and verify it through that fd, as a [`SandboxError`].

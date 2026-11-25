@@ -41,9 +41,10 @@ use std::process::Command;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "docker")]
+use sandcrab_sdk::DockerConfig;
 use sandcrab_sdk::{
-    BashParams, BashResult, DockerConfig, Sandbox, SandboxId, Sandcrab, SandcrabBuilder,
-    WorkspaceClient,
+    BashParams, BashResult, Sandbox, SandboxId, Sandcrab, SandcrabBuilder, WorkspaceClient,
 };
 use tokio::sync::RwLock;
 
@@ -110,6 +111,7 @@ pub fn crabd() -> &'static Path {
 }
 
 /// Docker config with the test crabd.
+#[cfg(feature = "docker")]
 pub fn docker_config() -> DockerConfig {
     DockerConfig {
         crabd_path: crabd().to_path_buf(),
@@ -139,7 +141,13 @@ impl Harness {
         // `(sandcrab, short run dir)`: only libkrun needs the run dir, so it is returned per
         // arm rather than assigned (a `let mut` would be unused in some feature combos).
         let (sc, run): (_, Option<tempfile::TempDir>) = match backend {
+            #[cfg(feature = "docker")]
             E2eBackend::Docker => (builder.docker(docker_config()).build().unwrap(), None),
+            #[cfg(not(feature = "docker"))]
+            E2eBackend::Docker => {
+                eprintln!("SKIP {test}: {BACKEND_ENV}=docker needs `--features docker`");
+                return None;
+            }
             #[cfg(all(feature = "firecracker", target_os = "linux"))]
             E2eBackend::Firecracker => (
                 builder

@@ -368,7 +368,7 @@ The spike proved that **TSI is unsafe as a default**. It gives the guest the **h
 |---|---|
 | `disabled` (default) | `krun_disable_implicit_vsock` + `krun_add_vsock(ctx, 0)` (vsock without TSI) + `krun_set_port_map([])`. No NIC. Only `lo`. Verified unreachable **[spike]** |
 | `unrestricted` (Phase B, **shipped**, step `lk-net-userspace`) | A virtio-net NIC on the pinned userspace netstack, **behind the helper's egress filter** (§9.1): passt on Linux, gvproxy on macOS. Needs the netstack installed (`sandcrab libkrun install`); otherwise **`PolicyUnenforceable`** with the install hint. TSI stays off |
-| `unrestricted` + TSI opt-in (Phase A, **deprecated**) | `LibkrunConfig.allow_tsi_unrestricted = true` / CLI `--libkrun-tsi` (documented as **"guest can reach host loopback services"**) → TSI with `KRUN_TSI_HIJACK_INET` and an **empty port map**. An explicit opt-in wins over the netstack (never silently replaced); a missing netstack never falls back to it |
+| `unrestricted` + TSI opt-in (Phase A, **deprecated**) | `LibkrunConfig.allow_tsi_unrestricted = true` / CLI `--libkrun-tsi` (documented as **"guest can reach host loopback services"**) → TSI with `KRUN_TSI_HIJACK_INET` and an **empty port map**. An installed netstack wins over the opt-in (the opt-in is then ignored with an error-level log on every spawn, since the safe path exists); the opt-in only applies where no netstack is installed, and a missing netstack never falls back to TSI without it |
 | `egress_restricted` | `PolicyUnenforceable` (Phase 3 egress proxy), the same as other backends |
 
 ### 9.1 Phase B: userspace netstack behind an egress filter
@@ -400,12 +400,22 @@ netstack: passt `--fd 0` (BE32 frames) | gvproxy `-listen-stdio accept` (LE16 fr
   `0/8 10/8 100.64/10 127/8 169.254/16 172.16/12 192.0.0/24 192.0.2/24 192.168/16 198.18/15 198.51.100/24
   203.0.113/24 224/4 240/4` (the FC egress policy's reserved ranges, which cover gvproxy's `192.168.127.254` alias and
   cloud metadata), nor the host's own addresses and on-link subnets (`getifaddrs` at spawn), nor TCP 25/465/587 (SMTP).
-  Malformed frames are dropped. Netstack → guest frames are only length-checked.
+  Malformed frames are dropped, and so is every fragmented TCP/UDP packet (MF set or a non-zero offset) and any
+  TCP/UDP packet shorter than an 8-byte L4 header, so the port checks always see the ports (a tiny first fragment
+  could otherwise slip past the SMTP block where the netstack reassembles). The guest never needs to fragment
+  (MTU 1500, PMTU in the netstack); fragmented ICMP still passes the destination check. Netstack → guest frames are only length-checked.
 - **Netstack process:** pinned by SHA-256 (the helper hashes it right before spawning; mismatch → exit 71), spawned
   by the helper as the same unprivileged user with an empty environment, `cwd /`, in the helper's process group and
   (Linux) cgroup leaf. It **listens on nothing**: its only channel is the socketpair, so when the helper dies — however
   it dies — the netstack reads EOF and exits (passt `--fd` is one-shot; gvproxy exits on stdio EOF). No sockets on
   disk, so no socket dir to protect. A watcher thread reaps it and logs the frame counters. Spawn failure → exit 76.
+- **Netstack readiness and quarantine:** before the VM boots, the helper sends an ARP probe for the gateway (re-sent
+  every 250 ms) and waits up to 10 s for the netstack's first frame. A netstack that exits or stays silent fails the
+  spawn with exit 76 and a clear error, never a guest with a dead NIC. Cause seen on macOS: a freshly written gvproxy
+  is scanned on first exec, and a file carrying `com.apple.quarantine` is blocked by Gatekeeper behind a dialog (the
+  upstream release is not notarized). At backend construction, after the netstack matched its pinned SHA-256, the
+  quarantine attribute is removed from that exact file; without pin verification such a file is refused with the
+  fix. The pinned hash is of the original file and is never changed.
 - **Pins** (`netstack_pins.rs`, `<home>/artifacts/libkrun-net/<kind>-<version>/manifest.json`): gvproxy `v0.9.0`
   release asset `gvproxy-darwin` (universal, ad hoc signed; sha `e2a6825b…`, installed byte for byte); passt
   `2026_10_02.cba3570` (commit `cba35706…`), built `make static` from the pinned tag by `scripts/fetch-libkrun.sh`
@@ -438,7 +448,7 @@ Port 0, duplicates and more than 64 ports are `InvalidConfig` before anything st
   `InvalidConfig`. HVF maps guest RAM lazily. Host RSS grows towards `memory_mb` plus about 100 MB of VMM overhead **[spike: ~105 MB idle]**.
   There is no balloon in Phase A (`krun_set_balloon_free_page_reporting_mode` is a later lever).
 - **Disk:** `disk_mb` sizes the scratch image. `/tmp` and the overlay upper live there.
-- **Host-side caps:** **Linux** puts the helper in a cgroup v2 leaf (`memory.max = mem + 128 MiB`, `pids.max = 64`), reusing the FC
+- **Host-side caps:** **Linux** puts the helper in a cgroup v2 leaf (`memory.max = mem + 128 MiB`, `memory.swap.max = 0`, `pids.max = 64`), reusing the FC
   `CgroupLeaf` (moved to core or `sandcrab-rootfs`… see the DAG: copied first, deduplicated later). **macOS has no cgroups.** The guest RAM
   bounds the guest, and VMM overhead is unbounded. This is documented and surfaced by `doctor`.
 - **Guest limits:** PIDs, files and so on inside the VM are the guest's business. The VM is the boundary. We do not use `krun_set_rlimits`.

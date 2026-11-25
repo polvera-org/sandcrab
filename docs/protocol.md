@@ -85,8 +85,14 @@ first connection, readiness retries, reconnects and every tunnel connection alik
 - `crabd` reads the token file once at start and deletes it (when the mount is writable), so
   tool processes started later cannot read it.
 - The comparison is constant-time. A missing, wrong or malformed token, a first frame that
-  is not `auth`, EOF, or no frame within 5 s gets one `-32008 UNAUTHORIZED` error frame
+  is not `auth`, EOF, or no frame within 2 s gets one `-32008 UNAUTHORIZED` error frame
   with a generic message. `crabd` then closes the connection without reading anything else.
+- **Pre-auth budget.** A connection that has not authenticated yet does not hold one of the
+  `--max-connections` slots. Up to 16 connections may be authenticating at once; when a 17th
+  arrives, the **oldest** unauthenticated one is closed (not the newcomer). Only an
+  authenticated connection takes a slot. So peers without the token cannot starve the host by
+  holding idle connections: the host sends `auth` in its first write and is through long
+  before a flood can evict it. Refusals are logged at most once a second.
 - The host never logs the token: `AuthToken` and `AuthParams` print `<redacted>` in `Debug`.
   `sandcrab_core::AuthConnector` sends the frame on every stream it opens, so no host code
   path can skip it.
@@ -371,7 +377,7 @@ The same frames run over every transport.
 | Transport | Used by | Details |
 | --- | --- | --- |
 | Unix socket | Docker (`unix` transport, Linux default) | `crabd serve --unix /run/sandcrab/crabd.sock --auth-token-file /run/sandcrab/auth-token`. The directory is a per-sandbox host directory bind-mounted into the container; the socket is chmod 0660 and `crabd` runs as the host user's uid. A stale socket is replaced on start. |
-| TCP via `crabd relay` | Docker (`tcp` transport, macOS / Docker Desktop default) | `crabd serve --unix /opt/sandcrab/sock/crabd.sock --auth-token-file /run/sandcrab/auth-token` in the sandbox; the socket lives in a per-sandbox tmpfs volume. A relay container runs `crabd relay --tcp 0.0.0.0:7070 --unix /opt/sandcrab/sock/crabd.sock`, published on host `127.0.0.1` with an ephemeral port. The relay copies bytes and does no auth; `crabd` authenticates every relayed connection. |
+| TCP via `crabd relay` | Docker (`tcp` transport, macOS / Docker Desktop default) | `crabd serve --unix /opt/sandcrab/sock/crabd.sock --auth-token-file /run/sandcrab/auth-token` in the sandbox; the socket lives in a per-sandbox tmpfs volume. A relay container runs `crabd relay --tcp 0.0.0.0:7070 --unix /opt/sandcrab/sock/crabd.sock`, published on host `127.0.0.1` with an ephemeral port. The relay copies bytes and does no auth; `crabd` authenticates every relayed connection. The relay reads only `crabd`'s first frame on each connection: until it arrives the connection waits in a 16-place pending queue (oldest evicted, 4 s deadline), and unless it is a success the relay forwards it and closes the connection, so only authenticated connections take one of its 256 slots. The relay sits on its own ICC-off `sandcrab-relay` bridge, never the default one (see [hosting](hosting.md)). |
 | TCP | local testing | `crabd serve --tcp 127.0.0.1:5000`. Without `--auth-token-file` it is **unauthenticated** (logged as a warning): bind to loopback or a private network only. |
 | vsock | Firecracker | `crabd serve --vsock 1024` (any CID). The host side uses Firecracker's vsock-over-UDS: connect to the VM's vsock Unix socket, write `CONNECT <port>\n`, read one line `OK <host_port>\n`; after that the stream carries frames. Any other reply, or EOF (no guest listener yet), means retry. |
 

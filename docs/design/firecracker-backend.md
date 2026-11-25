@@ -299,7 +299,8 @@ The same tunnel primitive is reusable by other microVM backends.
 - Spawn: `firecracker --api-sock api.sock --id <uuid> --level Warn` (tokio `Command`, `kill_on_drop(true)`, stdio → log).
   The PID is written into a cgroup v2 leaf **before any API call**. Guest memory is only touched after `InstanceStart`, so accounting
   is complete. The leaf is `<user delegated cgroup>/sandcrab.slice/<uuid>` (systemd user delegation of `memory pids cpu`).
-  Limits: `memory.max = mem_mb + 64 MiB` (VMM headroom), `pids.max = 64`. vCPU/RAM come from `ResourceLimits` via `/machine-config`
+  Limits: `memory.max = mem_mb + 64 MiB` (VMM headroom), `memory.swap.max = 0` (no swapping past the cap; skipped when
+  the kernel has no swap accounting), `pids.max = 64`. vCPU/RAM come from `ResourceLimits` via `/machine-config`
   (`smt=false`). `disk_mb` sets the scratch size.
 - Teardown, by budget: ① rw exports (§5). ② `init.shutdown{grace_ms:500}` → guest `reboot` → with `reboot=k` FC exits
   (`docs/api_requests/actions.md`; guest reboot ends the process). Expected **~30–80 ms**. ③ If not exited at +1.5 s:

@@ -7,11 +7,13 @@
 //! | `network.policy` | outcome |
 //! |---|---|
 //! | `disabled` | [`HelperNetwork::Disabled`]: TSI off (`disable_implicit_vsock` + `add_vsock(0)`), no NIC |
-//! | `unrestricted` | [`HelperNetwork::Userspace`] when the pinned netstack is installed (passt / gvproxy behind the helper's egress filter, [`crate::netstack`]); [`HelperNetwork::TsiUnrestricted`] only with the deprecated [`LibkrunConfig::allow_tsi_unrestricted`](crate::LibkrunConfig::allow_tsi_unrestricted) (**the guest can reach host loopback services**); otherwise `PolicyUnenforceable` |
+//! | `unrestricted` | [`HelperNetwork::Userspace`] when the pinned netstack is installed (passt / gvproxy behind the helper's egress filter, [`crate::netstack`]); otherwise [`HelperNetwork::TsiUnrestricted`] only with the deprecated [`LibkrunConfig::allow_tsi_unrestricted`](crate::LibkrunConfig::allow_tsi_unrestricted) (**the guest can reach host loopback services**); otherwise `PolicyUnenforceable` |
 //! | `egress_restricted` | `PolicyUnenforceable` (no egress proxy before Phase 3) |
 //!
-//! The TSI opt-in, when given, wins over the netstack: an explicit operator choice is never
-//! silently replaced. A missing netstack never falls back to TSI.
+//! An installed netstack wins over the deprecated TSI opt-in: the opt-in is then ignored with
+//! an error-level log on every spawn, because the safe path exists and TSI would hand the guest
+//! the host's loopback. The opt-in only takes effect where no netstack is installed. A missing
+//! netstack never falls back to TSI without it.
 //!
 //! A domain allow-list is only meaningful with `egress_restricted`; on any other policy it is
 //! rejected rather than ignored. Published ports do not depend on the policy: they go through
@@ -43,10 +45,20 @@ pub fn plan(network: &NetworkConfig, opts: NetOptions) -> Result<HelperNetwork> 
     }
     match network.policy {
         NetworkPolicy::Disabled => Ok(HelperNetwork::Disabled),
+        NetworkPolicy::Unrestricted if opts.userspace.is_some() => {
+            if opts.allow_tsi_unrestricted {
+                tracing::error!(
+                    netstack = opts.userspace.map(NetstackKind::as_str),
+                    "allow_tsi_unrestricted (--libkrun-tsi) is deprecated and IGNORED: the pinned \
+                     userspace netstack is installed and is used instead (TSI would let the guest \
+                     reach this host's loopback); drop the option"
+                );
+            }
+            Ok(HelperNetwork::Userspace)
+        }
         NetworkPolicy::Unrestricted if opts.allow_tsi_unrestricted => {
             Ok(HelperNetwork::TsiUnrestricted)
         }
-        NetworkPolicy::Unrestricted if opts.userspace.is_some() => Ok(HelperNetwork::Userspace),
         NetworkPolicy::Unrestricted => Err(SandboxError::PolicyUnenforceable(format!(
             "network policy `unrestricted` on libkrun needs the pinned userspace network stack \
              ({}), which is not installed: run `sandcrab libkrun install` (or \
@@ -120,13 +132,16 @@ mod tests {
     }
 
     #[test]
-    fn explicit_tsi_opt_in_still_works_and_wins() {
-        for opts in [TSI, BOTH] {
-            assert_eq!(
-                plan(&NetworkConfig::unrestricted(), opts).unwrap(),
-                HelperNetwork::TsiUnrestricted
-            );
-        }
+    fn tsi_opt_in_only_applies_without_a_netstack() {
+        assert_eq!(
+            plan(&NetworkConfig::unrestricted(), TSI).unwrap(),
+            HelperNetwork::TsiUnrestricted
+        );
+        // The installed netstack wins: the deprecated opt-in is ignored (logged), never TSI.
+        assert_eq!(
+            plan(&NetworkConfig::unrestricted(), BOTH).unwrap(),
+            HelperNetwork::Userspace
+        );
     }
 
     #[test]

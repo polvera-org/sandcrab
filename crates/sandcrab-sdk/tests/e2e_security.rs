@@ -6,9 +6,9 @@ mod common;
 
 use std::{sync::Arc, time::Duration};
 
-use common::{
-    E2eBackend, bash_t, docker_config, docker_ps, host_uid, run, run_exclusive, sh, wait_for,
-};
+#[cfg(feature = "docker")]
+use common::docker_config;
+use common::{E2eBackend, bash_t, docker_ps, host_uid, run, run_exclusive, sh, wait_for};
 use sandcrab_sdk::{
     BackendKind, MountMode, NetworkConfig, NetworkPolicy, SandboxConfig, SandboxError, UserSpec,
     protocol::init::HARDENING_SYSCTLS,
@@ -32,16 +32,19 @@ async fn backend_selection_is_explicit_and_never_downgraded() {
                 "{caps:?}"
             );
             // Hardware isolation required → Docker refused (never a silent downgrade).
-            let err = h
-                .builder()
-                .docker(docker_config())
-                .require_hardware_isolation(true)
-                .build()
-                .unwrap_err();
-            assert!(
-                matches!(err, SandboxError::HardwareIsolationRequired(_)),
-                "{err}"
-            );
+            #[cfg(feature = "docker")]
+            {
+                let err = h
+                    .builder()
+                    .docker(docker_config())
+                    .require_hardware_isolation(true)
+                    .build()
+                    .unwrap_err();
+                assert!(
+                    matches!(err, SandboxError::HardwareIsolationRequired(_)),
+                    "{err}"
+                );
+            }
         }
 
         // Per-spawn requirement: refused unless the backend really is hardware isolated.

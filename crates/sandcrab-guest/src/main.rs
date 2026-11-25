@@ -53,7 +53,8 @@ struct ServeArgs {
     #[arg(long, value_name = "PATH", default_value = "/workspace")]
     default_cwd: PathBuf,
 
-    /// Max concurrently served connections.
+    /// Max concurrently served connections. With --auth-token-file, connections that have not
+    /// authenticated yet have their own small budget and do not count.
     #[arg(long, value_name = "N", default_value_t = 64, value_parser = clap::value_parser!(u32).range(1..))]
     max_connections: u32,
 
@@ -85,7 +86,8 @@ struct RelayArgs {
     #[arg(long, value_name = "PATH")]
     unix: PathBuf,
 
-    /// Max concurrently relayed connections.
+    /// Max concurrently relayed (authenticated) connections. Connections still waiting for
+    /// `crabd`'s auth verdict have their own small budget and do not count.
     #[arg(long, value_name = "N", default_value_t = 256, value_parser = clap::value_parser!(u32).range(1..))]
     max_connections: u32,
 }
@@ -194,9 +196,8 @@ async fn serve(args: ServeArgs) -> std::io::Result<()> {
 async fn relay(args: RelayArgs) -> std::io::Result<()> {
     let shutdown = shutdown_signal()?;
     let relay = Relay::bind(RelayConfig {
-        listen: args.tcp,
-        target: args.unix,
         max_connections: args.max_connections as usize,
+        ..RelayConfig::new(args.tcp, args.unix)
     })
     .await?;
     info!(
