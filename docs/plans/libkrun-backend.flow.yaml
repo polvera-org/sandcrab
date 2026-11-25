@@ -264,7 +264,7 @@ steps:
     title: "crabd: /sys read-only for the sandbox (Docker parity), hardening sysctls in init (unprivileged userns/bpf/userfaultfd/io_uring/perf off) per docs/design/guest-seccomp.md"
     depends_on: [guest-hardening-2, lk-w2-emfile, docker-tcp-macos]
     artifacts: [crates/sandcrab-guest/]
-    status: todo
+    status: doing
 
   - id: docker-tcp-macos
     phase: implement
