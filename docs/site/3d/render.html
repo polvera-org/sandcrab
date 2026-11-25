@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sandcrab still render</title>
+<style>
+  html, body { margin: 0; background: transparent; }
+  #stage { width: var(--w, 1200px); height: var(--h, 1200px); }
+  #out { display: none; }
+</style>
+</head>
+<body>
+<!--
+  Still render of a kit scene to a transparent PNG (no sand, no ground shadow, fixed time).
+  Query: ?shot=mascot|jar|crates  &w=1200&h=1200 (CSS px)  &t=<seconds>  &outline=<px>  &dpr=2
+         &yaw= &pitch= &fraction=  (override the camera)  &download=1 (save the PNG)
+  The PNG data URL is written to <pre id="out"> so a headless browser can read it with
+  --dump-dom; see README.md ("Still renders").
+-->
+<div id="stage"></div>
+<pre id="out"></pre>
+<script type="module">
+import { createStage, createCrab, createJarBody, crabMeta, jarMeta, createKit, PALETTE as C, THREE } from './src/index.js';
+
+const q = new URLSearchParams(location.search);
+const num = (k, d) => (q.has(k) ? Number(q.get(k)) : d);
+const W = num('w', 1200), H = num('h', 1200);
+const el = document.querySelector('#stage');
+el.style.setProperty('--w', `${W}px`);
+el.style.setProperty('--h', `${H}px`);
+
+const SHOTS = {
+  // The mascot alone, waving, three-quarter view.
+  mascot: {
+    t: 0.75,
+    meta: { ...crabMeta, view: { ...crabMeta.view, yaw: -0.45, sway: 0 } },
+    create() {
+      const crab = createCrab({ pose: 'wave' });
+      return { object3d: crab.object3d, update: (t, dt) => crab.update(t, dt), dispose: () => crab.dispose() };
+    },
+  },
+  // The crab sealed in its own jar: one sandbox, hardware isolated.
+  jar: {
+    t: 7,
+    meta: { ...jarMeta, view: { ...jarMeta.view, sway: 0 } },
+    create() { return createJarBody({ sealed: true }); },
+  },
+  // The crab beside its crates: the workspace that outlives the sandbox.
+  crates: {
+    t: 0.75,
+    meta: { ...crabMeta, view: { target: [-0.25, 0.45, 0], radius: 2.0, yaw: -0.45, pitch: 0.5, fraction: 0.8, sway: 0 } },
+    create() {
+      const k = createKit();
+      const g = new THREE.Group();
+      const crab = createCrab({ pose: 'wave', scale: 0.8 });
+      crab.object3d.position.set(0.8, 0, 0.15);
+      g.add(crab.object3d);
+      const S = 0.62;
+      const crateGeo = new THREE.BoxGeometry(S, S, S);
+      const bandGeo = new THREE.BoxGeometry(S + 0.02, 0.09, S + 0.02);
+      const mCrate = k.toon(C.teal500, { emissive: new THREE.Color(C.teal500), emissiveIntensity: 0.12 });
+      const mBand = k.toon(C.teal700);
+      const crate = (x, y, z, ry = 0) => {
+        const c = k.mesh(crateGeo, mCrate);
+        c.position.set(x, y + S / 2, z);
+        c.rotation.y = ry;
+        c.add(k.mesh(bandGeo, mBand, { outline: false }));
+        g.add(c);
+      };
+      crate(-1.55, 0, -0.15, 0.06);
+      crate(-0.88, 0, -0.1, -0.05);
+      crate(-1.22, S, -0.12, 0.2);
+      return {
+        object3d: g,
+        update: (t, dt) => crab.update(t, dt),
+        dispose: () => { crab.dispose(); k.dispose(); },
+      };
+    },
+  },
+};
+
+const shot = SHOTS[q.get('shot') || 'mascot'];
+const view = { ...shot.meta.view };
+for (const key of ['yaw', 'pitch', 'fraction']) if (q.has(key)) view[key] = num(key, view[key]);
+const def = { meta: { ...shot.meta, view }, create: shot.create };
+
+const stage = createStage(el, def, {
+  theme: 'light',
+  params: { paused: true, shadow: 0, outline: num('outline', 1.6), maxDpr: num('dpr', 2) },
+});
+// no ground: hide the shadow catcher entirely so nothing but the subject is drawn
+stage.scene.traverse((o) => { if (o.material && o.material.isShadowMaterial) o.visible = false; });
+
+requestAnimationFrame(() => requestAnimationFrame(() => {
+  stage.seek(num('t', shot.t));           // render, then read the buffer in the same task
+  const url = stage.renderer.domElement.toDataURL('image/png');
+  document.querySelector('#out').textContent = url;
+  document.title = 'done';
+  if (q.has('download')) {
+    const a = document.createElement('a');
+    a.href = url; a.download = `sandcrab-${q.get('shot') || 'mascot'}.png`; a.click();
+  }
+}));
+</script>
+</body>
+</html>

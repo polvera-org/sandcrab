@@ -124,6 +124,16 @@ faces +Z and walks sideways along X. Extra methods: `setPose`, `setWalk(0..1)`,
 - Shared three.js is about 765 KB minified (about 190 KB gzipped). Serve it with
   gzip or brotli if you can.
 
+## Still renders
+
+`render.html` renders one scene frame to a transparent PNG: no sand, no ground shadow, fixed
+time. Shots: `mascot`, `jar`, `crates`. Query: `?shot=jar&w=1200&h=1200&outline=3.5`, plus
+optional `t`, `yaw`, `pitch`, `fraction`, `dpr`, and `download=1` to save the PNG. Serve this
+folder (`python3 -m http.server`) and either open the page with `download=1`, or run headless
+Chrome with `--headless=new --use-angle=swiftshader --enable-unsafe-swiftshader
+--force-device-scale-factor=2 --virtual-time-budget=8000 --dump-dom` and decode the data URL
+from `<pre id="out">`. The README hero (`docs/assets/sandcrab-hero.png`) is the `jar` shot.
+
 ## Palette
 
 `PALETTE`: sand `#F5ECD9` / `#E8D5B0`, teal `#1F7A8C` / `#0F4C5C`, ink `#0B2F38`,
