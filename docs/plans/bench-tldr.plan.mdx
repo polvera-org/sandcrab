@@ -1,0 +1,44 @@
+---
+slug: bench-tldr
+name: Benchmarks TL;DR page
+---
+
+import { ExecutionFlowchart, TodoList, PhaseTimeline } from "ministack/components";
+
+# Benchmarks TL;DR page: execution plan
+
+A short Benchmarks page (`docs/site/benchmarks.html`) that someone can take in within a minute. It shows the
+headline numbers per backend, memory and density, and the verdict and caveats in one line each. It is generated
+from the same results JSON as the full report, so no number is typed by hand. The landing page links here, and
+this page links to the full report (`bench-report.html`), which stays for presentations and deep dives.
+
+<PhaseTimeline src="./bench-tldr.flow.yaml" />
+
+## Flow
+
+Steps sitting side by side run in parallel. Arrows are real dependencies.
+
+<ExecutionFlowchart src="./bench-tldr.flow.yaml" />
+
+## Work
+
+<TodoList src="./bench-tldr.flow.yaml" />
+
+## Proposed folds
+
+1. **Headline.** Time to a ready sandbox, plus a teardown/first call/agent turn row, for each backend on its best
+   host (with host labels), as big numbers.
+2. **Footprint.** Memory per idle sandbox, density (sandboxes per host), idle CPU.
+3. **What it means.** Three bullets: microVMs start fast enough for per-turn sandboxes; Docker is lightest on
+   memory; pick by isolation needs. One line on validity ("indicative: no run is valid yet") and a link to the
+   caveats.
+4. **Footer.** "See full benchmark →" and the date, commit and hosts of the runs.
+
+## Risks & open questions
+
+- **No run is `valid` yet** (busy Mac, HDD host, Standard tier). The page has to stay honest without becoming a
+  paper: one visible "indicative" badge plus a link to the caveats.
+- **Mac Docker numbers are still pending** the reserved weekend idle-Mac run. Proposal: show "pending" rather
+  than leave the column empty.
+- **Cross-host comparisons** (e.g. Docker on the SSD VPS vs microVMs on the HDD box) mislead. Proposal: compare
+  only within a host, and show host labels next to every number.

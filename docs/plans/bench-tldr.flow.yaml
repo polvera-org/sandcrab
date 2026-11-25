@@ -1,0 +1,57 @@
+# ministack execution flow: bench-tldr
+# Validate with: node scripts/validate-flow.mjs docs/plans/bench-tldr.flow.yaml
+
+slug: bench-tldr
+name: Benchmarks TL;DR page
+summary: >-
+  A short, easy-to-read Benchmarks page (main stats, aggregated numbers, conclusions in a few folds),
+  generated from the same results JSON as the full report. The landing page links to it, and it links to
+  the full report for deep dives.
+phases: [plan, implement, verify, document]
+
+steps:
+  - id: tldr-plan
+    phase: plan
+    agent: nova
+    title: "Scope: 3–4 folds (headline numbers per backend, memory/density, verdict + caveats in one line each), same data pipeline, same site style; landing + README link to it"
+    depends_on: []
+    artifacts: [docs/plans/bench-tldr.flow.yaml, docs/plans/bench-tldr.plan.mdx]
+    status: done
+
+  - id: tldr-page
+    phase: implement
+    agent: ada
+    title: "Build docs/site/benchmarks.html from scripts/bench-report-data.py output (no hand-typed numbers); 'See full benchmark' link to bench-report.html; light/dark; phone width"
+    depends_on: [tldr-plan]
+    artifacts: [docs/site/benchmarks.html, scripts/bench-report-data.py]
+    status: todo
+
+  - id: tldr-links
+    phase: implement
+    agent: ada
+    title: "Point the landing (nav, benchmark section, footer; rebuild), site index and README at benchmarks.html; keep bench-report.html for presentations"
+    depends_on: [tldr-page]
+    artifacts: [docs/site/landing-src/index.html, docs/site/landing/, docs/site/index.html, README.md]
+    status: todo
+
+  - id: tldr-review
+    phase: verify
+    agent: nebula
+    title: "Review: every number traces to the JSON, caveats are honest (no invalid run presented as definitive), no private hostnames, links work"
+    depends_on: [tldr-links]
+    status: todo
+
+  - id: tldr-live
+    phase: verify
+    agent: nova
+    title: "Live check in the browser: light + dark, phone width, landing → TL;DR → full report"
+    depends_on: [tldr-links]
+    status: todo
+
+  - id: tldr-docs
+    phase: document
+    agent: rosetta
+    title: "docs/bench/README.md: how the TL;DR page is generated; CHANGELOG line"
+    depends_on: [tldr-review, tldr-live]
+    artifacts: [docs/bench/README.md, CHANGELOG.md]
+    status: todo
