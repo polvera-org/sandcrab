@@ -176,6 +176,105 @@ async fn sandbox_hardening_network_user_capabilities() {
     .await;
 }
 
+/// Network `unrestricted` reaches the internet but never the host's loopback: a listener bound
+/// only to 127.0.0.1 (and one on 0.0.0.0) is probed at every address a backend maps to the
+/// host (libkrun userspace: gvproxy's NAT alias 192.168.127.254 and the gateway; Docker / FC:
+/// the default gateway) and at the host's LAN address. Cloud metadata stays unreachable.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "e2e: needs a sandbox backend (SANDCRAB_E2E_BACKEND, default docker) and internet"]
+async fn unrestricted_network_never_reaches_host_loopback() {
+    run("net-unrestricted", |h| async move {
+        if h.is_docker() && cfg!(target_os = "macos") {
+            // Docker Desktop maps `host.docker.internal` to the host by design.
+            println!("SKIP Docker Desktop: host-gateway access is a Docker Desktop feature");
+            return;
+        }
+        let listen = |ip: &str| {
+            let l = std::net::TcpListener::bind((ip, 0)).unwrap();
+            l.set_nonblocking(true).unwrap();
+            l
+        };
+        let (lo, any) = (listen("127.0.0.1"), listen("0.0.0.0"));
+        // Docker / FC: a 0.0.0.0 listener on the gateway is the host itself (not part of
+        // their contract); only the loopback-only one is probed there. libkrun denies both.
+        let mut ports = vec![lo.local_addr().unwrap().port()];
+        if h.backend == E2eBackend::Libkrun {
+            ports.push(any.local_addr().unwrap().port());
+        }
+        let lan = {
+            let s = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+            s.connect("192.0.2.1:9")
+                .ok()
+                .and_then(|()| s.local_addr().ok())
+                .map(|a| a.ip())
+        };
+
+        let sb = h
+            .sc
+            .spawn(SandboxConfig::from_template("base").network(NetworkPolicy::Unrestricted))
+            .await
+            .unwrap_or_else(|e| panic!("`unrestricted` spawn (libkrun: netstack installed?): {e}"));
+
+        let r = bash_t(
+            &sb,
+            "curl -sS -o /dev/null -w '%{http_code}' --max-time 20 https://example.com/",
+            40_000,
+        )
+        .await;
+        assert_eq!(r.stdout.trim(), "200", "no internet: {r:?}");
+
+        let gw = sh(
+            &sb,
+            "awk '$2 == \"00000000\" {print $3}' /proc/net/route | head -1",
+        )
+        .await;
+        let gw = u32::from_str_radix(gw.trim(), 16)
+            .map(|g| std::net::Ipv4Addr::from(g.swap_bytes()).to_string())
+            .unwrap_or_default();
+        let mut targets: Vec<String> = vec![gw.clone()];
+        if h.backend == E2eBackend::Libkrun {
+            targets.extend(["192.168.127.254".into(), "192.168.127.1".into()]);
+        }
+        targets.extend(lan.map(|ip| ip.to_string()));
+        targets.retain(|t| !t.is_empty());
+        let mut script = String::new();
+        for t in &targets {
+            for p in &ports {
+                script.push_str(&format!(
+                    "(timeout 3 bash -c 'echo x > /dev/tcp/{t}/{p}' 2>/dev/null \
+                     && echo OPEN {t}:{p} || echo closed {t}:{p}) & "
+                ));
+            }
+        }
+        script.push_str(
+            "(timeout 3 bash -c 'echo x > /dev/tcp/169.254.169.254/80' 2>/dev/null \
+                         && echo OPEN metadata || echo closed metadata) & wait",
+        );
+        let r = bash_t(&sb, &script, 30_000).await;
+        println!("PROBE {:?} (gw {gw}):\n{}", h.backend, r.stdout.trim());
+        assert!(
+            !r.stdout.contains("OPEN"),
+            "guest reached the host:\n{}",
+            r.stdout
+        );
+        let checked = if h.backend == E2eBackend::Libkrun {
+            vec![&lo, &any]
+        } else {
+            vec![&lo]
+        };
+        for l in checked {
+            if let Ok((_, peer)) = l.accept() {
+                panic!(
+                    "host listener {} reached from {peer}",
+                    l.local_addr().unwrap()
+                );
+            }
+        }
+        sb.destroy().await.unwrap();
+    })
+    .await;
+}
+
 /// Docker's `cap_drop: ALL`, `pids_limit` and `/tmp` tmpfs, reproduced by `crabd init` in
 /// the microVM guests: every backend must show the same baseline.
 #[tokio::test(flavor = "multi_thread")]
