@@ -333,4 +333,12 @@ steps:
     title: "hosting.md (macOS + Linux libkrun setup, install script brew/from-source, release signing: Developer ID + hardened runtime + notarization), cli.md, README backend table, ROADMAP, CHANGELOG"
     depends_on: [lk-rereview, lk-live]
     artifacts: [docs/hosting.md, docs/cli.md, README.md, docs/ROADMAP.md, CHANGELOG.md]
+    status: done
+
+  - id: readme-crab
+    phase: document
+    agent: ada
+    title: "README hero: replace the old crab photo with a transparent PNG render of the 3D crab kit, one simple static scene readable at a glance (user request)"
+    depends_on: [lk-docs]
+    artifacts: [README.md, docs/assets/]
     status: doing
