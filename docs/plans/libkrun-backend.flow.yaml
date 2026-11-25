@@ -281,11 +281,19 @@ steps:
     depends_on: [bench-report, fc-net-egress, guest-hardening-2, small-fixes, guest-hardening-3, docker-tcp-macos]
     status: todo
 
+  - id: crabagent-backends
+    phase: implement
+    agent: ada
+    title: "crabagent: --backend libkrun (macOS + Linux) and firecracker (Linux) via SDK features; needed by lk-live (crabagent was docker-only)"
+    depends_on: [bench-report]
+    artifacts: [crates/sandcrab-agent/]
+    status: doing
+
   - id: lk-live
     phase: verify
     agent: nova
     title: Live crabagent session on --backend libkrun (Mac) with a host-dir workspace
-    depends_on: [bench-report]
+    depends_on: [bench-report, crabagent-backends]
     status: todo
 
   - id: lk-docs
