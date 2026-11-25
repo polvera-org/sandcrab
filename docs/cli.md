@@ -7,10 +7,12 @@ Everything below matches `sandcrab --help` for version 0.1.0.
 ```text
 sandcrab [GLOBAL OPTIONS] <COMMAND>
 
-  doctor     Check the host (crabd, Docker, template pins, Firecracker prerequisites, state dir)
+  doctor     Check the host (crabd, Docker, template pins, Firecracker and libkrun prerequisites, state dir)
   workspace  Manage persistent workspaces
-  template   List or build templates
-  rootfs     Firecracker rootfs images (ext4) built from templates
+  template   List, build or pin templates
+  rootfs     Firecracker rootfs images (ext4) built from templates (Linux builds)
+  libkrun    libkrun backend: install the pinned libraries, netstack and signed helper
+             (macOS Apple Silicon and Linux builds)
   run        Spawn a sandbox, run a command, print its output, destroy the sandbox
   tool       Spawn a sandbox, make one tool call, print the JSON result, destroy the sandbox
   tools      Tool catalog
@@ -24,9 +26,10 @@ Accepted by every command.
 | --- | --- | --- |
 | `--state-dir <DIR>` | `$SANDCRAB_HOME`, else `~/.sandcrab` | State root: workspace registry, sandbox sockets, caches |
 | `--templates-dir <DIR>` | `./templates`, then `<state root>/templates` | Repeatable; first match wins |
-| `--backend <docker\|firecracker>` | none (`$SANDCRAB_BACKEND`) | Runtime backend. **Explicit, no fallback.** `firecracker` exists only in Linux builds. The pre-rename name `docker-dev` is still accepted as an alias of `docker` |
+| `--backend <docker\|firecracker\|libkrun>` | none (`$SANDCRAB_BACKEND`) | Runtime backend. **Explicit, no fallback.** `firecracker` (alias `fc`) exists only in Linux builds; `libkrun` (alias `krun`) in macOS Apple Silicon and Linux builds. A backend not compiled in is an error naming the ones that are. `docker-dev`, the pre-rename name, is still accepted as an alias of `docker` |
 | `--allow-unpinned` | off | `docker` only: run template images that have no host-local pin (refused by default; see [template-pins.md](template-pins.md)) |
 | `--crabd <PATH>` | `$SANDCRAB_CRABD`, else `<target dir>/<arch>-unknown-linux-musl/release/crabd` (target dir: `$CARGO_TARGET_DIR`, else `target/`) | Host path of the static musl `crabd` that gets injected |
+| `--libkrun-tsi` | off | **Deprecated**, `libkrun` only: run `--network unrestricted` through libkrun's TSI socket proxy instead of the pinned userspace netstack. With TSI the guest can reach services on the host's loopback and LAN. An installed netstack wins: the flag is then ignored, with an error-level log on every spawn. It only applies where no netstack is installed. Never used implicitly |
 | `--json` | off | Machine-readable JSON output |
 | `-v`, `-vv` | off | Lifecycle timings to stderr (`-vv`: debug logs) |
 | `-h`, `-V` | | Help, version |
@@ -44,12 +47,23 @@ another backend.
 sandcrab doctor [--fix [--all [-y]]]
 ```
 
-Checks `crabd`, Docker, every template image against this host's pin (local integrity), the state
-directory, and the Firecracker prerequisites: `/dev/kvm` readable and writable (with a
-hint for VMs without nested virtualization), `kvm` group membership, pinned kernel and
-`firecracker` binary, `mke2fs` (e2fsprogs >= 1.47.1 for tar input), the rootfs cache per
-template, the `sctapN` tap pool, and orphaned run directories. Exit code 1 if any check
-fails.
+Checks `crabd`, Docker (and the Docker transport in use, `unix` or `tcp`), every template
+image against this host's pin (local integrity), the state directory, and, per backend
+compiled into the build:
+
+- **Firecracker** (Linux): `/dev/kvm` readable and writable (with a hint for VMs without
+  nested virtualization), `kvm` group membership, pinned kernel and `firecracker` binary,
+  `mke2fs` (e2fsprogs >= 1.47.1 for tar input), the rootfs cache per template, the `sctapN`
+  tap pool, and orphaned run directories.
+- **libkrun** (macOS Apple Silicon, Linux): the `lk:*` lines: config, hypervisor, signed
+  helper and its install record, pinned libraries, `crabd`, `mke2fs`, case-insensitive
+  workspace volumes, the cgroup parent (Linux), the netstack, and orphaned run dirs of dead
+  processes, which it always reaps. What each line means and how to fix it:
+  [hosting.md §4.2](hosting.md#42-sandcrab-doctor---backend-libkrun).
+
+Exit code 1 if any check fails. Missing libkrun prerequisites fail only when libkrun is the
+selected backend (`sandcrab doctor --backend libkrun`); otherwise they are warnings. A libkrun
+install that is present but does not match its pins always fails.
 
 | Flag | |
 | --- | --- |
@@ -102,8 +116,48 @@ Firecracker only (Linux builds). No KVM needed to build.
 | `rootfs list` | List cached rootfs images |
 
 Images are cached under `<state root>/cache/rootfs/<key>/{rootfs.ext4,manifest.json}`,
-keyed by image ID, `crabd` sha256 and pipeline version. `--backend firecracker run` also
-builds the rootfs on a cache miss.
+keyed by image ID, arch, `crabd` sha256 and pipeline version. Cached images are read-only
+(`0444`), and the manifest records a stat stamp next to the SHA-256, so a spawn verifies the
+image with an `fstat` (a full re-hash only when the stamp changed). `--backend firecracker run`
+and `--backend libkrun run` also build the rootfs on a cache miss; libkrun has no `rootfs`
+subcommand, so on macOS the first spawn of a template builds it.
+
+## `libkrun install`
+
+macOS Apple Silicon and Linux builds. Setup guide: [hosting.md](hosting.md#22-libkrun-on-macos)
+(macOS), [hosting.md](hosting.md#34-libkrun-on-linux) (Linux).
+
+```sh
+sandcrab libkrun install [--from-source] [--fw-from-source] [--force]
+                         [--helper <PATH> | --no-helper] [--no-netstack] [--dry-run]
+```
+
+Installs, under the state root: the pinned libkrun + libkrunfw into
+`artifacts/libkrun/<version>/`, the pinned userspace netstack (gvproxy on macOS, passt on
+Linux) into `artifacts/libkrun-net/<kind>-<version>/`, and the `sandcrab-krun` helper into
+`bin/`, signed on macOS and recorded in `bin/sandcrab-krun.pin.json` (SHA-256 + stat stamp).
+Every directory is created `0700`.
+
+| Flag | |
+| --- | --- |
+| `--from-source` | Build libkrun and libkrunfw from the pinned git tags (`scripts/fetch-libkrun.sh`) instead of copying the Homebrew bottles. The only option on a Mac without Homebrew. Linux always builds libkrun from source |
+| `--fw-from-source` | Linux: also build libkrunfw (the guest kernel) from source instead of the pinned release asset |
+| `--force` | Reinstall the libraries and the netstack even if a verified install is present |
+| `--helper <PATH>` | Helper binary to install. Default: `sandcrab-krun` next to the `sandcrab` executable |
+| `--no-helper` | Install the libraries (and netstack) only |
+| `--no-netstack` | Skip the netstack. `--network unrestricted` is then refused on libkrun |
+| `--dry-run` | Print the steps without changing anything |
+
+On macOS the default copies the Homebrew bottles (`brew install libkrun libkrunfw` first) and
+refuses if they are not the pinned versions. The helper is signed with the
+`com.apple.security.hypervisor` entitlement: ad hoc by default, or with
+`$SANDCRAB_SIGN_IDENTITY` (a Developer ID also gets the hardened runtime and
+`disable-library-validation`; see [hosting.md §5](hosting.md#5-release-signing-macos)).
+`SANDCRAB_SIGN_RUNTIME=1` adds the hardened runtime to an ad-hoc signature. Install always
+re-signs the helper it copies. With `--json` it prints what it installed.
+
+**Upgrading:** the helper protocol is versioned. A helper and a backend from different builds
+refuse each other, so re-run `sandcrab libkrun install --helper <path>` after rebuilding.
 
 ## `run`
 
@@ -121,7 +175,7 @@ argv (`-- bash -c 'exit 3'`). Exits with the command's exit code.
 | `-m, --mount <ws>:<guest_path>[:rw\|ro]` | `rw` | Mount a workspace. Repeatable |
 | `--cwd <PATH>` | first rw mount, else the template workdir | Default working directory |
 | `-e, --env KEY=VALUE` | | Repeatable |
-| `--network disabled\|unrestricted` | template's (all four: `disabled`) | Network policy |
+| `--network disabled\|unrestricted` | template's (all four: `disabled`) | Network policy. On libkrun, `unrestricted` needs the netstack from `sandcrab libkrun install` (refused without it) |
 | `-p, --port <PORT>` | | Publish a guest port on host `127.0.0.1:<random>`. Repeatable |
 | `--ttl <SECS>` | 1800, none with `--keep` | Sandbox TTL (`0` = none) |
 | `--keep` | off | After the command, keep the sandbox and its ports alive until Ctrl-C, then destroy it |
@@ -168,6 +222,14 @@ Prints the LLM tool definitions: name, description, input and output JSON Schema
 | `SANDCRAB_BACKEND` | CLI, crabagent | `docker`, `firecracker` (Linux) or `libkrun` (macOS Apple Silicon, Linux) |
 | `SANDCRAB_ALLOW_INSECURE` | CLI, crabagent | **Deprecated no-op**: prints a warning, no other effect |
 | `SANDCRAB_CRABD` | CLI, SDK, crabagent, bench | Path of the static `crabd` |
+| `SANDCRAB_TEMPLATE_PINS` | CLI, SDK, `templates/build.sh` | Host-local template pin directory (default `<state root>/template-pins`; [template-pins.md](template-pins.md)) |
+| `SANDCRAB_DOCKER_TRANSPORT` | Docker backend (CLI, SDK, crabagent, bench) | `unix` or `tcp`. Default `tcp` on macOS (Docker Desktop), `unix` elsewhere ([hosting.md](hosting.md#23-docker-on-macos-docker-desktop)) |
+| `SANDCRAB_LIBKRUN_CGROUP` | libkrun backend on Linux (CLI, SDK, crabagent, bench) | Delegated cgroup v2 parent for the per-helper leaves. Unset: no host-side cap, with a warning. Set but unusable: the backend refuses to start ([hosting.md](hosting.md#host-side-cap-cgroup-v2-delegation-recommended)) |
+| `SANDCRAB_SIGN_IDENTITY` | `sandcrab libkrun install`, `scripts/sign-krun-helper.sh` (macOS) | codesign identity for the helper. Default `-` (ad hoc) |
+| `SANDCRAB_SIGN_RUNTIME` | same | `1`: hardened runtime even ad hoc |
+| `SANDCRAB_KRUN_ENTITLEMENTS` | `scripts/sign-krun-helper.sh` | Entitlements plist override |
+| `SANDCRAB_BENCH_KRUN_CGROUP`, `SANDCRAB_BENCH_FC_CGROUP` | bench | cgroup v2 parent for libkrun / Firecracker VMM leaves in the bench ([bench/README.md](bench/README.md)) |
+| `SANDCRAB_E2E_BACKEND` | SDK e2e tests | Backend the ignored SDK e2e suite runs against (`docker`, `firecracker`, `libkrun`) |
 | `RUST_LOG` | `crabd` | Log filter (default `info`) |
 | `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, `CRABAGENT_MODEL`, `CRABAGENT_EFFORT`, `CRABAGENT_SSH_HOST` | crabagent | See [crabagent.md](crabagent.md) |
 
@@ -179,8 +241,12 @@ Prints the LLM tool definitions: name, description, input and output JSON Schema
   workspaces/<id>/data/          # managed workspace contents
   workspaces/<id>/...            # per-workspace backend state (Firecracker image cache, staging)
   locks/<id>.{mount,rw}.lock     # lease flocks: rw exclusive, ro shared
-  run/                           # per-sandbox socket dirs (Docker), run/fc/ (Firecracker)
-  cache/                         # kernel/, firecracker/, rootfs/ (Firecracker artifacts)
+  run/                           # per-sandbox socket dirs (Docker), run/fc/ (Firecracker), run/krun/ (libkrun)
+  cache/                         # kernel/, firecracker/ (Firecracker artifacts), rootfs/ (Firecracker and libkrun)
+  artifacts/libkrun/<version>/   # pinned libkrun + libkrunfw, manifest.json (sandcrab libkrun install)
+  artifacts/libkrun-net/         # pinned netstack: gvproxy (macOS) or passt (Linux)
+  bin/sandcrab-krun              # signed libkrun helper + sandcrab-krun.pin.json
+  template-pins/                 # host-local template image pins
   recovery/                      # Firecracker drives whose sync-back failed
   transcripts/                   # crabagent transcripts
 ```

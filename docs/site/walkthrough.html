@@ -981,7 +981,7 @@ sandcrab --backend docker run -t python-dev -- 'python3 --version'</pre></figure
 <path d="M-12 3a12 10 0 0 1 24 0q0 4 -12 4t-12 -4z" fill="#FF6B4A"/>
 <circle cx="-5" cy="-12" r="1.9" fill="currentColor" stroke="none"/><circle cx="5" cy="-12" r="1.9" fill="currentColor" stroke="none"/>
 </g>
-</svg></span><p><strong>Built, KVM end-to-end pending.</strong> The backend, rootfs pipeline, vsock transport, workspace drives, tap pool and CLI wiring are implemented and covered by a fake-VMM suite (<a class="ref" href="../../crates/sandcrab-backend-firecracker/tests/fake_vmm.rs">crates/sandcrab-backend-firecracker/tests/fake_vmm.rs</a>). The real-KVM tests (<a class="ref" href="../../crates/sandcrab-backend-firecracker/tests/firecracker_kvm.rs">firecracker_kvm.rs</a>) exist but are ignored: the planned host (kvm-homelab, a Proxmox VM) exposes no <code>/dev/kvm</code> until nested virtualization is enabled. Flow steps <code>kvm-host</code> and <code>fc-e2e</code> are blocked by maintainer decision.</p></div>
+</svg></span><p><strong>KVM end-to-end tests pass.</strong> The backend, rootfs pipeline, vsock transport, workspace drives, tap pool, published ports and CLI wiring are covered by a fake-VMM suite (<a class="ref" href="../../crates/sandcrab-backend-firecracker/tests/fake_vmm.rs">crates/sandcrab-backend-firecracker/tests/fake_vmm.rs</a>) and by the real-KVM tests (<a class="ref" href="../../crates/sandcrab-backend-firecracker/tests/firecracker_kvm.rs">firecracker_kvm.rs</a>, ignored by default), which pass on a bare-metal KVM host (kvm-dedicated). It still reports <code>multi_tenant_safe = false</code> until <code>jailer</code> confinement lands.</p></div>
 
   <h3>Rules of the road</h3>
   <ul class="tight">

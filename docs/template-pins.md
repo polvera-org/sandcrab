@@ -87,8 +87,8 @@ in-manifest pin (see below). The backend then checks it:
   `UnpinnedImage` unless `--allow-unpinned` / `DockerConfig::allow_unpinned_images` is set.
 - **libkrun:** the same check runs in the rootfs pipeline. With no pin, the spawn fails.
   A configured prebuilt rootfs image skips the image check.
-- **Firecracker:** the same check runs in the rootfs pipeline. With no pin it currently
-  logs a warning and continues; refusing like libkrun is a pending follow-up.
+- **Firecracker:** the same check runs in the rootfs pipeline. With no pin, the spawn fails,
+  as on libkrun.
 
 The errors look like this:
 
