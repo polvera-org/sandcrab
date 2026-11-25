@@ -78,6 +78,27 @@ builder); Sandcrab never falls back from one to another.
 
 No backend reports `multi_tenant_safe = true` yet. Setup per host: [docs/hosting.md](docs/hosting.md).
 
+## Install
+
+Prebuilt archives are published on [GitHub Releases](https://github.com/polvera-org/sandcrab/releases)
+for macOS arm64, Linux x86_64 and Linux arm64. Until the first release, build from source
+([Quickstart](#quickstart-linux--docker)).
+
+```sh
+# pick your target: aarch64-apple-darwin, x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu
+sha256sum -c sandcrab-<version>-<target>.tar.gz.sha256     # macOS: shasum -a 256 -c ...
+tar -xzf sandcrab-<version>-<target>.tar.gz
+cd sandcrab-<version>-<target>                             # then follow INSTALL.md
+```
+
+- **Linux** binaries need glibc 2.39 or newer (Ubuntu 24.04+, Debian 13+).
+- **macOS** binaries are ad-hoc signed, not notarized yet. If a browser downloaded the
+  archive, run `xattr -dr com.apple.quarantine .` in the extracted directory.
+- **Windows** is not supported natively. Use WSL2 (Ubuntu) with the Linux x86_64 archive and
+  the Docker backend (Docker Desktop's WSL integration, or Docker Engine inside WSL).
+
+Maintainers: CI, release and e2e workflows are described in [docs/ci.md](docs/ci.md).
+
 ## Quickstart (Linux + Docker)
 
 Prerequisites: Linux x86_64 or aarch64, Docker with your user in the `docker` group, Rust
@@ -278,6 +299,7 @@ ffmpeg + ImageMagick + Typst).
 | [docs/cli.md](docs/cli.md) | `sandcrab` commands, flags, env vars, exit codes |
 | [docs/crabagent.md](docs/crabagent.md) | crabagent setup, flags, mounts, ports, caches, images |
 | [docs/hosting.md](docs/hosting.md) | Docker host (hardening), macOS (libkrun, Docker Desktop), Linux KVM host (Firecracker, libkrun), release signing |
+| [docs/ci.md](docs/ci.md) | CI, release and e2e workflows; cutting a release; runners; platform notes |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Phases, status, what is next |
 | [docs/design/firecracker-backend.md](docs/design/firecracker-backend.md) | Firecracker backend design |
 | [docs/design/libkrun-backend.md](docs/design/libkrun-backend.md) | libkrun backend design, netstack, pins, results |
