@@ -40,6 +40,7 @@ use std::process::{Child, Command, Stdio};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -623,11 +624,77 @@ pub struct Started {
     pub stats: Arc<Stats>,
 }
 
+/// How long [`start`] waits for the netstack to answer before the VM starts anyway.
+pub const READY_TIMEOUT: Duration = Duration::from_secs(10);
+/// Interval between readiness probes.
+const READY_PROBE_EVERY: Duration = Duration::from_millis(250);
+
+/// An ARP request from the guest's own MAC/IP for the gateway. Both netstacks answer it, so
+/// the first frame back means the netstack is serving.
+#[must_use]
+pub fn arp_probe() -> Vec<u8> {
+    let mut f = vec![0xff; 6];
+    f.extend_from_slice(&GUEST_MAC);
+    f.extend_from_slice(&ETHERTYPE_ARP.to_be_bytes());
+    f.extend_from_slice(&[0, 1, 0x08, 0x00, 6, 4, 0, 1]); // Ethernet/IPv4, request
+    f.extend_from_slice(&GUEST_MAC);
+    f.extend_from_slice(&GUEST_IP.octets());
+    f.extend_from_slice(&[0; 6]);
+    f.extend_from_slice(&GATEWAY_IP.octets());
+    f
+}
+
+/// Wait until the netstack answers: send [`arp_probe`] (again every 250 ms) and return once
+/// the ingress shuttle has delivered any frame (`stats.to_guest > 0`). Errors when the child
+/// exits or `timeout` passes.
+///
+/// Why: on its first run after install, macOS scans the new gvproxy binary (Gatekeeper /
+/// XProtect) before it starts reading, and a guest that booted meanwhile ran DHCP and DNS
+/// into the void (no egress for ~20 s). Waiting here, before the VM exists, makes the
+/// network ready by the time `init` brings `eth0` up. The pinned-hash check is unchanged.
+/// The netstack's reply reaches the guest NIC's queue once the VM starts; an unsolicited ARP
+/// reply is ignored by the guest kernel.
+pub fn wait_ready(
+    netstack: &UnixStream,
+    framing: Framing,
+    stats: &Stats,
+    child: &mut Child,
+    timeout: Duration,
+) -> io::Result<Duration> {
+    let t0 = Instant::now();
+    let probe = arp_probe();
+    let mut w = netstack;
+    let mut next_probe = t0;
+    loop {
+        if stats.to_guest.load(Ordering::Relaxed) > 0 {
+            return Ok(t0.elapsed());
+        }
+        if let Some(status) = child.try_wait()? {
+            return Err(io::Error::other(format!(
+                "exited before it was ready: {status}"
+            )));
+        }
+        let now = Instant::now();
+        if now >= t0 + timeout {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("no answer within {} ms", timeout.as_millis()),
+            ));
+        }
+        if now >= next_probe {
+            framing.write_frame(&mut w, &probe)?;
+            next_probe = now + READY_PROBE_EVERY;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 /// Spawn `binary` (already hash-verified by the caller) as `kind` with an empty environment,
 /// its stdin (gvproxy: also stdout) on a fresh socketpair, stderr inherited; start the two
-/// filter threads. The netstack exits when the helper's end closes (EOF), i.e. when the helper
-/// process dies for any reason. It inherits the helper's process group (torn down with it)
-/// and, on Linux, its cgroup leaf.
+/// filter threads, then wait (bounded by [`READY_TIMEOUT`]) until the netstack answers
+/// ([`wait_ready`]), so the VM never boots before its network is served. The netstack exits
+/// when the helper's end closes (EOF), i.e. when the helper process dies for any reason. It
+/// inherits the helper's process group (torn down with it) and, on Linux, its cgroup leaf.
 pub fn start(
     kind: NetstackKind,
     binary: &Path,
@@ -646,9 +713,10 @@ pub fn start(
     if kind == NetstackKind::Gvproxy {
         cmd.stdout(Stdio::from(OwnedFd::from(ns_child_end.try_clone()?)));
     }
-    let child = cmd.spawn()?;
+    let mut child = cmd.spawn()?;
     drop(ns_child_end);
     drop(cmd);
+    let probe_end = ns_helper_end.try_clone()?;
 
     let stats = Arc::new(Stats::default());
     let framing = kind.framing();
@@ -677,6 +745,14 @@ pub fn start(
                 }
             })?;
     }
+    match wait_ready(&probe_end, framing, &stats, &mut child, READY_TIMEOUT) {
+        Ok(d) => log(format!("net: {kind} ready after {} ms", d.as_millis())),
+        // Not fatal: the guest may still get its network late; the reason is in vmm.log.
+        Err(e) => log(format!(
+            "net: {kind} not ready ({e}); starting the VM anyway"
+        )),
+    }
+    drop(probe_end);
     Ok(Started {
         guest_fd: OwnedFd::from(guest_vm_end),
         child,
@@ -872,6 +948,74 @@ mod tests {
         let total = u16::try_from(f.len() - 14).unwrap();
         f[16..18].copy_from_slice(&total.to_be_bytes());
         assert!(matches!(p.check(&f), Err(Denial::Smtp { port: 25, .. })));
+    }
+
+    #[test]
+    fn arp_probe_passes_the_filter_and_asks_for_the_gateway() {
+        let f = arp_probe();
+        assert_eq!(f.len(), 42);
+        assert_eq!(policy().check(&f), Ok(()));
+        assert_eq!(&f[38..42], &GATEWAY_IP.octets());
+        assert_eq!(&f[6..12], &GUEST_MAC);
+    }
+
+    /// A fake netstack that only starts answering after a delay (first-run scan): the wait
+    /// returns once the first frame comes back, after re-probing; a silent one times out.
+    #[test]
+    fn wait_ready_waits_for_a_late_netstack() {
+        let spawn_sleeper = || {
+            Command::new("sleep")
+                .arg("30")
+                .stdin(Stdio::null())
+                .spawn()
+                .unwrap()
+        };
+        for (delay, timeout, ok) in [
+            (Duration::from_millis(600), Duration::from_secs(5), true),
+            (Duration::from_secs(60), Duration::from_millis(300), false),
+        ] {
+            let (helper, ns) = UnixStream::pair().unwrap();
+            let stats = Arc::new(Stats::default());
+            let (s2, h2) = (Arc::clone(&stats), helper.try_clone().unwrap());
+            let (guest_a, _guest_b) = UnixStream::pair().unwrap();
+            std::thread::spawn(move || {
+                let _ = shuttle_ingress(h2, guest_a, Framing::Le16, &s2);
+            });
+            std::thread::spawn(move || {
+                std::thread::sleep(delay);
+                let mut r = BufReader::new(&ns);
+                let mut buf = Vec::new();
+                let mut probes = 0;
+                while Framing::Le16.read_frame(&mut r, &mut buf).unwrap_or(false) {
+                    probes += 1;
+                    if probes == 1 {
+                        Framing::Le16.write_frame(&mut &ns, &buf).unwrap();
+                    }
+                }
+            });
+            let mut child = spawn_sleeper();
+            let res = wait_ready(&helper, Framing::Le16, &stats, &mut child, timeout);
+            let _ = child.kill();
+            let _ = child.wait();
+            assert_eq!(res.is_ok(), ok, "{res:?}");
+            if ok {
+                assert!(res.unwrap() >= delay);
+            }
+        }
+        // A netstack that dies is reported at once, not after the timeout.
+        let (helper, _ns) = UnixStream::pair().unwrap();
+        let mut child = Command::new("true").spawn().unwrap();
+        let t0 = Instant::now();
+        let e = wait_ready(
+            &helper,
+            Framing::Le16,
+            &Stats::default(),
+            &mut child,
+            Duration::from_secs(10),
+        )
+        .unwrap_err();
+        assert!(e.to_string().contains("exited"), "{e}");
+        assert!(t0.elapsed() < Duration::from_secs(5));
     }
 
     #[test]
