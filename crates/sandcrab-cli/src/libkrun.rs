@@ -414,11 +414,7 @@ pub fn doctor(g: &Global, r: &mut Report) {
     }
 
     if blockers.is_empty() {
-        r.add(
-            "libkrun",
-            Status::Ok,
-            "libkrun: ready (hardware isolated)",
-        );
+        r.add("libkrun", Status::Ok, "libkrun: ready (hardware isolated)");
     } else {
         r.add(
             "libkrun",

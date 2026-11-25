@@ -1287,7 +1287,10 @@ fn private_env(netstack: bool) -> Env {
     private_env_libs(netstack, |_| {})
 }
 
-fn private_env_libs(netstack: bool, tweak_libs: impl FnOnce(&mut KrunLibs)) -> Env {
+fn private_parts(
+    netstack: bool,
+    tweak_libs: impl FnOnce(&mut KrunLibs),
+) -> (tempfile::TempDir, LibkrunConfig, KrunLibs) {
     let tmp = tempfile::Builder::new()
         .prefix("sclk")
         .tempdir_in("/tmp")
@@ -1298,12 +1301,21 @@ fn private_env_libs(netstack: bool, tweak_libs: impl FnOnce(&mut KrunLibs)) -> E
     if let Some(ns) = &cfg.netstack_dir {
         copy_tree(ns, &t.join("net"));
     }
-    std::fs::create_dir_all(t.join("bin")).unwrap();
+    // 0700 whatever the umask: the backend refuses directories others can write (review R18).
+    let private_dir = |p: &Path| {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(p)
+            .unwrap();
+    };
+    private_dir(&t.join("bin"));
     let helper = t.join("bin").join("sandcrab-krun");
     copy_tree(&cfg.helper, &helper);
     sandcrab_backend_libkrun::verified::HelperRecord::record(&helper).unwrap();
     let dst_rootfs = t.join("cache").join("rootfs");
-    std::fs::create_dir_all(&dst_rootfs).unwrap();
+    private_dir(&dst_rootfs);
     for e in std::fs::read_dir(cfg.cache_root.join("rootfs"))
         .unwrap()
         .flatten()
@@ -1320,7 +1332,63 @@ fn private_env_libs(netstack: bool, tweak_libs: impl FnOnce(&mut KrunLibs)) -> E
         c.cache_root = t.join("cache");
     });
     tweak_libs(&mut libs);
+    (tmp, cfg, libs)
+}
+
+fn private_env_libs(netstack: bool, tweak_libs: impl FnOnce(&mut KrunLibs)) -> Env {
+    let (tmp, cfg, libs) = private_parts(netstack, tweak_libs);
     env_from(tmp, cfg, libs)
+}
+
+/// Review N2: libkrunfw replaced by another file whose genuine stamp (bound to its own digest)
+/// is pasted into the pin: no stamp hit, refused at construction.
+#[test]
+#[ignore = "real libkrun: signed helper, pinned libkrun, pinned sandcrab/base:0.1.0, static crabd"]
+fn stamp_of_another_file_is_refused() {
+    let (_tmp, cfg, libs) = private_parts(false, |l| {
+        let p = l.libkrunfw.path.clone();
+        let evil = p.with_extension("evil");
+        std::fs::write(&evil, b"not libkrunfw").unwrap();
+        std::fs::rename(&evil, &p).unwrap();
+        l.libkrunfw.stamp = Some(sandcrab_rootfs::stamp::record(&p).unwrap().1);
+    });
+    let e = LibkrunBackend::new(cfg, libs).unwrap_err();
+    assert!(matches!(e, SandboxError::DigestMismatch { .. }), "{e}");
+}
+
+/// Review R18 at backend construction: inside the state root a group-writable directory is
+/// tightened to 0700; outside it (an override) it is refused and left alone.
+#[test]
+#[ignore = "real libkrun: signed helper, pinned libkrun, pinned sandcrab/base:0.1.0, static crabd"]
+fn loose_state_dirs_are_tightened_or_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    let set = |p: &Path, m: u32| {
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).unwrap();
+    };
+    // Override outside the state root: refused, never chmodded.
+    let (tmp, cfg, libs) = private_parts(false, |_| {});
+    let bin = tmp.path().join("bin");
+    set(&bin, 0o775);
+    let e = LibkrunBackend::new(cfg.clone(), libs.clone()).unwrap_err();
+    assert!(e.to_string().contains("chmod go-w"), "{e}");
+    assert_eq!(mode(&bin), 0o775);
+    // The same tree as the state root: tightened, then the backend comes up.
+    let mut cfg = cfg;
+    cfg.state_root = Some(tmp.path().to_path_buf());
+    set(tmp.path(), 0o775);
+    set(&tmp.path().join("lib"), 0o777);
+    LibkrunBackend::new(cfg.clone(), libs.clone()).unwrap();
+    for d in [tmp.path(), &bin, &tmp.path().join("lib")] {
+        assert_eq!(mode(d), 0o700, "{}", d.display());
+    }
+    // A symlinked state root is refused.
+    let link = tmp.path().with_extension("link");
+    std::os::unix::fs::symlink(tmp.path(), &link).unwrap();
+    cfg.state_root = Some(link.clone());
+    let e = LibkrunBackend::new(cfg, libs).unwrap_err();
+    std::fs::remove_file(&link).unwrap();
+    assert!(e.to_string().contains("symlink"), "{e}");
 }
 
 /// The `base` rootfs image(s) under the env's private cache.
