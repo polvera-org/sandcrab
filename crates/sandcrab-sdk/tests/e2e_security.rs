@@ -412,16 +412,23 @@ async fn mount_opts(sb: &sandcrab_sdk::Sandbox, target: &str) -> Vec<String> {
 }
 
 /// Kernel interfaces closed to the sandbox, as root (uid 0 without capabilities, the
-/// strongest sandbox user) and as the default user: read-only `/sys` and `/proc/sys`
-/// (Docker's defaults, reproduced by `crabd init`), no user namespaces (Docker: seccomp;
-/// microVMs: `user.max_user_namespaces=0`), and on the microVMs every hardening sysctl the
-/// guest kernel has reads back as hardened. On Docker those sysctls are host-level, so only
+/// strongest sandbox user; microVMs only) and as the default user: read-only `/sys` and
+/// `/proc/sys` (Docker's defaults, reproduced by `crabd init`), no user namespaces (Docker:
+/// seccomp; microVMs: `user.max_user_namespaces=0`), and on the microVMs every hardening
+/// sysctl the guest kernel has reads back as hardened. On Docker those sysctls are host-level, so only
 /// the read-only mounts and the namespace denial are asserted.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "e2e: needs a sandbox backend (SANDCRAB_E2E_BACKEND, default docker)"]
 async fn kernel_interfaces_sysfs_sysctls_userns() {
     run("kernel-interfaces", |h| async move {
-        for user in [None, Some(UserSpec::new(0, 0))] {
+        // Docker runs crabd as the sandbox user, and a uid-0 crabd's Unix socket in the
+        // host-owned run dir is not connectable by the host user, so root is microVM-only.
+        let users = if h.is_docker() {
+            vec![None]
+        } else {
+            vec![None, Some(UserSpec::new(0, 0))]
+        };
+        for user in users {
             let mut cfg = SandboxConfig::from_template("base");
             cfg.user = user;
             let sb = h.sc.spawn(cfg).await.unwrap();
