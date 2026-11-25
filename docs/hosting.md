@@ -124,13 +124,27 @@ backend therefore uses its **`tcp` transport** by default:
   The `unix` transport uses the same token.
 
 **`disabled` networking is unchanged.** The sandbox container keeps network mode `none`
-(only loopback; no routes, no egress). Only the relay sits on Docker's default bridge, and
-it has no user code. The trade-off: one extra small container per sandbox (created and
-started in parallel with the sandbox; spawn-to-ready was about 200 ms p50 on an Apple Silicon
-Mac), and the relay's port is also reachable from other containers
-on the default bridge. The token covers that path too. Docker's internal networks were
-rejected because Docker does not publish ports from them, and putting the sandbox on a
-bridge would have given `disabled` sandboxes a network interface.
+(only loopback; no routes, no egress). Only the relay has a network interface, and it has no
+user code. The trade-off is one extra small container per sandbox (created and started in
+parallel with the sandbox; spawn-to-ready was about 200 ms p50 on an Apple Silicon Mac).
+
+**The relay is not on the default bridge.** Every relay joins one dedicated bridge network,
+`sandcrab-relay`, which the backend creates on first use with inter-container traffic off
+(`com.docker.network.bridge.enable_icc=false`) and no outbound NAT. A network of that name
+without those options is refused, never used (`docker network rm sandcrab-relay` and Sandcrab
+recreates it). So:
+
+| Who connects to a relay's port 7070 | Docker Engine (Linux) | Docker Desktop |
+| --- | --- | --- |
+| the host, through the `127.0.0.1` publish | yes (with the token) | yes (with the token) |
+| another relay on `sandcrab-relay` | no (ICC off) | no (ICC off) |
+| a container on the default bridge or any other network (an `unrestricted` sandbox, an unrelated container) | no (Docker isolates bridge networks) | **yes**: Desktop routes containers to other networks' published ports, and `host.docker.internal` reaches the host's published ports by design |
+
+Where a neighbour can connect, it still meets `crabd`'s token, and an unauthenticated
+connection never holds a connection slot: it waits in a small pre-auth queue that evicts the
+oldest when full ([protocol: `auth`](protocol.md#authentication-auth)). Docker's internal
+networks were rejected because Docker does not publish ports from them, and putting the
+sandbox on a bridge would have given `disabled` sandboxes a network interface.
 
 Choose the transport with `SANDCRAB_DOCKER_TRANSPORT=unix|tcp` (or `DockerConfig::transport`).
 `sandcrab doctor` shows the one in use. Linux defaults to `unix`. Docker Desktop for Linux

@@ -32,7 +32,16 @@
 //! rootfs, no capabilities, tiny limits) publishes [`RELAY_PORT`] on host `127.0.0.1` only.
 //! The sandbox container's network mode is the same as with the Unix transport, so
 //! `disabled` keeps meaning `none`: the sandbox has no interface besides loopback. Only the
-//! relay, which runs no user code, sits on the default bridge.
+//! relay, which runs no user code, has a network interface, and it is **not** on the default
+//! bridge: every relay joins the dedicated [`RELAY_NETWORK`] bridge, created by the backend
+//! with inter-container traffic off (`enable_icc=false`) and no outbound NAT. So no other
+//! container can reach a relay's port 7070 through the bridge: not another relay on the same
+//! network (ICC off), and on Docker Engine not a container on any other network either
+//! (Docker isolates bridge networks from each other). Docker Desktop is weaker: it routes a
+//! container's traffic to another network's *published* ports (and `host.docker.internal`
+//! reaches the host's published ports by design), so there other containers can still open
+//! a connection; `crabd`'s token and its pre-auth budget (`sandcrab_guest::preauth`) are
+//! what stop them.
 //!
 //! The root filesystem stays writable (`readonly_rootfs: false`): templates expect a
 //! writable `HOME` (`/home/sandcrab`, 1777) and package caches; the container layer is
@@ -66,6 +75,15 @@ pub const TOKEN_NAME: &str = "auth-token";
 pub const GUEST_SOCK_DIR: &str = "/opt/sandcrab/sock";
 /// TCP transport: port the relay listens on inside its container.
 pub const RELAY_PORT: u16 = 7070;
+/// TCP transport: the user-defined bridge network every relay container joins (see the
+/// module docs). Created on first use by the backend; never shared with sandboxes.
+pub const RELAY_NETWORK: &str = "sandcrab-relay";
+/// Bridge driver options [`RELAY_NETWORK`] must carry: no inter-container traffic and no
+/// outbound NAT (the relay only ever talks to a Unix socket).
+pub const RELAY_NETWORK_OPTIONS: [(&str, &str); 2] = [
+    ("com.docker.network.bridge.enable_icc", "false"),
+    ("com.docker.network.bridge.enable_ip_masquerade", "false"),
+];
 /// TCP transport: size of the socket volume (it only ever holds one socket).
 const SOCK_VOLUME_SIZE: &str = "1m";
 /// Relay container limits.
@@ -401,6 +419,51 @@ pub fn build_container_spec(
     })
 }
 
+/// Definition of [`RELAY_NETWORK`].
+#[must_use]
+pub fn relay_network_spec() -> bollard::models::NetworkCreateRequest {
+    bollard::models::NetworkCreateRequest {
+        name: RELAY_NETWORK.to_owned(),
+        driver: Some("bridge".into()),
+        internal: Some(false),
+        attachable: Some(false),
+        enable_ipv6: Some(false),
+        options: Some(
+            RELAY_NETWORK_OPTIONS
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect(),
+        ),
+        labels: Some(HashMap::from([(
+            LABEL_MANAGED.to_owned(),
+            "true".to_owned(),
+        )])),
+        ..Default::default()
+    }
+}
+
+/// Check that an existing [`RELAY_NETWORK`] is fit for the relays: a bridge carrying
+/// [`RELAY_NETWORK_OPTIONS`]. A network of that name with inter-container traffic on would
+/// silently expose every relay to its neighbours, so it is refused, never used.
+pub fn check_relay_network(
+    driver: Option<&str>,
+    options: Option<&HashMap<String, String>>,
+) -> std::result::Result<(), String> {
+    if driver != Some("bridge") {
+        return Err(format!(
+            "driver is {}, not bridge",
+            driver.unwrap_or("unknown")
+        ));
+    }
+    for (k, v) in RELAY_NETWORK_OPTIONS {
+        let got = options.and_then(|o| o.get(k)).map(String::as_str);
+        if got != Some(v) {
+            return Err(format!("option {k} is {}, not {v}", got.unwrap_or("unset")));
+        }
+    }
+    Ok(())
+}
+
 /// The TCP transport's relay container: `crabd relay` from the socket volume to
 /// [`RELAY_PORT`], published on host `127.0.0.1` (ephemeral port) only. It runs no user code
 /// and does no auth itself (the sandbox's `crabd` authenticates every relayed connection).
@@ -430,7 +493,7 @@ pub fn build_relay_spec(spec: &ResolvedSpec, ctx: &SpecContext<'_>) -> Result<Co
         open_stdin: Some(false),
         tty: Some(false),
         host_config: Some(HostConfig {
-            network_mode: Some("bridge".into()),
+            network_mode: Some(RELAY_NETWORK.into()),
             port_bindings: Some(loopback_binding(&port_key)),
             mounts: Some(vec![
                 bind(ctx.crabd_path, GUEST_CRABD, true)?,
@@ -756,6 +819,27 @@ image = "sandcrab/base:0.1.0"
     }
 
     #[test]
+    fn relay_network_has_icc_off_and_is_checked() {
+        let n = relay_network_spec();
+        assert_eq!(n.name, RELAY_NETWORK);
+        assert_eq!(n.driver.as_deref(), Some("bridge"));
+        assert_eq!(
+            n.internal,
+            Some(false),
+            "internal networks cannot publish ports"
+        );
+        let opts = n.options.unwrap();
+        assert_eq!(opts["com.docker.network.bridge.enable_icc"], "false");
+        check_relay_network(Some("bridge"), Some(&opts)).unwrap();
+        let mut icc_on = opts.clone();
+        icc_on.insert("com.docker.network.bridge.enable_icc".into(), "true".into());
+        let e = check_relay_network(Some("bridge"), Some(&icc_on)).unwrap_err();
+        assert!(e.contains("enable_icc"), "{e}");
+        assert!(check_relay_network(Some("bridge"), None).is_err());
+        assert!(check_relay_network(Some("overlay"), Some(&opts)).is_err());
+    }
+
+    #[test]
     fn relay_is_hardened_and_published_on_loopback_only() {
         let s = spec();
         let body = build_with(&s, DockerTransport::Tcp, true).unwrap();
@@ -784,7 +868,11 @@ image = "sandcrab/base:0.1.0"
         assert_eq!(b[0].host_ip.as_deref(), Some("127.0.0.1"), "never 0.0.0.0");
         assert_eq!(b[0].host_port.as_deref(), Some(""), "ephemeral host port");
         assert_eq!(hc.publish_all_ports, Some(false));
-        assert_eq!(hc.network_mode.as_deref(), Some("bridge"));
+        assert_eq!(
+            hc.network_mode.as_deref(),
+            Some(RELAY_NETWORK),
+            "never the default bridge"
+        );
         assert_eq!(hc.cap_drop, Some(vec!["ALL".to_owned()]));
         assert!(hc.cap_add.is_none());
         assert_eq!(

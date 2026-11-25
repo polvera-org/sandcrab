@@ -28,8 +28,9 @@ use sandcrab_core::{
 use sandcrab_protocol::AuthToken;
 
 use crate::spec::{
-    RELAY_PORT, SOCKET_NAME, SpecContext, TOKEN_NAME, build_container_spec, build_relay_spec,
-    container_name, effective_user, network_mode, relay_name, sock_volume_name, sock_volume_spec,
+    RELAY_NETWORK, RELAY_PORT, SOCKET_NAME, SpecContext, TOKEN_NAME, build_container_spec,
+    build_relay_spec, check_relay_network, container_name, effective_user, network_mode,
+    relay_name, relay_network_spec, sock_volume_name, sock_volume_spec,
 };
 use crate::{DockerConfig, DockerTransport, check_static_crabd};
 
@@ -264,6 +265,9 @@ impl DockerBackend {
                 .map_err(|e| backend_err(&format!("create volume `{volume}`"), e))?;
             timings.mark_custom("sock_volume_created");
         }
+        if objects.relay.is_some() {
+            self.ensure_relay_network().await?;
+        }
         verify_mount_roots(spec)?;
         // Sandbox and relay are independent until the socket exists: create / start both
         // at once (the host's readiness loop covers the relay coming up first).
@@ -309,6 +313,35 @@ impl DockerBackend {
         let ports = self.read_ports(spec, name).await?;
         timings.mark_custom("ports_published");
         Ok((ports, endpoint))
+    }
+
+    /// Create [`RELAY_NETWORK`] if missing, and refuse one that exists without inter-container
+    /// isolation (never a silent downgrade). Concurrent creators race benignly: a `409` from
+    /// create means another spawn won, and the network is then checked like any other.
+    async fn ensure_relay_network(&self) -> Result<()> {
+        let ctx = format!("relay network `{RELAY_NETWORK}`");
+        let info = match self.docker.inspect_network(RELAY_NETWORK, None).await {
+            Ok(info) => info,
+            Err(e) if status_code(&e) == Some(404) => {
+                match self.docker.create_network(relay_network_spec()).await {
+                    Ok(_) => {}
+                    Err(e) if status_code(&e) == Some(409) => {}
+                    Err(e) => return Err(backend_err(&format!("create {ctx}"), e)),
+                }
+                self.docker
+                    .inspect_network(RELAY_NETWORK, None)
+                    .await
+                    .map_err(|e| backend_err(&format!("inspect {ctx}"), e))?
+            }
+            Err(e) => return Err(backend_err(&format!("inspect {ctx}"), e)),
+        };
+        check_relay_network(info.driver.as_deref(), info.options.as_ref()).map_err(|why| {
+            SandboxError::InvalidConfig(format!(
+                "{ctx} exists but is unsafe for the crabd relay ({why}); remove it \
+                 (`docker network rm {RELAY_NETWORK}`) and Sandcrab recreates it with \
+                 inter-container traffic off"
+            ))
+        })
     }
 
     async fn create(&self, name: &str, body: bollard::models::ContainerCreateBody) -> Result<()> {
