@@ -5,14 +5,37 @@ Sandcrab's 16 tools, running inside one ephemeral sandbox per session, on persis
 workspaces that survive across sessions. It is the V1 test harness. It drives the SDK the
 way a real agent product would. Crate: [`crates/sandcrab-agent`](../crates/sandcrab-agent/README.md).
 
-Backends: **Docker only** in V1 (`--backend docker`; `docker-dev` is accepted as an alias). `firecracker`,
-`cloud-hypervisor` and `libkrun` are rejected with "not available in crabagent yet".
+Backends, chosen explicitly with `--backend` (no default, never a fallback), compiled in exactly as in the
+`sandcrab` CLI ([cli.md](cli.md)):
+
+| `--backend` | Where | Isolation |
+| --- | --- | --- |
+| `docker` (alias `docker-dev`) | anywhere with Docker | hardened container, **shared host kernel** |
+| `libkrun` (alias `krun`) | macOS Apple Silicon, Linux (KVM) | hardware isolated microVM; host-dir workspaces shared live over virtio-fs |
+| `firecracker` (alias `fc`) | Linux x86_64 + `/dev/kvm` | hardware isolated microVM; workspaces are block drives copied in at spawn and synced back at exit |
+
+A backend that is not compiled into the build (cargo features `docker`, `libkrun`, `firecracker`, all on by
+default; the last two compile to nothing off their targets) is a "not compiled into this build" error. A compiled
+backend whose prerequisites are missing is an error naming them (`sandcrab doctor --backend <name>` lists them).
+`cloud-hypervisor` is not available yet. Before spawning, the session prints one line with the backend's declared
+capabilities, for example:
+
+```text
+warning: backend `docker`: not hardware isolated (shared host kernel), not multi-tenant safe, live host-dir mounts, template disk_mb is not enforced
+backend `libkrun`: hardware isolated (microVM), not multi-tenant safe, live host-dir mounts
+```
+
+The network policy behaves as in the CLI. On libkrun, `--network unrestricted` uses the pinned userspace netstack
+installed by `sandcrab libkrun install` and is refused when it is missing (never TSI; the CLI's deprecated
+`--libkrun-tsi` is not offered).
 
 ## Setup
 
 Prerequisites are the same as the [README quickstart](../README.md#quickstart-linux--docker):
 Docker, a static `crabd` (`scripts/build-crabd.sh`) and pinned template images
-(`templates/build.sh`, which pins them on this host).
+(`templates/build.sh`, which pins them on this host). For `--backend libkrun`, also run
+`sandcrab libkrun install` once (signed helper, pinned libkrun, userspace netstack); for `--backend firecracker`,
+see [hosting.md](hosting.md).
 
 ```sh
 cargo build --release -p sandcrab-agent      # binary: target/release/crabagent
@@ -45,9 +68,13 @@ echo "run the tests and fix failures" | crabagent -w myproj --backend docker -p 
 crabagent --workspace landing --template ts-dev \
   --mount-host docs/site:/kit:ro --network unrestricted --port 5173 \
   --backend docker
+
+# Hardware-isolated microVM on a Mac (or Linux): work on a host directory, live over virtio-fs
+crabagent --template base --mount-host ~/code/myrepo:/workspace:rw --network disabled \
+  --backend libkrun
 ```
 
-`SANDCRAB_BACKEND=docker` can replace the flag.
+`SANDCRAB_BACKEND=<backend>` can replace the flag.
 
 ### REPL vs `-p`
 
@@ -86,7 +113,7 @@ crabagent -w landing --port 5173 --network unrestricted --backend docker \
 | `--network disabled\|unrestricted` | template's (`disabled` for all four) | Network policy |
 | `--port <n>` | none | Publish a guest port on host `127.0.0.1:<random>`. Repeatable |
 | `-e, --env KEY=VALUE` | none | Sandbox environment variable. Repeatable |
-| `--backend docker` | none (required) | Also `SANDCRAB_BACKEND` |
+| `--backend docker\|libkrun\|firecracker` | none (required) | Only backends compiled into the build parse. Also `SANDCRAB_BACKEND` |
 | `--allow-insecure` | off | **Deprecated no-op**, hidden from `--help`: prints a warning, no other effect. Same for `SANDCRAB_ALLOW_INSECURE` |
 | `--state-dir <dir>` | `$SANDCRAB_HOME`, else `~/.sandcrab` | State root |
 | `--templates-dir <dir>` | `./templates`, then `<state root>/templates` | Repeatable, first wins |
@@ -234,4 +261,5 @@ From [bench/live-check.md](bench/live-check.md) (Docker on a 2-vCPU VPS, model
 ```sh
 cargo test -p sandcrab-agent                                  # unit tests + fake LLM on core's fake backend
 cargo test -p sandcrab-agent --test docker_e2e -- --ignored   # fake LLM against a real Docker sandbox
+cargo test -p sandcrab-agent --test libkrun_e2e -- --ignored  # fake LLM in a libkrun microVM, host dir over virtio-fs
 ```

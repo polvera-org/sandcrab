@@ -14,6 +14,14 @@ All notable changes to Sandcrab. The format follows [Keep a Changelog](https://k
   `scripts/fetch-libkrun.sh` gains `--netstack-only` / `--no-netstack`. Without it, `unrestricted` stays
   `PolicyUnenforceable` (never a TSI fallback).
 
+- crabagent: `--backend libkrun` (macOS Apple Silicon, Linux) and `--backend firecracker` (Linux), through the same
+  `sandcrab-sdk` cargo features and `cfg` gating as the CLI (`docker`, `firecracker`, `libkrun`, all on by default;
+  a backend not compiled in is a clear error, never a fallback). libkrun uses the CLI's config: host-dir workspaces
+  over virtio-fs, `--network unrestricted` through the pinned userspace netstack (refused without it; the
+  deprecated TSI opt-in is not offered). The session's backend line now reports the backend's declared capabilities
+  (hardware isolation, multi-tenant safety, live host-dir mounts or copy-in) next to the `disk_mb` warning. New
+  ignored test `libkrun_e2e` (fake LLM, live host-dir edit in a microVM).
+
 ### Deprecated
 - libkrun TSI opt-in (`LibkrunConfig::allow_tsi_unrestricted`, CLI `--libkrun-tsi`): still explicit and still exposes
   host loopback; use the userspace netstack instead.

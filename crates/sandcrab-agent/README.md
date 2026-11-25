@@ -47,6 +47,18 @@ Example task: *"Build a landing page for Sandcrab in /workspace with Vite. Use t
 Run it again later with `--workspace landing` and the new session continues from the
 previous session's files.
 
+### On a microVM (libkrun)
+
+```sh
+sandcrab libkrun install    # once: signed helper, pinned libkrun, userspace netstack
+crabagent --template base --mount-host ~/code/myrepo:/workspace:rw --network disabled \
+  --backend libkrun
+```
+
+The host directory is shared live over virtio-fs. The session prints the backend's capabilities
+(hardware isolated or not, live host-dir mounts or copy-in) before it spawns.
+`--backend firecracker` works the same on a Linux KVM host. See [docs/crabagent.md](../../docs/crabagent.md).
+
 ### One-shot
 
 ```sh
@@ -79,7 +91,7 @@ error or lost sandbox) and `130` on Ctrl-C.
 | `--network disabled\|unrestricted` | template's | Network policy. |
 | `--port <n>` | none | Publish a guest port on host loopback. Repeatable. |
 | `-e KEY=VALUE` | none | Sandbox environment variable. |
-| `--backend docker` | none | Backend; always explicit (no default, no fallback). Also `SANDCRAB_BACKEND`. The old `--allow-insecure` / `SANDCRAB_ALLOW_INSECURE` opt-in is a deprecated no-op. |
+| `--backend docker\|libkrun\|firecracker` | none | Backend; always explicit (no default, no fallback). `libkrun`: macOS Apple Silicon and Linux; `firecracker`: Linux. Also `SANDCRAB_BACKEND`. The old `--allow-insecure` / `SANDCRAB_ALLOW_INSECURE` opt-in is a deprecated no-op. |
 | `--model` | `claude-sonnet-5-5` | Also `CRABAGENT_MODEL`. |
 | `--effort low\|medium\|high\|xhigh\|max` | model's | `output_config.effort`. Also `CRABAGENT_EFFORT`. |
 | `--max-turns <n>` | `100` | Model calls per user turn. |
@@ -118,6 +130,7 @@ error or lost sandbox) and `130` on Ctrl-C.
 ```sh
 cargo test -p sandcrab-agent                     # unit tests + fake LLM against core's fake backend
 cargo test -p sandcrab-agent --test docker_e2e -- --ignored   # fake LLM against a real Docker sandbox
+cargo test -p sandcrab-agent --test libkrun_e2e -- --ignored  # fake LLM in a libkrun microVM, host dir over virtio-fs
 ```
 
 Full guide (mounts, ports, caches, images, live-check findings): [docs/crabagent.md](../../docs/crabagent.md).
