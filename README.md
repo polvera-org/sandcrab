@@ -11,7 +11,7 @@
 AI coding and computer-use agents need to run untrusted commands, edit files, install packages, and render outputs safely and cheaply:
 
 - **Ephemeral Compute, Durable Workspaces**: Spin up fresh sandboxes per turn, mount one or more persistent workspaces (`rw` or `ro`) with a chosen `default_cwd`, tear down immediately, and mutate workspace files from the host between turns (e.g., adding user attachments or handing output from `python-dev` to `render`).
-- **Built-In Computer-Use Tools**: Native Rust guest daemon (`crabd`) providing `bash`, `file_read`, `file_write`, `file_edit`, `file_delete`, `file_move`, `list_dir`, `glob`, `grep`, and managed background `process_*` — all with auto-generated JSON Schemas for LLM tool-calling and MCP.
+- **Built-In Computer-Use Tools**: Native Rust guest daemon (`crabd`) providing `bash`, `file_read`, `file_write`, `file_edit`, `file_delete`, `file_move`, `list_dir`, `glob`, `grep`, and managed background `process_*` — all with auto-generated JSON Schemas for LLM tool-calling.
 - **Curated OCI Templates**: Standard `Dockerfile` + `sandcrab.toml` templates (`base`, `python-dev`, `ts-dev`, `render`) with SHA-256 artifact pinning, ready for a future template marketplace.
 - **Explicit Isolation Backends**: Pluggable `RuntimeBackend` supporting hardened Docker containers (shared kernel, for trusted single-tenant workloads; Linux Docker Engine or Docker Desktop on macOS), Firecracker (Linux KVM microVMs) and libkrun (microVMs on Apple Silicon macOS and Linux KVM, with live `virtio-fs` workspaces). Cloud Hypervisor is planned. Never silently falls back to weaker isolation.
 
@@ -48,7 +48,8 @@ verdict was "ship with follow-ups" (no critical, high or open medium findings; b
 | Guest hardening in microVMs (dropped capabilities, `no_new_privs`, pids cap, hardening sysctls, read-only `/proc/sys` and `/sys`; fails closed) | Done; a guest seccomp profile is deferred |
 | Connection auth (protocol 0.2: per-sandbox token on every `crabd` connection) | Done on Docker |
 | Egress allowlist (`egress_restricted`), secret injection | **Not enforced:** refused at spawn time (Phase 3 proxy) |
-| Snapshots / fork, browser tools, server, MCP, other-language SDKs | Phase 2+ |
+| TypeScript & Python SDKs | Next |
+| Snapshots / fork, browser tools, server | Later |
 
 **Benchmarks (indicative).** Spawn → ready, p50, `base` template, warm cache, no workspace,
 n = 30 per cell. No run is marked valid by the harness (busy host, drift, or a reduced tier),

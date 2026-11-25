@@ -108,18 +108,19 @@ Also next:
 
 ### Later
 
-- **Phase 2 remainder:** Cloud Hypervisor backend; Firecracker `jailer` confinement (until
+- **Phase 2 remainder (on hold):** the focus is Docker and libkrun. Cloud Hypervisor backend; Firecracker `jailer` confinement (until
   then `multi_tenant_safe = false`) and snapshots; libkrun helper confinement (Seatbelt on
   macOS, Landlock + seccomp + per-sandbox uid on Linux); `tar.zst` transfers,
   `stream_event` output streaming; Tier 3 browser tools.
 - **Phase 3:** the egress allowlist and secret-injection proxy (`egress_restricted` and
-  `secrets` are refused at spawn time until then), server, MCP, other-language SDKs.
+  `secrets` are refused at spawn time until then) and `sandcrab-server`. The TypeScript and Python
+  SDKs are pulled forward as the next milestone (see Phase 3).
 
 ---
 
 ## Tool Catalog (Target Agent Interface)
 
-Every tool exports a JSON Schema via `schemars` so LLM tool-calling (Anthropic, OpenAI, Gemini) and MCP servers bind directly to `sandcrab-protocol`.
+Every tool exports a JSON Schema via `schemars` so LLM tool-calling (Anthropic, OpenAI, Gemini) binds directly to `sandcrab-protocol`.
 
 ### Tier 1 — Core Computer-Use Tools (Phase 1 MVP)
 | Tool | Capabilities |
@@ -205,9 +206,12 @@ Every tool exports a JSON Schema via `schemars` so LLM tool-calling (Anthropic, 
 
 ### Deliverables
 1. **`sandcrab-server`**: Axum REST + WebSocket + OpenAPI daemon, API key auth, workspace & sandbox lifecycle endpoints, TTL reaper, signed preview-URL reverse proxy.
-2. **`sandcrab-mcp`**: Model Context Protocol server exposing Sandcrab sandboxes and tools directly to MCP clients.
-3. **Egress & Secret-Injection Proxy**: Per-sandbox domain allowlists plus host-side HTTP proxy that injects API credentials on outbound requests so secrets never exist inside sandbox memory/env.
-4. **TypeScript & Python SDKs**: Thin clients generated from OpenAPI + streaming WebSocket/SSE helpers.
+2. **Egress & Secret-Injection Proxy**: Per-sandbox domain allowlists plus host-side HTTP proxy that injects API credentials on outbound requests so secrets never exist inside sandbox memory/env.
+3. **TypeScript & Python SDKs** (**next milestone**, pulled ahead of the rest of Phase 3): first-class
+   clients so existing TypeScript and Python agent products can replace their homegrown sandbox managers
+   with Sandcrab. The transport (server API vs. native binding) is decided in the milestone's plan.
+
+An MCP server is no longer planned: tools are consumed through the SDKs, the CLI and the exported JSON Schemas.
 
 ---
 

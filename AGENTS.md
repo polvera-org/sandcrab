@@ -53,7 +53,7 @@ Before planning or writing code, read:
 | `sandcrab-agent` (`crabagent`) | Test harness: Claude coding agent (Anthropic Messages API) whose tools are exactly the Sandcrab tools | `sandcrab-sdk` (backends via its features, like `sandcrab-cli`: default `docker`, `firecracker`, `libkrun`; the last two compile to nothing off their targets), `reqwest`, `rustyline`, `clap`, `dotenvy`; never a backend crate directly |
 | `sandcrab-bench` | Backend benchmark runner (scenarios, cgroup/`/proc` sampling, macOS helper RSS for libkrun, JSON results + schema) | `sandcrab-sdk` (`docker`, `firecracker`, `libkrun` features), `clap`, `schemars`; `bollard` (optional, `docker` feature) for resource sampling only |
 
-Future crates (Phase 2+): `sandcrab-backend-cloud-hypervisor`, `sandcrab-server`, `sandcrab-mcp`.
+Future crates: `sandcrab-server` and the TypeScript/Python SDKs (next milestone); `sandcrab-backend-cloud-hypervisor` (Phase 2 remainder, on hold).
 
 ---
 
