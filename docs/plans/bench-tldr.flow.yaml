@@ -70,4 +70,4 @@ steps:
     title: "docs/bench/README.md: TL;DR page generation, preflight, tier validity; AGENTS.md bench tiers note; CHANGELOG"
     depends_on: [tldr-fixes, tldr-live]
     artifacts: [docs/bench/README.md, CHANGELOG.md]
-    status: doing
+    status: done
