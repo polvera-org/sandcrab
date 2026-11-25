@@ -517,6 +517,70 @@ async fn tcp_auth_refuses_missing_or_wrong_token_and_runs_nothing() {
     handle.await.unwrap().unwrap();
 }
 
+/// Security: connections that never authenticate do not hold `max_connections` slots, so a
+/// flood of them (idle, or stuck mid-frame) cannot starve the real client, even with a long
+/// auth deadline.
+#[tokio::test]
+async fn unauthenticated_flood_does_not_starve_the_client() {
+    use sandcrab_guest::AuthConfig;
+    use sandcrab_protocol::{AUTH_TOKEN_BYTES, AuthToken};
+
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("crabd.sock");
+    let token = AuthToken::from_bytes(&[0x33; AUTH_TOKEN_BYTES]);
+    let mut config = ServerConfig::new(ListenAddr::Unix(sock.clone()));
+    config.max_connections = 2;
+    config.max_pending = 4;
+    config.auth = Some(AuthConfig {
+        token: token.clone(),
+        timeout: Duration::from_secs(30),
+    });
+    let server = Server::bind(config, Arc::new(ToolContext::new(dir.path())))
+        .await
+        .unwrap();
+    let (tx, rx) = oneshot::channel::<()>();
+    let handle = tokio::spawn(server.run(async {
+        let _ = rx.await;
+    }));
+
+    // Far more idle connections than slots + pending places; some stuck mid-header.
+    let mut flood = Vec::new();
+    for i in 0..48 {
+        let mut c = UnixStream::connect(&sock).await.unwrap();
+        if i % 3 == 0 {
+            c.write_all(&[0, 0]).await.unwrap();
+        }
+        flood.push(c);
+    }
+    let mut clients = Vec::new();
+    for i in 0..2 {
+        let mut c = UnixStream::connect(&sock).await.unwrap();
+        send(&mut c, &serde_json::to_value(token.to_request(0)).unwrap()).await;
+        assert_eq!(
+            recv(&mut c).await["result"],
+            json!({}),
+            "client {i} authenticated"
+        );
+        send(&mut c, &req(1, "ping", json!({}))).await;
+        assert_eq!(recv(&mut c).await["id"], json!(1), "client {i} served");
+        clients.push(c);
+        for _ in 0..16 {
+            flood.push(UnixStream::connect(&sock).await.unwrap());
+        }
+    }
+    // The oldest flood connections were evicted (closed) rather than left to time out.
+    let mut first = flood.remove(0);
+    let closed = tokio::time::timeout(Duration::from_secs(2), codec::read_frame(&mut first)).await;
+    assert!(
+        matches!(closed, Ok(Ok(None) | Err(_))),
+        "oldest unauthenticated connection evicted: {closed:?}"
+    );
+    drop(flood);
+    drop(clients);
+    tx.send(()).unwrap();
+    handle.await.unwrap().unwrap();
+}
+
 #[tokio::test]
 async fn shutdown_closes_idle_connections() {
     let srv = TestServer::start().await;

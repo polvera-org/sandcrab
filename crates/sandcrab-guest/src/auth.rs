@@ -17,8 +17,9 @@ use tracing::{info, warn};
 
 use crate::codec;
 
-/// Default time a fresh connection has to authenticate.
-pub const DEFAULT_AUTH_TIMEOUT: Duration = Duration::from_secs(5);
+/// Default time a fresh connection has to authenticate. The host sends `auth` in its first
+/// write, so this only bounds how long an unauthenticated peer can hold a pending place.
+pub const DEFAULT_AUTH_TIMEOUT: Duration = Duration::from_secs(2);
 /// Bound on writing the (tiny) verdict frame to a client that does not read.
 const VERDICT_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
 

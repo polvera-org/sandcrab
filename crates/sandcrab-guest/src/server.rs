@@ -41,6 +41,12 @@
 //! `UNAUTHORIZED` frame and is closed. Without it (microVM vsock, local tests) connections
 //! are served as before.
 //!
+//! An unauthenticated connection does **not** hold one of the `max_connections` slots: it
+//! waits in a separate, small [`PendingQueue`] ([`ServerConfig::max_pending`], oldest evicted
+//! when full) and only takes a slot once it has authenticated. So peers without the token
+//! cannot starve the real client by holding idle connections ([`crate::preauth`]). Refusals
+//! are logged at most once a second.
+//!
 //! # Transports
 //!
 //! - Unix socket (Docker, local tests): a stale socket at the path is removed on start
@@ -78,7 +84,9 @@ use tracing::{debug, error, info, warn};
 use crate::{
     CRABD_VERSION, ToolContext,
     auth::{self, AuthConfig},
-    codec, tools,
+    codec,
+    preauth::{PendingQueue, PendingTicket, RateLimitedLog},
+    tools,
     tunnel::{self, TunnelConfig, TunnelService},
 };
 
@@ -107,6 +115,8 @@ pub struct ServerConfig {
     pub tunnels: TunnelConfig,
     /// Require the `auth` frame on every connection (see [`crate::auth`]).
     pub auth: Option<AuthConfig>,
+    /// With `auth`: max connections authenticating at once (outside `max_connections`).
+    pub max_pending: usize,
 }
 
 impl ServerConfig {
@@ -119,6 +129,7 @@ impl ServerConfig {
             shutdown_grace: Duration::from_secs(10),
             tunnels: TunnelConfig::default(),
             auth: None,
+            max_pending: crate::preauth::DEFAULT_PENDING,
         }
     }
 }
@@ -207,6 +218,17 @@ enum Conn {
     Vsock(crate::vsock::VsockStream, String),
 }
 
+impl Conn {
+    fn peer(&self) -> &str {
+        match self {
+            Self::Unix(_) => "unix",
+            Self::Tcp(..) => "tcp",
+            #[cfg(target_os = "linux")]
+            Self::Vsock(_, p) => p,
+        }
+    }
+}
+
 impl Listener {
     fn is_vsock(&self) -> bool {
         #[cfg(target_os = "linux")]
@@ -248,10 +270,12 @@ impl Server {
         if config.max_connections == 0
             || config.max_inflight_per_connection == 0
             || config.tunnels.max_tunnels == 0
+            || config.max_pending == 0
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "max_connections, max_inflight_per_connection and max_tunnels must be at least 1",
+                "max_connections, max_inflight_per_connection, max_tunnels and max_pending must \
+                 be at least 1",
             ));
         }
         let listener = match &config.listen {
@@ -320,6 +344,8 @@ impl Server {
         let auth = config.auth.clone().map(Arc::new);
         let (stop_tx, stop_rx) = watch::channel(false);
         let slots = Arc::new(Semaphore::new(config.max_connections));
+        let pending = PendingQueue::new(config.max_pending);
+        let refusals = Arc::new(RateLimitedLog::new(Duration::from_secs(1)));
         let mut conns = JoinSet::new();
         tokio::pin!(shutdown);
         info!(
@@ -331,9 +357,15 @@ impl Server {
 
         loop {
             while conns.try_join_next().is_some() {}
-            let permit = tokio::select! {
-                () = &mut shutdown => break,
-                p = Arc::clone(&slots).acquire_owned() => p.expect("connection semaphore is never closed"),
+            // Unauthenticated transports take their slot before accepting (backpressure via
+            // the accept backlog). Authenticated ones accept at once and take it after `auth`.
+            let permit = if auth.is_none() {
+                Some(tokio::select! {
+                    () = &mut shutdown => break,
+                    p = Arc::clone(&slots).acquire_owned() => p.expect("connection semaphore is never closed"),
+                })
+            } else {
+                None
             };
             let accepted = tokio::select! {
                 () = &mut shutdown => break,
@@ -348,6 +380,22 @@ impl Server {
                     continue;
                 }
             };
+            let permit = match permit {
+                Some(p) => ConnSlot::Held(p),
+                None => {
+                    let (ticket, evicted) = pending.admit();
+                    if evicted {
+                        refusals.warn(
+                            conn.peer(),
+                            "pending connections full; evicted the oldest unauthenticated one",
+                        );
+                    }
+                    ConnSlot::AfterAuth {
+                        ticket,
+                        slots: Arc::clone(&slots),
+                    }
+                }
+            };
             let handler = Arc::clone(&handler);
             let stop = stop_rx.clone();
             let inflight = config.max_inflight_per_connection;
@@ -356,6 +404,7 @@ impl Server {
                 max_inflight: inflight,
                 tunnels: Arc::clone(&tunnels),
                 auth: auth.clone(),
+                refusals: Arc::clone(&refusals),
             };
             match conn {
                 Conn::Unix(s) => conns.spawn(async move {
@@ -437,17 +486,31 @@ pub struct ConnConfig {
     pub tunnels: Arc<TunnelService>,
     /// `Some` = the connection must authenticate first.
     pub auth: Option<Arc<AuthConfig>>,
+    /// Rate-limited log for refused connections.
+    pub refusals: Arc<RateLimitedLog>,
+}
+
+/// A connection's claim on [`ServerConfig::max_connections`].
+pub enum ConnSlot {
+    /// Already holds its slot (unauthenticated transports).
+    Held(OwnedSemaphorePermit),
+    /// Waits in the pre-auth queue; takes a slot from `slots` once authenticated.
+    AfterAuth {
+        ticket: PendingTicket,
+        slots: Arc<Semaphore>,
+    },
 }
 
 /// Serve an accepted connection: authenticate it (when configured), then a raw tunnel if
-/// its first frame is `tunnel.open`, else frame mode ([`serve_connection`]). `conn_slot` is
-/// the `max_connections` permit; a tunnel releases it once it has its own slot.
+/// its first frame is `tunnel.open`, else frame mode ([`serve_connection`]). `slot` is the
+/// claim on a `max_connections` permit (taken only after `auth`, see [`ConnSlot`]); a tunnel
+/// releases the permit once it has its own slot.
 pub async fn serve_stream<S>(
     mut stream: S,
     cfg: ConnConfig,
     mut stop: watch::Receiver<bool>,
     peer: String,
-    conn_slot: OwnedSemaphorePermit,
+    slot: ConnSlot,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -456,20 +519,54 @@ pub async fn serve_stream<S>(
         max_inflight,
         tunnels,
         auth,
+        refusals,
     } = cfg;
     debug!(%peer, "connection opened");
+    let mut slot = slot;
     if let Some(auth) = auth {
-        let verdict = tokio::select! {
-            biased;
-            _ = stop.wait_for(|s| *s) => return,
-            v = auth::authenticate(&mut stream, &auth) => v,
+        // The pending ticket bounds the whole exchange (auth deadline + verdict write).
+        let deadline = auth.timeout + Duration::from_secs(1);
+        let verdict = match &mut slot {
+            ConnSlot::AfterAuth { ticket, .. } => tokio::select! {
+                biased;
+                _ = stop.wait_for(|s| *s) => return,
+                v = ticket.run(deadline, auth::authenticate(&mut stream, &auth)) => v,
+            },
+            ConnSlot::Held(_) => tokio::select! {
+                biased;
+                _ = stop.wait_for(|s| *s) => return,
+                v = auth::authenticate(&mut stream, &auth) => Ok(v),
+            },
         };
-        if let Err(why) = verdict {
-            warn!(%peer, reason = ?why, "connection failed authentication; closed");
-            return;
+        match verdict {
+            Ok(Ok(())) => debug!(%peer, "connection authenticated"),
+            Ok(Err(why)) => {
+                refusals.warn(
+                    &peer,
+                    &format!("connection failed authentication ({why:?}); closed"),
+                );
+                return;
+            }
+            Err(end) => {
+                refusals.warn(
+                    &peer,
+                    &format!("unauthenticated connection dropped ({end:?})"),
+                );
+                return;
+            }
         }
-        debug!(%peer, "connection authenticated");
     }
+    let conn_slot = match slot {
+        ConnSlot::Held(p) => p,
+        ConnSlot::AfterAuth { ticket, slots } => {
+            drop(ticket);
+            tokio::select! {
+                biased;
+                _ = stop.wait_for(|s| *s) => return,
+                p = slots.acquire_owned() => p.expect("connection semaphore is never closed"),
+            }
+        }
+    };
     let first = tokio::select! {
         biased;
         _ = stop.wait_for(|s| *s) => return,
