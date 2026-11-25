@@ -5,7 +5,8 @@
 //!    fd 0 becomes `/dev/null` (libkrun takes over stdin for the guest console, which must not
 //!    swallow the pipe). EOF = the owning process is gone → SIGKILL ourselves, VM included.
 //!    On Linux `PR_SET_PDEATHSIG` is set as well.
-//! 3. Verify pins and identities: the libkrunfw leaf-name lookup can only find the pinned
+//! 3. Raise the soft `RLIMIT_NOFILE` to the hard limit (see [`raise_nofile_limit`]).
+//!    Verify pins and identities: the libkrunfw leaf-name lookup can only find the pinned
 //!    file (74, see [`ffi::check_libkrunfw_lookup`]); libkrunfw + libkrun SHA-256 before
 //!    `dlopen` (71 / 74); disks exist, optional disk SHA-256s (70 / 71); workspace roots'
 //!    `(dev, ino)` against the lease identity (72). Shares are handed to libkrun as
@@ -60,6 +61,8 @@ fn run() -> Fail {
     if let Err(e) = start_lifeline() {
         return Fail::new(exit_code::CONFIG_INVALID, format!("lifeline setup: {e}"));
     }
+
+    raise_nofile_limit();
 
     if let Err(e) = ffi::check_libkrunfw_lookup(&cfg.libkrunfw.path, |k| std::env::var_os(k)) {
         return Fail::new(exit_code::LIBKRUN_LOAD, e);
@@ -132,6 +135,73 @@ fn run() -> Fail {
     let e = ctx.start_enter();
     drop(roots);
     Fail::new(exit_code::START_FAILED, e)
+}
+
+/// Raise the soft `RLIMIT_NOFILE` to the hard limit, as virtiofsd does. The VMM's virtio-fs
+/// servers hold host fds on the guest's behalf: on Linux libkrun's passthrough keeps one
+/// `O_PATH` fd per inode the guest has looked up (until the guest kernel forgets it), so
+/// walking a few thousand files in a share exhausted the inherited soft limit (often 1024)
+/// and the next guest create failed with `EMFILE`. macOS addresses inodes by `/.vol` path
+/// (no per-inode fd) but still holds one per open handle, under a 256 default soft limit.
+/// Best effort: a failure is logged and the VM still starts.
+fn raise_nofile_limit() {
+    use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
+    let cur = getrlimit(Resource::Nofile);
+    let Some(target) = nofile_target(cur.current, cur.maximum, nofile_cap()) else {
+        log(format_args!(
+            "RLIMIT_NOFILE soft {} kept (hard {})",
+            fmt_limit(cur.current),
+            fmt_limit(cur.maximum)
+        ));
+        return;
+    };
+    let new = Rlimit {
+        current: Some(target),
+        maximum: cur.maximum,
+    };
+    match setrlimit(Resource::Nofile, new) {
+        Ok(()) => log(format_args!(
+            "RLIMIT_NOFILE soft {} -> {target} (hard {})",
+            fmt_limit(cur.current),
+            fmt_limit(cur.maximum)
+        )),
+        Err(e) => log(format_args!(
+            "warning: raising RLIMIT_NOFILE soft {} -> {target}: {e}; large virtio-fs \
+             shares may hit EMFILE",
+            fmt_limit(cur.current)
+        )),
+    }
+}
+
+fn fmt_limit(l: Option<u64>) -> String {
+    l.map_or_else(|| "unlimited".into(), |v| v.to_string())
+}
+
+/// Highest soft `RLIMIT_NOFILE` the kernel accepts. Linux: `fs.nr_open` (default 2^20), which
+/// also bounds an unlimited hard limit.
+#[cfg(target_os = "linux")]
+fn nofile_cap() -> u64 {
+    std::fs::read_to_string("/proc/sys/fs/nr_open")
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(1 << 20)
+}
+
+/// Highest soft `RLIMIT_NOFILE` the kernel accepts. macOS rejects `RLIM_INFINITY` and values
+/// above `OPEN_MAX` for `setrlimit(RLIMIT_NOFILE)` (setrlimit(2) compatibility note).
+#[cfg(not(target_os = "linux"))]
+fn nofile_cap() -> u64 {
+    10240 // OPEN_MAX, <sys/syslimits.h>
+}
+
+/// The soft limit to set: `min(hard, cap)` (`None` = unlimited), or `None` if the current soft
+/// limit is already at least that (never lowers it).
+fn nofile_target(soft: Option<u64>, hard: Option<u64>, cap: u64) -> Option<u64> {
+    let target = hard.map_or(cap, |h| h.min(cap));
+    match soft {
+        Some(s) if s < target => Some(target),
+        _ => None,
+    }
 }
 
 /// Move the rest of stdin to a private fd watched by a thread; fd 0 becomes `/dev/null`.
@@ -322,6 +392,36 @@ fn open_shares(shares: &[VirtioFsShare]) -> Result<Vec<ShareRoot>, Fail> {
             Ok(ShareRoot { fd })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod nofile_tests {
+    use super::nofile_target;
+
+    #[test]
+    fn raises_soft_to_hard() {
+        assert_eq!(
+            nofile_target(Some(1024), Some(524_288), 1 << 20),
+            Some(524_288)
+        );
+    }
+
+    #[test]
+    fn caps_at_the_kernel_maximum() {
+        // Unlimited hard, and a hard above the cap (macOS: kern.maxfilesperproc > OPEN_MAX).
+        assert_eq!(nofile_target(Some(256), None, 10_240), Some(10_240));
+        assert_eq!(
+            nofile_target(Some(256), Some(1 << 30), 10_240),
+            Some(10_240)
+        );
+    }
+
+    #[test]
+    fn never_lowers() {
+        assert_eq!(nofile_target(Some(524_288), Some(524_288), 1 << 20), None);
+        assert_eq!(nofile_target(Some(20_000), None, 10_240), None);
+        assert_eq!(nofile_target(None, None, 1 << 20), None);
+    }
 }
 
 #[cfg(all(test, target_os = "linux"))]
