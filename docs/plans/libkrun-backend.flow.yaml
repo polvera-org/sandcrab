@@ -264,7 +264,7 @@ steps:
     title: "crabd: /sys read-only for the sandbox (Docker parity), hardening sysctls in init (unprivileged userns/bpf/userfaultfd/io_uring/perf off) per docs/design/guest-seccomp.md"
     depends_on: [guest-hardening-2, lk-w2-emfile, docker-tcp-macos]
     artifacts: [crates/sandcrab-guest/]
-    status: doing
+    status: done
 
   - id: docker-tcp-macos
     phase: implement
@@ -279,7 +279,7 @@ steps:
     agent: nebula
     title: "QA + security review (helper unsafe island, TSI exposure, virtio-fs traversal/identity race, capability honesty, lifeline); decide: per-spawn root-disk hash, Linux lib-hash cost (~187 ms w/o SHA-NI)"
     depends_on: [bench-report, fc-net-egress, guest-hardening-2, small-fixes, guest-hardening-3, docker-tcp-macos]
-    status: todo
+    status: doing
 
   - id: crabagent-backends
     phase: implement
