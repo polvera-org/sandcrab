@@ -1,0 +1,486 @@
+//! Backend selection and the backend-specific probes the spec needs (teardown verification,
+//! cgroup/process discovery, disk). Everything timed still goes through the public SDK; the
+//! probes here only observe.
+//!
+//! A backend that cannot run on this host (no `/dev/kvm`, not compiled in, daemon down) is
+//! returned as `Err(reason)` and recorded as `unavailable` — never substituted.
+
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+use sandcrab_sdk::{Sandbox, Sandcrab};
+
+use crate::results::Capabilities;
+use crate::sample;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum BackendId {
+    Docker,
+    Firecracker,
+    Libkrun,
+}
+
+impl BackendId {
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s.trim() {
+            "docker" | "docker-dev" => Ok(Self::Docker),
+            "firecracker" | "fc" => Ok(Self::Firecracker),
+            "libkrun" | "krun" => Ok(Self::Libkrun),
+            other => Err(format!(
+                "unknown backend `{other}` (expected docker | firecracker | libkrun)"
+            )),
+        }
+    }
+
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Docker => "docker",
+            Self::Firecracker => "firecracker",
+            Self::Libkrun => "libkrun",
+        }
+    }
+}
+
+/// Inputs shared by every backend.
+#[derive(Debug, Clone)]
+pub struct OpenOpts {
+    pub state_dir: PathBuf,
+    pub templates_dir: PathBuf,
+    pub crabd: PathBuf,
+}
+
+/// Per-sandbox handles for resource sampling and teardown verification.
+#[derive(Debug, Clone, Default)]
+pub struct Probe {
+    /// Docker container name / full id.
+    pub name: String,
+    pub container_id: String,
+    /// `containerd-shim` (outside the container cgroup).
+    pub shim_pid: Option<u32>,
+    pub cgroup: Option<PathBuf>,
+    /// The VMM process (Firecracker's `firecracker`, libkrun's `sandcrab-krun` helper) and the
+    /// sandbox run dir. `None` for Docker (no VMM: shared kernel).
+    pub vmm_pid: Option<u32>,
+    pub run_dir: Option<PathBuf>,
+    /// Configured guest RAM (template `memory_mb`), to find the guest mapping in the VMM.
+    pub guest_mem_bytes: Option<u64>,
+}
+
+/// One opened backend.
+pub struct LiveBackend {
+    pub id: BackendId,
+    pub sc: Sandcrab,
+    pub caps: Capabilities,
+    #[cfg(feature = "docker")]
+    docker: Option<bollard::Docker>,
+}
+
+impl std::fmt::Debug for LiveBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LiveBackend").field("id", &self.id).finish()
+    }
+}
+
+fn caps(sc: &Sandcrab) -> Capabilities {
+    let c = sc.backend_capabilities();
+    Capabilities {
+        hardware_isolated: c.hardware_isolated,
+        multi_tenant_safe: c.multi_tenant_safe,
+        supports_snapshots: c.supports_snapshots,
+        supports_host_dir_mounts: c.supports_host_dir_mounts,
+    }
+}
+
+/// Firecracker artifact paths for the host declaration (empty if not compiled in).
+#[must_use]
+pub fn fc_paths(opts: &OpenOpts) -> crate::host::FcPaths {
+    #[cfg(all(feature = "firecracker", target_os = "linux"))]
+    {
+        match fc_config(opts) {
+            Ok(c) => crate::host::FcPaths {
+                firecracker_bin: Some(c.firecracker_bin),
+                kernel: Some(c.kernel),
+            },
+            Err(_) => crate::host::FcPaths::default(),
+        }
+    }
+    #[cfg(not(all(feature = "firecracker", target_os = "linux")))]
+    {
+        let _ = opts;
+        crate::host::FcPaths::default()
+    }
+}
+
+pub async fn open(id: BackendId, opts: &OpenOpts) -> Result<LiveBackend, String> {
+    let builder = Sandcrab::builder()
+        .state_dir(&opts.state_dir)
+        .templates_dir(&opts.templates_dir);
+    match id {
+        BackendId::Docker => open_docker(builder, opts).await,
+        BackendId::Firecracker => open_firecracker(builder, opts),
+        BackendId::Libkrun => open_libkrun(builder, opts),
+    }
+}
+
+#[cfg(feature = "docker")]
+async fn open_docker(
+    builder: sandcrab_sdk::SandcrabBuilder,
+    opts: &OpenOpts,
+) -> Result<LiveBackend, String> {
+    if !opts.crabd.is_file() {
+        return Err(format!(
+            "static crabd not found at {} (build it with scripts/build-crabd.sh or pass --crabd)",
+            opts.crabd.display()
+        ));
+    }
+    // Shared kernel: the result records the (honest) capabilities.
+    let sc = builder
+        .docker(sandcrab_sdk::DockerConfig {
+            crabd_path: opts.crabd.clone(),
+            ..sandcrab_sdk::DockerConfig::default()
+        })
+        .build()
+        .map_err(|e| format!("cannot initialise docker: {e}"))?;
+    let docker = bollard::Docker::connect_with_defaults()
+        .map_err(|e| format!("cannot connect to the Docker daemon: {e}"))?;
+    docker
+        .ping()
+        .await
+        .map_err(|e| format!("Docker daemon not reachable: {e}"))?;
+    Ok(LiveBackend {
+        id: BackendId::Docker,
+        caps: caps(&sc),
+        sc,
+        docker: Some(docker),
+    })
+}
+
+#[cfg(not(feature = "docker"))]
+async fn open_docker(
+    _builder: sandcrab_sdk::SandcrabBuilder,
+    _opts: &OpenOpts,
+) -> Result<LiveBackend, String> {
+    Err("sandcrab-bench was built without the `docker` feature".into())
+}
+
+/// Firecracker config: the pinned artifacts and the rootfs cache come from the Sandcrab home
+/// (`$SANDCRAB_HOME` / `~/.sandcrab`, shared with the CLI, slow to build), never from the
+/// per-run state dir, which would always be empty; run / recovery dirs stay per run.
+#[cfg(all(feature = "firecracker", target_os = "linux"))]
+fn fc_config(opts: &OpenOpts) -> Result<sandcrab_sdk::FirecrackerConfig, String> {
+    let home = sandcrab_sdk::firecracker::sandcrab_home()
+        .map_err(|e| format!("cannot locate the Sandcrab home: {e}"))?;
+    let mut config = sandcrab_sdk::FirecrackerConfig::with_home(&home, opts.crabd.clone());
+    config.run_dir = opts.state_dir.join("run");
+    config.recovery_dir = opts.state_dir.join("recovery");
+    // Optional delegated cgroup v2 parent: per-VMM leaves give cgroup metrics too. Without it the
+    // VMM process itself is sampled (smaps PSS/RSS, /proc/<pid>/stat CPU).
+    if let Some(cg) = std::env::var_os("SANDCRAB_BENCH_FC_CGROUP").filter(|v| !v.is_empty()) {
+        config.cgroup_parent = Some(PathBuf::from(cg));
+    }
+    Ok(config)
+}
+
+#[cfg(all(feature = "firecracker", target_os = "linux"))]
+fn open_firecracker(
+    builder: sandcrab_sdk::SandcrabBuilder,
+    opts: &OpenOpts,
+) -> Result<LiveBackend, String> {
+    let kvm = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/kvm");
+    if let Err(e) = kvm {
+        return Err(format!(
+            "/dev/kvm not usable ({e}); Firecracker needs a KVM host (bare metal or a VM \
+             with nested virtualization) — TODO: run on kvm-homelab"
+        ));
+    }
+    let config = fc_config(opts)?;
+    for p in [&config.kernel, &config.firecracker_bin] {
+        if !p.is_file() {
+            return Err(format!(
+                "pinned Firecracker artifact {} is missing (`sandcrab doctor --fix`)",
+                p.display()
+            ));
+        }
+    }
+    let sc = builder
+        .firecracker(config)
+        .build()
+        .map_err(|e| format!("cannot initialise firecracker: {e}"))?;
+    Ok(LiveBackend {
+        id: BackendId::Firecracker,
+        caps: caps(&sc),
+        sc,
+        #[cfg(feature = "docker")]
+        docker: None,
+    })
+}
+
+#[cfg(not(all(feature = "firecracker", target_os = "linux")))]
+fn open_firecracker(
+    _builder: sandcrab_sdk::SandcrabBuilder,
+    _opts: &OpenOpts,
+) -> Result<LiveBackend, String> {
+    Err("firecracker backend not compiled in (needs Linux and the `firecracker` feature)".into())
+}
+
+/// libkrun with the operator's install (`sandcrab libkrun install`: helper + pinned libraries
+/// under `$SANDCRAB_HOME` / `~/.sandcrab`, shared rootfs cache there) but this run's own run dir.
+/// Linux: `SANDCRAB_BENCH_KRUN_CGROUP` names a delegated cgroup v2 parent for per-helper leaves
+/// (PSS + cgroup metrics); without it memory is sampled as helper RSS, as on macOS.
+#[cfg(all(
+    feature = "libkrun",
+    any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))
+))]
+fn open_libkrun(
+    builder: sandcrab_sdk::SandcrabBuilder,
+    opts: &OpenOpts,
+) -> Result<LiveBackend, String> {
+    let mut config = sandcrab_sdk::LibkrunConfig::from_env(opts.crabd.clone())
+        .map_err(|e| format!("libkrun config: {e}"))?;
+    config.run_dir = opts.state_dir.join("run").join("krun");
+    if config.validate().is_err() {
+        // Socket path budget (104 bytes on macOS): fall back to a short private dir.
+        config.run_dir = std::env::temp_dir()
+            .join(format!("sandcrab-bench-{}", std::process::id()))
+            .join("krun");
+        if config.validate().is_err() {
+            config.run_dir = PathBuf::from(format!("/tmp/scb-{}/krun", std::process::id()));
+        }
+    }
+    if let Some(cg) = std::env::var_os("SANDCRAB_BENCH_KRUN_CGROUP").filter(|v| !v.is_empty()) {
+        config.cgroup_parent = Some(PathBuf::from(cg));
+    }
+    if let sandcrab_sdk::libkrun::RootfsSource::Template { crabd } = &config.rootfs
+        && !crabd.is_file()
+    {
+        return Err(format!(
+            "static crabd not found at {} (build it with scripts/build-crabd.sh or pass --crabd)",
+            crabd.display()
+        ));
+    }
+    let sc = builder.libkrun(config).build().map_err(|e| {
+        format!("cannot initialise libkrun: {e} (`sandcrab doctor --backend libkrun`)")
+    })?;
+    Ok(LiveBackend {
+        id: BackendId::Libkrun,
+        caps: caps(&sc),
+        sc,
+        #[cfg(feature = "docker")]
+        docker: None,
+    })
+}
+
+#[cfg(not(all(
+    feature = "libkrun",
+    any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))
+)))]
+fn open_libkrun(
+    _builder: sandcrab_sdk::SandcrabBuilder,
+    _opts: &OpenOpts,
+) -> Result<LiveBackend, String> {
+    Err(
+        "libkrun backend not compiled in (needs macOS aarch64 or Linux and the `libkrun` feature)"
+            .into(),
+    )
+}
+
+#[cfg(feature = "docker")]
+fn status_code(e: &bollard::errors::Error) -> Option<u16> {
+    match e {
+        bollard::errors::Error::DockerResponseServerError { status_code, .. } => Some(*status_code),
+        _ => None,
+    }
+}
+
+/// Polling period / timeout for teardown verification (spec: 1 ms, 10 s).
+pub const VERIFY_POLL: Duration = Duration::from_millis(1);
+pub const VERIFY_TIMEOUT: Duration = Duration::from_secs(10);
+
+impl LiveBackend {
+    /// Discover the host-side handles of a live sandbox (outside any timed window).
+    pub async fn probe(&self, sb: &Sandbox) -> Option<Probe> {
+        #[cfg(feature = "docker")]
+        if let Some(docker) = &self.docker {
+            let name = sandcrab_sdk::docker::spec::container_name(sb.id());
+            let info = docker.inspect_container(&name, None).await.ok()?;
+            let container_id = info.id.unwrap_or_default();
+            let init_pid = info
+                .state
+                .and_then(|s| s.pid)
+                .and_then(|p| u32::try_from(p).ok())
+                .filter(|p| *p > 0);
+            return Some(Probe {
+                cgroup: sample::cgroup_dir(init_pid, &container_id),
+                shim_pid: init_pid.and_then(sample::proc_ppid),
+                name,
+                container_id,
+                ..Probe::default()
+            });
+        }
+        #[cfg(all(
+            feature = "libkrun",
+            any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))
+        ))]
+        if let Some(k) = self.sc.libkrun_backend() {
+            let dir = k.config().sandbox_run_dir(&sb.id().to_string());
+            let meta = sandcrab_sdk::libkrun::reap::RunMeta::load(&dir).ok()?;
+            return Some(Probe {
+                name: sb.id().to_string(),
+                vmm_pid: meta.helper.map(|h| h.pid),
+                cgroup: meta.cgroup.filter(|p| p.join("memory.current").exists()),
+                run_dir: Some(dir),
+                guest_mem_bytes: self.guest_mem_bytes(sb),
+                ..Probe::default()
+            });
+        }
+        // Firecracker: `<run_dir>/<id>/meta.json` records the VMM pid (and its cgroup leaf).
+        #[cfg(all(feature = "firecracker", target_os = "linux"))]
+        if let Some(fc) = self.sc.firecracker_backend() {
+            let dir = fc.config().run_dir.join(sb.id().to_string());
+            let meta = sandcrab_sdk::firecracker::rundir::RunMeta::load(&dir).ok()?;
+            return Some(Probe {
+                name: sb.id().to_string(),
+                vmm_pid: meta.vmm.map(|p| p.pid),
+                cgroup: meta.cgroup.filter(|p| p.join("memory.current").exists()),
+                run_dir: Some(dir),
+                guest_mem_bytes: self.guest_mem_bytes(sb),
+                ..Probe::default()
+            });
+        }
+        let _ = sb;
+        None
+    }
+
+    /// Guest RAM of a sandbox spawned from its template's defaults.
+    #[allow(dead_code)] // unused when no VMM backend is compiled in
+    fn guest_mem_bytes(&self, sb: &Sandbox) -> Option<u64> {
+        let tpl = self.sc.manager().templates().get(sb.template()).ok()?;
+        Some(tpl.manifest.resources.memory_mb * 1024 * 1024)
+    }
+
+    /// Writable-layer bytes of the sandbox (`docker inspect --size` → `SizeRw`).
+    pub async fn disk_rw(&self, probe: &Probe) -> Result<u64, String> {
+        #[cfg(feature = "docker")]
+        if let Some(docker) = &self.docker {
+            let opts = bollard::query_parameters::InspectContainerOptionsBuilder::new()
+                .size(true)
+                .build();
+            let info = docker
+                .inspect_container(&probe.name, Some(opts))
+                .await
+                .map_err(|e| format!("inspect --size: {e}"))?;
+            return info
+                .size_rw
+                .and_then(|v| u64::try_from(v).ok())
+                .ok_or_else(|| "docker did not report SizeRw".into());
+        }
+        let _ = probe;
+        Err(format!(
+            "disk sampling not implemented for {}",
+            self.id.label()
+        ))
+    }
+
+    /// Shared image bytes for a template (`docker image inspect` → `Size`).
+    pub async fn disk_shared(&self, image: &str) -> Result<u64, String> {
+        #[cfg(feature = "docker")]
+        if let Some(docker) = &self.docker {
+            let info = docker
+                .inspect_image(image)
+                .await
+                .map_err(|e| format!("image inspect {image}: {e}"))?;
+            return info
+                .size
+                .and_then(|v| u64::try_from(v).ok())
+                .ok_or_else(|| "docker did not report the image size".into());
+        }
+        let _ = image;
+        Err(format!(
+            "disk sampling not implemented for {}",
+            self.id.label()
+        ))
+    }
+
+    /// Image ID present on the host.
+    pub async fn image_id(&self, image: &str) -> Option<String> {
+        #[cfg(feature = "docker")]
+        if let Some(docker) = &self.docker {
+            return docker.inspect_image(image).await.ok()?.id;
+        }
+        let _ = image;
+        None
+    }
+
+    /// Poll until the sandbox's host resources are gone (spec §1 `teardown` stop point).
+    /// Docker: `inspect` → 404 and the cgroup dir removed.
+    pub async fn verify_gone(&self, probe: Option<&Probe>) -> Result<(), String> {
+        let Some(probe) = probe else {
+            // No probe (lookup failed): nothing to poll.
+            return Ok(());
+        };
+        let deadline = Instant::now() + VERIFY_TIMEOUT;
+        loop {
+            if self.resources_gone(probe).await? {
+                return Ok(());
+            }
+            if Instant::now() > deadline {
+                return Err(format!(
+                    "resources of {} ({}) still present after {VERIFY_TIMEOUT:?}",
+                    probe.name, probe.container_id
+                ));
+            }
+            tokio::time::sleep(VERIFY_POLL).await;
+        }
+    }
+
+    async fn resources_gone(&self, probe: &Probe) -> Result<bool, String> {
+        let cgroup_gone = probe.cgroup.as_deref().is_none_or(|p| !p.exists());
+        // VMM backends: `destroy` removes the run dir (API/vsock sockets, scratch, workspace
+        // images) only after the VMM has exited.
+        let run_dir_gone = probe.run_dir.as_deref().is_none_or(|p| !p.exists());
+        let vmm_gone = probe.vmm_pid.is_none_or(|pid| !sample::process_alive(pid));
+        if probe.vmm_pid.is_some() || probe.run_dir.is_some() {
+            return Ok(cgroup_gone && run_dir_gone && vmm_gone);
+        }
+        #[cfg(feature = "docker")]
+        if let Some(docker) = &self.docker {
+            let container_gone = match docker.inspect_container(&probe.name, None).await {
+                Err(e) if status_code(&e) == Some(404) => true,
+                Err(e) => return Err(format!("inspect {}: {e}", probe.name)),
+                Ok(_) => false,
+            };
+            return Ok(container_gone && cgroup_gone);
+        }
+        Ok(cgroup_gone)
+    }
+}
+
+/// Default static crabd location (same as the e2e harness).
+#[must_use]
+pub fn default_crabd(repo_root: &Path) -> PathBuf {
+    if let Some(p) = std::env::var_os("SANDCRAB_CRABD").filter(|v| !v.is_empty()) {
+        return PathBuf::from(p);
+    }
+    sandcrab_sdk::core::crabd_build_path(repo_root)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backend_names() {
+        assert_eq!(BackendId::parse("docker").unwrap(), BackendId::Docker);
+        assert_eq!(BackendId::parse("docker-dev").unwrap(), BackendId::Docker);
+        assert_eq!(BackendId::parse("fc").unwrap(), BackendId::Firecracker);
+        assert!(BackendId::parse("kata").is_err());
+        assert_eq!(BackendId::Firecracker.label(), "firecracker");
+        assert_eq!(BackendId::parse("libkrun").unwrap(), BackendId::Libkrun);
+        assert_eq!(BackendId::parse("krun").unwrap(), BackendId::Libkrun);
+        assert_eq!(BackendId::Libkrun.label(), "libkrun");
+    }
+}

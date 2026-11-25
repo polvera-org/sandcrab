@@ -1,0 +1,19 @@
+{
+  "name": "sandcrab-landing",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Sandcrab landing page source. `npm run build` writes the static site to ../landing/.",
+  "license": "Apache-2.0",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "vite": "^8.3.8"
+  },
+  "dependencies": {
+    "lenis": "^1.3.11"
+  }
+}

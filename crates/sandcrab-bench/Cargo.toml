@@ -1,0 +1,47 @@
+[package]
+name = "sandcrab-bench"
+description = "Benchmark harness for Sandcrab runtime backends (Docker, Firecracker, libkrun); emits schema-versioned JSON"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[[bin]]
+name = "sandcrab-bench"
+path = "src/main.rs"
+
+[features]
+default = ["docker", "firecracker", "libkrun"]
+# Docker backend (`--backends docker`). Resource sampling talks to the daemon via bollard.
+docker = ["sandcrab-sdk/docker", "dep:bollard"]
+# Firecracker backend (`--backends firecracker`). Only compiles in on Linux; elsewhere (and on
+# hosts without /dev/kvm) the backend is recorded as `unavailable`, never substituted.
+firecracker = ["sandcrab-sdk/firecracker"]
+# libkrun backend (`--backends libkrun`). Only compiles in on macOS aarch64 and Linux; elsewhere,
+# or without the signed helper / pinned libraries / hypervisor, it is recorded as `unavailable`.
+libkrun = ["sandcrab-sdk/libkrun"]
+
+[dependencies]
+sandcrab-sdk = { workspace = true, default-features = false }
+anyhow.workspace = true
+base64.workspace = true
+bollard = { workspace = true, optional = true }
+chrono.workspace = true
+clap.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

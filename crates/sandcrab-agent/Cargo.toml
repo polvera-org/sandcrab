@@ -1,0 +1,54 @@
+[package]
+name = "sandcrab-agent"
+description = "crabagent: a minimal coding-agent CLI that drives Claude over Sandcrab sandbox tools"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "crabagent"
+path = "src/main.rs"
+
+[features]
+default = ["docker", "firecracker", "libkrun"]
+# Docker backend (`--backend docker`).
+docker = ["sandcrab-sdk/docker"]
+# Firecracker microVM backend (`--backend firecracker`). On by default; it only compiles in on
+# Linux targets (a no-op elsewhere), exactly like the `sandcrab` CLI.
+firecracker = ["sandcrab-sdk/firecracker"]
+# libkrun microVM backend (`--backend libkrun`). On by default; it only compiles in on macOS
+# aarch64 and Linux (a no-op elsewhere): Cargo default features cannot be target-specific, so
+# the SDK dependency is target-gated and the code is `cfg`-gated on the same targets.
+libkrun = ["sandcrab-sdk/libkrun"]
+
+[dependencies]
+sandcrab-sdk = { workspace = true, default-features = false }
+anyhow.workspace = true
+base64.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+clap.workspace = true
+dotenvy.workspace = true
+reqwest.workspace = true
+rustyline.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+sandcrab-core = { workspace = true, features = ["test-util"] }
+tempfile.workspace = true
+
+[lints]
+workspace = true

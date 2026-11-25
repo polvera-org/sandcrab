@@ -3,6 +3,9 @@ name = "python-dev"
 version = "0.1.0"
 description = "Python 3.15 + uv + ruff + pytest + mypy development sandbox for AI coding agents"
 image = "sandcrab/python-dev:0.1.0"
+# The built image ID is pinned per host, not here (local image IDs do not reproduce
+# across hosts): `templates/build.sh python-dev` records it under ~/.sandcrab/template-pins.
+# The Dockerfile FROM base images are digest-pinned.
 
 [resources]
 vcpu = 2
@@ -13,7 +16,7 @@ disk_mb = 4096
 workdir = "/workspace"
 
 [network]
-default_policy = "egress_restricted"
+default_policy = "disabled"
 
 [tools]
 tiers = ["core", "process"]

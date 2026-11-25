@@ -1,0 +1,1041 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sandcrab Repo Walkthrough</title>
+<meta name="description" content="A guided tour of the Sandcrab V1 codebase for new contributors: crates, the life of a tool call, the life of a sandbox, workspaces, security invariants, templates and where to start.">
+<meta name="color-scheme" content="light">
+<meta name="theme-color" content="#FAFAF7">
+<link rel="icon" href="assets/brand/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="assets/brand/favicon-32.png" type="image/png" sizes="32x32">
+<link rel="apple-touch-icon" href="assets/brand/apple-touch-icon.png" sizes="180x180">
+<link rel="stylesheet" href="assets/brand/brand.css">
+<script src="assets/brand/theme.js"></script>
+<style>
+/* page tokens (brand.css provides the palette) */
+:root {
+  --glyph-ink:var(--ink); --glyph-fill:var(--bg);
+  --code-ty:#8FD0DC; --code-dim2:#6F7C80;
+  --no:var(--rust-text);
+}
+:root[data-theme="dark"] { --code-ty:#9ED6DF; }
+html { scroll-behavior:smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior:auto; } }
+body { overflow-x:clip; }
+h1,h2,h3,h4 { margin:0; }
+p { margin:0 0 16px; }
+strong { font-weight:600; }
+:not(pre) > code { overflow-wrap:anywhere; }
+
+/* glyphs */
+.glyph { display:inline-grid; place-items:center; width:44px; height:44px; border-radius:12px; background:var(--bg-2); flex:none; }
+.glyph.sm { width:28px; height:28px; border-radius:8px; }
+.glyph.lg { width:64px; height:64px; border-radius:16px; }
+.glyph-svg { width:80%; height:80%; color:var(--glyph-ink); }
+.glyph-svg [fill="#F5ECD9"] { fill:var(--glyph-fill); }
+.glyph-svg [stroke="#F5ECD9"] { stroke:var(--glyph-fill); }
+.glyph-svg [fill="#FF6B4A"] { fill:var(--rust); }
+.glyph-svg [stroke="#FF6B4A"] { stroke:var(--rust); }
+.glyph-svg [fill="#1F7A8C"] { fill:var(--teal); }
+
+/* hero */
+.hero { max-width:1280px; margin:0 auto; padding:clamp(40px,6vw,88px) var(--gutter) clamp(40px,5vw,72px); display:grid; grid-template-columns:minmax(0,1.15fr) minmax(0,.85fr); gap:clamp(32px,4vw,64px); align-items:end; }
+.eyebrow { margin:0 0 18px; }
+.eyebrow code { font-size:1em; letter-spacing:0; text-transform:none; }
+.hero h1 { font-size:clamp(40px,6vw,88px); font-stretch:78%; line-height:.9; letter-spacing:-.01em; text-transform:uppercase; margin-bottom:24px; }
+.hero .lede { font-size:clamp(17px,1.5vw,20px); line-height:1.55; color:var(--ink-2); max-width:36em; }
+.facts { display:flex; flex-wrap:wrap; gap:8px; margin-top:28px; }
+.fact { font:400 12px/1.3 var(--mono); text-transform:uppercase; letter-spacing:.08em; border:1.5px solid var(--line-2); border-radius:999px; padding:8px 14px; color:var(--ink-2); }
+.fact b { color:var(--ink); font-weight:500; }
+.fact code { background:none; padding:0; font-size:1em; text-transform:none; }
+.stage { position:relative; aspect-ratio:4/3; border-radius:14px; background:var(--bg-2); box-shadow:var(--shadow); overflow:hidden; }
+.stage img { width:100%; height:100%; object-fit:cover; display:block; filter:var(--img-filter); }
+.stage .cap { position:absolute; left:12px; bottom:12px; right:12px; width:max-content; max-width:calc(100% - 24px); font:400 11px/1.4 var(--mono); text-transform:uppercase; letter-spacing:.1em; background:color-mix(in srgb, var(--bg) 90%, transparent); border-radius:999px; padding:6px 12px; color:var(--ink-2); }
+.stage canvas { display:block; }
+
+/* layout */
+.layout { max-width:1280px; margin:0 auto; padding:0 var(--gutter); display:grid; grid-template-columns:220px minmax(0,1fr); gap:clamp(40px,5vw,80px); }
+.toc { position:sticky; top:calc(var(--bar-h) + 16px); align-self:start; max-height:calc(100vh - var(--bar-h) - 32px); overflow:auto; padding:0 4px 12px 0; border-top:2px solid var(--ink); scrollbar-width:thin; scrollbar-color:var(--line-2) transparent; }
+.toc::-webkit-scrollbar { width:6px; } .toc::-webkit-scrollbar-thumb { background:var(--line-2); border-radius:6px; }
+.toc h2 { font:400 11.5px/1.4 var(--mono); text-transform:uppercase; letter-spacing:.16em; color:var(--ink-3); margin:14px 0 6px; }
+.toc ol { list-style:none; margin:0; padding:0; }
+.toc li { margin:0; border-bottom:1px solid var(--line); }
+.toc a { display:flex; gap:12px; align-items:baseline; padding:10px 0 10px 2px; text-decoration:none; color:var(--ink-2); font-size:14.5px; line-height:1.3; box-shadow:inset 0 0 0 transparent; transition:color .15s, box-shadow .15s, padding .15s; }
+.toc a:hover { color:var(--ink); }
+.toc a.active, .toc a.active:hover { color:var(--ink); font-weight:600; box-shadow:inset 3px 0 0 var(--rust); padding-left:12px; }
+.toc .n { font:400 11px/1 var(--mono); letter-spacing:.06em; color:var(--rust-text); min-width:18px; }
+.toc-mobile { display:none; }
+
+.content { min-width:0; max-width:820px; }
+section.chap { padding:28px 0 40px; border-top:2px solid var(--ink); }
+.chap-head { display:flex; gap:18px; align-items:center; margin-bottom:24px; }
+.chap-head h2 { font-size:clamp(30px,3.6vw,48px); font-weight:800; font-stretch:86%; letter-spacing:-.03em; line-height:.98; }
+.chap-head .num { font:400 11.5px/1 var(--mono); letter-spacing:.16em; color:var(--rust-text); display:block; margin-bottom:8px; }
+h3 { font-size:22px; margin:36px 0 12px; }
+h4 { font-size:17px; margin:20px 0 8px; }
+.muted { color:var(--ink-2); }
+ul.tight, ol.tight { padding-left:20px; margin:0 0 16px; } ul.tight li, ol.tight li { margin:5px 0; }
+.see-also { margin:0; padding:20px 0 0; border-top:1px solid var(--line); color:var(--ink-2); font-size:15px; }
+
+/* refs */
+a.ref { font:12.5px/1.4 var(--mono); color:var(--teal-text); background:var(--teal-soft); border-radius:6px; padding:1px 6px; text-decoration:none; overflow-wrap:anywhere; white-space:normal; }
+a.ref:hover { text-decoration:underline; }
+
+/* code */
+figure.code { margin:16px 0 24px; border-radius:14px; overflow:hidden; background:var(--code-bg); }
+figure.code figcaption { display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap; align-items:center; padding:10px 18px; font:400 11.5px/1.4 var(--mono); letter-spacing:.02em; color:var(--code-dim); border-bottom:1px solid var(--code-line); }
+figure.code figcaption span { text-transform:uppercase; letter-spacing:.14em; font-size:10.5px; }
+figure.code figcaption a { color:var(--c-str); text-decoration:none; overflow-wrap:anywhere; }
+figure.code figcaption a:hover { text-decoration:underline; }
+pre { margin:0; padding:16px 20px; overflow-x:auto; font:13px/1.65 var(--mono); color:var(--code-ink); tab-size:4; scrollbar-width:thin; scrollbar-color:var(--code-line) transparent; }
+pre::-webkit-scrollbar { height:8px; } pre::-webkit-scrollbar-thumb { background:var(--code-line); border-radius:8px; }
+pre .k { color:var(--c-key); } pre .s { color:var(--c-str); } pre .c { color:var(--c-com); font-style:italic; } pre .t { color:var(--code-ty); } pre .e { color:var(--code-dim); }
+
+/* callouts, cards: rules, not boxes */
+.callout { display:flex; gap:16px; align-items:flex-start; border-top:2px solid var(--teal); padding:16px 0 4px; margin:24px 0; }
+.callout.warn { border-top-color:var(--rust); }
+.callout p:last-child { margin-bottom:0; }
+.callout .glyph { width:40px; height:40px; }
+.symbol { display:flex; gap:14px; align-items:center; margin:4px 0 20px; padding:12px 0; border-top:1px solid var(--line); border-bottom:1px solid var(--line); font-size:15px; color:var(--ink-2); }
+.symbol b { color:var(--ink); }
+.pair { display:grid; grid-template-columns:1fr 1fr; gap:24px; margin:20px 0; }
+.card { border-top:2px solid var(--ink); padding-top:16px; min-width:0; }
+.card h4 { margin-top:0; display:flex; gap:10px; align-items:center; }
+.card ul { margin:0; padding-left:18px; font-size:14.5px; color:var(--ink-2); }
+.card ul li { margin:4px 0; }
+.art { margin:20px 0; }
+.art img { display:block; width:100%; height:auto; aspect-ratio:16/7; object-fit:cover; border-radius:14px; background:var(--bg-2); box-shadow:var(--shadow); filter:var(--img-filter); }
+.art figcaption { padding:12px 2px 0; font:400 11.5px/1.5 var(--mono); text-transform:uppercase; letter-spacing:.1em; color:var(--ink-3); }
+
+/* tables */
+.tbl { overflow-x:auto; margin:16px 0 24px; scrollbar-width:thin; scrollbar-color:var(--line-2) transparent; }
+.tbl::-webkit-scrollbar { height:8px; } .tbl::-webkit-scrollbar-thumb { background:var(--line-2); border-radius:8px; }
+table { border-collapse:collapse; width:100%; font-size:14.5px; }
+th, td { text-align:left; vertical-align:top; padding:11px 16px 11px 0; border-bottom:1px solid var(--line); }
+th { font:400 11px/1.4 var(--mono); text-transform:uppercase; letter-spacing:.14em; color:var(--ink-3); border-bottom:2px solid var(--ink); white-space:nowrap; }
+td code { font-size:12px; }
+.tbl table:not(.crate-table) td:first-child code { white-space:nowrap; overflow-wrap:normal; }
+.crate-table { min-width:760px; table-layout:fixed; }
+.crate-table th:nth-child(1) { width:23%; } .crate-table th:nth-child(2) { width:27%; } .crate-table th:nth-child(3) { width:28%; } .crate-table th:nth-child(4) { width:22%; }
+.crate-table th { white-space:normal; }
+.yes { color:var(--ok); font-weight:600; } .no { color:var(--no); font-weight:600; }
+
+/* steps */
+ol.steps { list-style:none; margin:12px 0 0; padding:0; counter-reset:s; }
+ol.steps > li { position:relative; padding:0 0 8px 50px; margin:0 0 8px; counter-increment:s; }
+ol.steps > li::before { content:counter(s); position:absolute; left:0; top:0; width:32px; height:32px; border-radius:50%; display:grid; place-items:center; background:var(--ink); color:var(--bg); font:800 15px/1 var(--display); }
+ol.steps > li::after { content:""; position:absolute; left:15px; top:38px; bottom:-4px; width:2px; background:var(--line); }
+ol.steps > li:last-child::after { display:none; }
+ol.steps > li > h3 { margin:4px 0 10px; font-size:20px; }
+
+/* timeline marks */
+.marks { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:0 20px; margin:16px 0 22px; }
+.mark { padding:10px 0 12px; min-width:0; border-top:1px solid var(--line); }
+.mark code { font-size:11.5px; }
+.mark span { display:block; font-size:13px; color:var(--ink-2); margin-top:4px; }
+
+/* diagram */
+.diagram { margin:22px 0 10px; background:var(--surface); border:1px solid var(--line); border-radius:14px; padding:16px; }
+.diagram svg { display:block; width:100%; height:auto; }
+.d-box { fill:var(--surface); stroke:var(--ink); stroke-width:1.6; }
+.d-box.alt { fill:var(--bg-2); }
+.d-box.teal { fill:var(--teal-soft); stroke:var(--teal); }
+.d-box.crab { fill:var(--rust-soft); stroke:var(--rust); }
+.d-group { fill:none; stroke:var(--ink-3); stroke-width:1.2; stroke-dasharray:5 5; }
+.d-t { fill:var(--ink); font:700 14px var(--display); font-stretch:92%; }
+.d-s { fill:var(--ink-2); font:12px var(--mono); }
+.d-l { fill:var(--ink-3); font:400 11px var(--mono); letter-spacing:.14em; text-transform:uppercase; }
+.d-arrow { stroke:var(--ink); stroke-width:1.6; fill:none; }
+.d-wire { stroke:var(--rust); stroke-width:2.4; fill:none; }
+.d-dash { stroke:var(--teal); stroke-width:1.6; fill:none; stroke-dasharray:4 4; }
+.d-head { fill:var(--ink); } .d-head.c { fill:var(--rust); } .d-head.t { fill:var(--teal); }
+.d-legend { display:flex; flex-wrap:wrap; gap:8px 18px; font:400 11px/1.5 var(--mono); text-transform:uppercase; letter-spacing:.1em; color:var(--ink-3); margin-top:12px; padding:0 4px; }
+.d-legend i { display:inline-block; width:22px; height:0; border-top:2px solid var(--ink); vertical-align:middle; margin-right:6px; }
+.d-legend i.c { border-top:3px solid var(--rust); } .d-legend i.t { border-top:2px dashed var(--teal); }
+
+/* wire frame bytes */
+.bytes { display:flex; flex-wrap:wrap; gap:6px; margin:14px 0 20px; font:12.5px/1.3 var(--mono); }
+.byte { border:1.5px solid var(--line-2); border-radius:8px; padding:7px 10px; min-width:0; max-width:100%; overflow-wrap:anywhere; }
+.byte.h { background:var(--rust-soft); border-color:var(--rust); }
+.byte small { display:block; font:400 10px/1.2 var(--mono); color:var(--ink-3); text-transform:uppercase; letter-spacing:.12em; margin-top:4px; }
+
+@media (max-width:1080px) {
+  /* header wraps to two rows here */
+  .toc { top:calc(var(--bar-h) + 56px); max-height:calc(100vh - var(--bar-h) - 72px); }
+}
+@media (max-width:960px) {
+  .layout { grid-template-columns:minmax(0,1fr); gap:0; }
+  .toc { display:none; }
+  .toc-mobile { display:block; margin:0 0 28px; border-top:2px solid var(--ink); border-bottom:1px solid var(--line); padding:14px 0; }
+  .toc-mobile summary { cursor:pointer; font:400 11.5px/1.4 var(--mono); text-transform:uppercase; letter-spacing:.16em; color:var(--ink-2); }
+  .toc-mobile ol { margin:12px 0 2px; padding-left:24px; font-size:15px; }
+  .toc-mobile li { margin:6px 0; }
+  .toc-mobile li::marker { font-family:var(--mono); color:var(--rust-text); font-size:12px; }
+  .hero { grid-template-columns:minmax(0,1fr); gap:28px; align-items:start; }
+  .content { max-width:none; }
+}
+@media (max-width:640px) {
+  .crate-table { min-width:0; table-layout:auto; }
+  .crate-table thead { display:none; }
+  .crate-table, .crate-table tbody, .crate-table tr, .crate-table td { display:block; width:auto; }
+  .crate-table tr { padding:12px 0; border-bottom:1px solid var(--line); }
+  .crate-table td { border:0; padding:3px 0; }
+  .crate-table td::before { content:attr(data-label); display:block; font:400 10.5px/1.4 var(--mono); text-transform:uppercase; letter-spacing:.14em; color:var(--ink-3); }
+  .crate-table td:first-child::before { display:none; }
+  .marks { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .pair { grid-template-columns:minmax(0,1fr); }
+  .hero h1 { font-size:clamp(34px,11vw,56px); }
+  ol.steps > li { padding-left:44px; }
+  pre { font-size:12px; padding:14px 16px; }
+  .chap-head { gap:14px; }
+  .chap-head .glyph.lg { width:48px; height:48px; border-radius:12px; }
+  .callout { flex-direction:column; gap:10px; }
+}
+</style>
+</head>
+<body>
+
+<!-- SITE-HEADER:BEGIN -->
+<a class="sr-only" href="#main" onfocus="this.classList.remove('sr-only')" onblur="this.classList.add('sr-only')">Skip to content</a>
+<header class="site-bar">
+  <div class="site-bar-in">
+    <a class="site-brand" href="landing/index.html" aria-label="Sandcrab home"><svg class="site-logo" viewBox="-21 -17 42 31" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M-9 4l-5 5M-5 6l-3 6M9 4l5 5M5 6l3 6"/><path d="M-9 -1l-5 -5M9 -1l5 -5"/><circle cx="-16" cy="-8" r="4.2" fill="currentColor"/><circle cx="16" cy="-8" r="4.2" fill="currentColor"/><path d="M-4 -7l-1 -4M4 -7l1 -4"/><path d="M-12 3a12 10 0 0 1 24 0q0 4 -12 4t-12 -4z" fill="currentColor"/><g stroke="none"><circle cx="-5" cy="-12" r="2.8" fill="currentColor"/><circle cx="5" cy="-12" r="2.8" fill="currentColor"/><circle class="eye" cx="-5" cy="-12" r="1.15"/><circle class="eye" cx="5" cy="-12" r="1.15"/></g></svg><span>Sandcrab</span></a>
+    <nav class="site-nav" aria-label="Site"><a href="landing/index.html">Home</a><a href="walkthrough.html" aria-current="page">Walkthrough</a><a href="bench-report.html">Benchmarks</a><a href="symbology.html">Symbology</a><a href="presentation.html">Presentation</a><a href="https://github.com/polvera-org/sandcrab/tree/main/docs" target="_blank" rel="noopener">Docs<span class="sr-only"> (opens in a new tab)</span></a></nav>
+    <div class="site-actions"><a class="icon-btn" href="https://github.com/polvera-org/sandcrab" target="_blank" rel="noopener" aria-label="Sandcrab on GitHub (opens in a new tab)"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" d="M12 .5a11.5 11.5 0 0 0-3.64 22.41c.58.1.79-.25.79-.56v-2c-3.2.7-3.88-1.37-3.88-1.37-.52-1.33-1.28-1.69-1.28-1.69-1.05-.71.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.69 0-1.26.45-2.28 1.18-3.09-.12-.29-.51-1.46.11-3.04 0 0 .97-.31 3.17 1.18a11 11 0 0 1 5.76 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.58.23 2.75.11 3.04.74.81 1.18 1.83 1.18 3.09 0 4.42-2.7 5.4-5.27 5.68.41.36.78 1.06.78 2.14v3.17c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .5Z"/></svg></a><button class="icon-btn" type="button" data-theme-toggle aria-pressed="false" aria-label="Light theme on. Switch to dark theme"><svg class="ico ico-light" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2.5M12 19v2.5M2.5 12H5M19 12h2.5M5.3 5.3l1.8 1.8M16.9 16.9l1.8 1.8M5.3 18.7l1.8-1.8M16.9 7.1l1.8-1.8"/></svg><svg class="ico ico-dark" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z"/></svg></button><a class="pill pill-sm" href="landing/index.html#start">Quickstart</a></div>
+  </div>
+</header>
+<!-- SITE-HEADER:END -->
+<main id="main">
+
+<div class="hero" id="top">
+  <div>
+    <p class="eyebrow">Contributor guide · branch <code>feat/phase-1</code></p>
+    <h1>A guided tour of the Sandcrab codebase</h1>
+    <p class="lede">Follow one tool call from the SDK down a single wire into <code>crabd</code> and back, watch a sandbox molt, see how workspaces persist between turns, and learn which invariants every change must keep. Each claim links to the file and line it comes from.</p>
+    <div class="facts">
+      <span class="fact"><b>9</b> crates</span>
+      <span class="fact"><b>16</b> tools in <code>crabd</code></span>
+      <span class="fact"><b>2</b> backends: Docker · Firecracker</span>
+      <span class="fact"><b>1</b> wire protocol</span>
+      <span class="fact">review: <b>PASS</b> after 3 rounds</span>
+    </div>
+  </div>
+  <div class="stage" id="hero-stage" aria-label="Illustration: one wire carries every request between host and sandbox">
+    <img id="hero-fallback" src="assets/crab/one-wire.webp" alt="A crab messenger walking along a single wire between the host and a sealed jar">
+    <span class="cap">one wire: every request and result travels the same protocol</span>
+  </div>
+</div>
+
+<div class="layout">
+  <nav class="toc" aria-label="Table of contents">
+    <h2>Contents</h2>
+    <ol>
+      <li><a href="#what"><span class="n">01</span>What Sandcrab is</a></li>
+      <li><a href="#crates"><span class="n">02</span>Crate map</a></li>
+      <li><a href="#toolcall"><span class="n">03</span>Life of a tool call</a></li>
+      <li><a href="#sandbox"><span class="n">04</span>Life of a sandbox</a></li>
+      <li><a href="#workspaces"><span class="n">05</span>Workspaces</a></li>
+      <li><a href="#security"><span class="n">06</span>Security model</a></li>
+      <li><a href="#templates"><span class="n">07</span>Templates &amp; pinning</a></li>
+      <li><a href="#harnesses"><span class="n">08</span>crabagent &amp; bench</a></li>
+      <li><a href="#start"><span class="n">09</span>Where to start</a></li>
+    </ol>
+  </nav>
+
+  <article class="content">
+    <details class="toc-mobile">
+      <summary>Contents</summary>
+      <ol>
+        <li><a href="#what">What Sandcrab is</a></li>
+        <li><a href="#crates">Crate map</a></li>
+        <li><a href="#toolcall">Life of a tool call</a></li>
+        <li><a href="#sandbox">Life of a sandbox</a></li>
+        <li><a href="#workspaces">Workspaces</a></li>
+        <li><a href="#security">Security model</a></li>
+        <li><a href="#templates">Templates &amp; pinning</a></li>
+        <li><a href="#harnesses">crabagent &amp; bench</a></li>
+        <li><a href="#start">Where to start</a></li>
+      </ol>
+    </details>
+
+<!-- ============================================================ 1 -->
+<section class="chap" id="what">
+  <div class="chap-head"><span class="glyph lg"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="glyph-svg" aria-hidden="true" focusable="false">
+<path d="M4 28h56M4 50h56"/><path d="M5 28a7 7 0 0 1 14 0z"/><path d="M8.5 28l1-4M12 28v-5.5M15.5 28l-1-4" stroke-width="1.6"/><path d="M25 28a7 7 0 0 1 14 0z"/><path d="M28.5 28l1-4M32 28v-5.5M35.5 28l-1-4" stroke-width="1.6"/><path d="M45 28a7 7 0 0 1 14 0z"/><path d="M48.5 28l1-4M52 28v-5.5M55.5 28l-1-4" stroke-width="1.6"/><path d="M5 50a7 7 0 0 1 14 0z"/><path d="M8.5 50l1-4M12 50v-5.5M15.5 50l-1-4" stroke-width="1.6"/><path d="M25 50a7 7 0 0 1 14 0z" fill="#FF6B4A"/><path d="M28.5 50l1-4M32 50v-5.5M35.5 50l-1-4" stroke-width="1.6"/><path d="M45 50a7 7 0 0 1 14 0z"/><path d="M48.5 50l1-4M52 50v-5.5M55.5 50l-1-4" stroke-width="1.6"/><path d="M8 12h48" stroke-width="2" opacity=".55"/><path d="M12 12v4M32 12v4M52 12v4" stroke-width="2" opacity=".55"/>
+</svg></span><div><span class="num">01</span><h2>What Sandcrab is</h2></div></div>
+  <p>Sandcrab is a self-hostable Rust sandbox manager and SDK for running untrusted agent code. An agent (or the program driving it) asks for an <strong>ephemeral sandbox</strong> built from a pinned OCI template, mounts one or more <strong>persistent workspaces</strong> into it read-write or read-only, runs tools such as <code>bash</code>, <code>file_edit</code> and <code>grep</code>, and throws the sandbox away. The workspace survives, and the host may change its files before the next turn.</p>
+  <p>Isolation is pluggable through the <code>RuntimeBackend</code> trait. V1 ships two backends: <strong>Docker</strong> (a hardened shared-kernel container, officially supported, selected explicitly) and <strong>Firecracker</strong> (KVM microVMs, hardware isolated). Both talk to the same in-sandbox daemon, <code>crabd</code>, over the same length-prefixed JSON-RPC protocol, so tests on Docker exercise the protocol that production uses. Sandcrab never falls back from one backend to another without being told.</p>
+
+  <div class="diagram" role="img" aria-labelledby="arch-title arch-desc">
+    <svg viewBox="0 0 760 560" xmlns="http://www.w3.org/2000/svg">
+      <title id="arch-title">Sandcrab architecture</title>
+      <desc id="arch-desc">Callers (SDK, CLI, crabagent) use sandcrab-core, which holds the SandboxManager, WorkspaceRegistry and TemplateRegistry. The manager drives a RuntimeBackend, either Docker or Firecracker. Each backend starts a sandbox whose crabd daemon receives JSON-RPC frames over a Unix socket or vsock and runs the tools. Workspaces are bind-mounted (Docker) or attached as ext4 drives (Firecracker).</desc>
+      <defs>
+        <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="d-head"/></marker>
+        <marker id="ahc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="d-head c"/></marker>
+        <marker id="aht" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="d-head t"/></marker>
+      </defs>
+      <!-- callers -->
+      <text x="20" y="24" class="d-l">Callers</text>
+      <rect x="20" y="34" width="210" height="58" rx="12" class="d-box"/>
+      <text x="36" y="58" class="d-t">sandcrab-sdk</text><text x="36" y="78" class="d-s">Sandcrab · Sandbox</text>
+      <rect x="275" y="34" width="210" height="58" rx="12" class="d-box"/>
+      <text x="291" y="58" class="d-t">sandcrab-cli</text><text x="291" y="78" class="d-s">sandcrab run|doctor|…</text>
+      <rect x="530" y="34" width="210" height="58" rx="12" class="d-box"/>
+      <text x="546" y="58" class="d-t">crabagent</text><text x="546" y="78" class="d-s">tool_dispatch loop</text>
+      <path d="M380 92 V122" class="d-arrow" marker-end="url(#ah)"/>
+      <path d="M125 92 V108 H380" class="d-arrow"/>
+      <path d="M635 92 V108 H380" class="d-arrow"/>
+      <!-- core -->
+      <rect x="20" y="126" width="720" height="104" rx="14" class="d-box alt"/>
+      <text x="36" y="150" class="d-t">sandcrab-core</text>
+      <rect x="36" y="162" width="220" height="54" rx="10" class="d-box"/>
+      <text x="50" y="185" class="d-t" style="font-size:13px">SandboxManager</text><text x="50" y="204" class="d-s">spawn · call · destroy</text>
+      <rect x="270" y="162" width="220" height="54" rx="10" class="d-box"/>
+      <text x="284" y="185" class="d-t" style="font-size:13px">WorkspaceRegistry</text><text x="284" y="204" class="d-s">leases · fsx ops</text>
+      <rect x="504" y="162" width="220" height="54" rx="10" class="d-box"/>
+      <text x="518" y="185" class="d-t" style="font-size:13px">TemplateRegistry</text><text x="518" y="204" class="d-s">sandcrab.toml · pins</text>
+      <path d="M146 230 V262" class="d-arrow" marker-end="url(#ah)"/>
+      <text x="156" y="252" class="d-s">RuntimeBackend::spawn(&amp;ResolvedSpec)</text>
+      <!-- backends -->
+      <text x="20" y="282" class="d-l">RuntimeBackend</text>
+      <rect x="20" y="292" width="340" height="62" rx="12" class="d-box"/>
+      <text x="36" y="317" class="d-t">Docker</text><text x="36" y="338" class="d-s">bollard · hardened container</text>
+      <rect x="400" y="292" width="340" height="62" rx="12" class="d-box"/>
+      <text x="416" y="317" class="d-t">Firecracker</text><text x="416" y="338" class="d-s">KVM microVM · crabd as PID 1</text>
+      <path d="M146 262 V276 H190 V292" class="d-arrow" marker-end="url(#ah)"/>
+      <path d="M146 276 H570 V292" class="d-arrow" marker-end="url(#ah)"/>
+      <!-- the wire -->
+      <path d="M190 354 V412" class="d-wire" marker-end="url(#ahc)"/>
+      <path d="M570 354 V412" class="d-wire" marker-end="url(#ahc)"/>
+      <text x="200" y="384" class="d-s">UDS /run/sandcrab/crabd.sock</text>
+      <text x="580" y="378" class="d-s">vsock: CONNECT 1024</text>
+      <text x="580" y="396" class="d-s">(control port 1)</text>
+      <!-- sandbox -->
+      <rect x="20" y="414" width="720" height="128" rx="14" class="d-group"/>
+      <text x="36" y="436" class="d-l">inside the sandbox</text>
+      <rect x="36" y="446" width="300" height="80" rx="12" class="d-box crab"/>
+      <text x="52" y="472" class="d-t">crabd (sandcrab-guest)</text>
+      <text x="52" y="492" class="d-s">serve_connection → dispatch</text>
+      <text x="52" y="510" class="d-s">bash · file_* · glob · grep · process_*</text>
+      <rect x="430" y="446" width="294" height="80" rx="12" class="d-box teal"/>
+      <text x="446" y="472" class="d-t">Workspaces</text>
+      <text x="446" y="492" class="d-s">/workspace/… (rw | ro)</text>
+      <text x="446" y="510" class="d-s">bind mount · ext4 drive</text>
+      <path d="M336 486 H426" class="d-arrow" marker-end="url(#ah)"/>
+      <!-- registry → workspace -->
+      <path d="M380 216 V223 H752 V486 H728" class="d-dash" marker-end="url(#aht)"/>
+    </svg>
+    <div class="d-legend"><span><i></i>Rust call</span><span><i class="c"></i>the one wire: u32 BE length + JSON-RPC 2.0</span><span><i class="t"></i>workspace host path → mount / drive</span></div>
+  </div>
+  <p class="muted" style="font-size:14px">Source of the picture: <a class="ref" href="../../crates/sandcrab-core/src/backend.rs">crates/sandcrab-core/src/backend.rs:100</a> (the trait), <a class="ref" href="../../crates/sandcrab-core/src/manager.rs">crates/sandcrab-core/src/manager.rs:146</a> (spawn), <a class="ref" href="../../crates/sandcrab-guest/src/server.rs">crates/sandcrab-guest/src/server.rs:384</a> (the guest server). The README's mermaid chart also lists Cloud Hypervisor and libkrun; those are Phase 2 and have no crate yet.</p>
+</section>
+
+<!-- ============================================================ 2 -->
+<section class="chap" id="crates">
+  <div class="chap-head"><span class="glyph lg"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="glyph-svg" aria-hidden="true" focusable="false">
+<g transform="translate(32 30) scale(1.45)" stroke-width="1.72">
+<path d="M-9 4l-5 5M-5 6l-3 6M9 4l5 5M5 6l3 6"/>
+<path d="M-9 -1l-5 -5M9 -1l5 -5"/>
+<circle cx="-16" cy="-8" r="4.2" fill="#FF6B4A"/><circle cx="16" cy="-8" r="4.2" fill="#FF6B4A"/>
+<path d="M-4 -7l-1 -4M4 -7l1 -4"/>
+<path d="M-12 3a12 10 0 0 1 24 0q0 4 -12 4t-12 -4z" fill="#FF6B4A"/>
+<circle cx="-5" cy="-12" r="1.9" fill="currentColor" stroke="none"/><circle cx="5" cy="-12" r="1.9" fill="currentColor" stroke="none"/>
+</g><rect x="13" y="37" width="38" height="9" rx="2.5" fill="#1F7A8C"/><path d="M18 39.5l2.5 2 -2.5 2M23 43.5h3.5" stroke="#F5ECD9" stroke-width="1.6"/><circle cx="33" cy="41" r="2" stroke="#F5ECD9" stroke-width="1.5"/><path d="M34.5 42.5l1.8 1.8" stroke="#F5ECD9" stroke-width="1.5"/><path d="M41 39.5h6M41 42h6M41 44.5h4" stroke="#F5ECD9" stroke-width="1.3"/>
+</svg></span><div><span class="num">02</span><h2>Crate map</h2></div></div>
+  <p>Nine crates in one Cargo workspace. Dependencies point one way: protocol at the bottom, core above it, backends above core, SDK above backends, and the binaries on top. The rules in <a class="ref" href="../../AGENTS.md">AGENTS.md</a> §2 are enforced by the <code>[dependencies]</code> sections, which are summarised below as written (workspace-level crates such as <code>serde</code> are omitted).</p>
+  <div class="tbl">
+  <table class="crate-table">
+    <thead><tr><th>Crate (binary)</th><th>Role</th><th>Key types / entry points</th><th>Sandcrab deps · notable external deps</th></tr></thead>
+    <tbody>
+      <tr><td data-label="Crate"><a href="../../crates/sandcrab-protocol/Cargo.toml"><code>sandcrab-protocol</code></a></td><td data-label="Role">Wire framing, JSON-RPC envelopes, typed tool params/results, JSON Schemas, the <code>init.*</code> control types.</td><td data-label="Key types"><code>encode_frame</code>, <code>FrameDecoder</code>, <code>RpcRequest</code>, <code>Call</code>, <code>ToolCall</code>, <code>ToolResult</code>, <code>ProtocolError</code>, <code>InitConfig</code>, <code>tool_definitions()</code></td><td data-label="Deps">none · <code>schemars</code>, <code>thiserror</code>, <code>uuid</code>. No tokio.</td></tr>
+      <tr><td data-label="Crate"><a href="../../crates/sandcrab-guest/Cargo.toml"><code>sandcrab-guest</code></a> (<code>crabd</code>)</td><td data-label="Role">Static musl daemon inside every sandbox: tool server, plus PID 1 <code>init</code> mode for microVMs.</td><td data-label="Key types"><code>serve_connection</code>, <code>handle_request</code>, <code>tools::dispatch</code>, <code>ToolContext</code>, <code>init::*</code></td><td data-label="Deps">protocol · tokio (only the features it uses), <code>rustix</code>, <code>pty-process</code>, <code>ignore</code>, <code>globset</code>, <code>grep-searcher</code>, <code>similar</code>, <code>tar</code>; <code>tokio-vsock</code> on Linux</td></tr>
+      <tr><td data-label="Crate"><a href="../../crates/sandcrab-core/Cargo.toml"><code>sandcrab-core</code></a></td><td data-label="Role">Backend trait, sandbox lifecycle, workspace registry and leases, templates, the crabd client, safe archive unpacking.</td><td data-label="Key types"><code>RuntimeBackend</code>, <code>SandboxHandle</code>, <code>BackendCapabilities</code>, <code>SandboxManager</code>, <code>SandboxConfig</code>, <code>WorkspaceRegistry</code>, <code>WorkspaceLease</code>, <code>TemplateRegistry</code>, <code>CrabdClient</code>, <code>unpack_safe</code></td><td data-label="Deps">protocol · <code>rustix</code> (fs), <code>tar</code>, <code>toml</code>. No backend crates.</td></tr>
+      <tr><td data-label="Crate"><a href="../../crates/sandcrab-backend-docker/Cargo.toml"><code>sandcrab-backend-docker</code></a></td><td data-label="Role">Docker backend: hardened containers running the host's <code>crabd</code> over a Unix socket. Dev/CI only.</td><td data-label="Key types"><code>DockerBackend</code>, <code>DockerConfig</code>, <code>build_container_spec</code>, orphan reaping</td><td data-label="Deps">core, protocol · <code>bollard</code>, <code>rustix</code>, <code>sha2</code></td></tr>
+      <tr><td data-label="Crate"><a href="../../crates/sandcrab-backend-firecracker/Cargo.toml"><code>sandcrab-backend-firecracker</code></a> (<code>sandcrab-rootfs</code>)</td><td data-label="Role">Firecracker microVMs: owned HTTP-over-UDS API client, vsock handshake, rootfs pipeline, workspace drives, tap pool, pinned artifacts.</td><td data-label="Key types"><code>FirecrackerBackend</code>, <code>FirecrackerConfig</code>, <code>ApiClient</code>, <code>vsock_connect</code>, <code>ControlClient</code>, <code>RootfsBuilder</code></td><td data-label="Deps">core, protocol · <code>flate2</code>, <code>tar</code>, <code>sha2</code>, <code>rustix</code>. No hyper.</td></tr>
+      <tr><td data-label="Crate"><a href="../../crates/sandcrab-sdk/Cargo.toml"><code>sandcrab-sdk</code></a></td><td data-label="Role">Public API: builder with explicit backend, typed sandbox methods, LLM <code>tool_dispatch</code>, workspace and template clients.</td><td data-label="Key types"><code>Sandcrab</code>, <code>SandcrabBuilder</code>, <code>Sandbox</code>, <code>WorkspaceClient</code>, <code>ToolError</code></td><td data-label="Deps">core, protocol; backend-docker (feature <code>docker</code>, default), backend-firecracker (feature <code>firecracker</code>, Linux only)</td></tr>
+      <tr><td data-label="Crate"><a href="../../crates/sandcrab-cli/Cargo.toml"><code>sandcrab-cli</code></a> (<code>sandcrab</code>)</td><td data-label="Role">Operator CLI: <code>doctor</code>, <code>workspace</code>, <code>template</code>, <code>rootfs</code>, <code>run</code>, <code>tool</code>.</td><td data-label="Key types"><code>Commands</code> in <code>main.rs</code>, <code>doctor.rs</code>, <code>run.rs</code></td><td data-label="Deps">sdk · <code>clap</code>, <code>anyhow</code></td></tr>
+      <tr><td data-label="Crate"><a href="../../crates/sandcrab-agent/Cargo.toml"><code>sandcrab-agent</code></a> (<code>crabagent</code>)</td><td data-label="Role">Test harness: a minimal coding agent that drives Claude over the sandbox tools.</td><td data-label="Key types"><code>agent</code>, <code>session</code>, <code>llm::anthropic</code>, <code>llm::fake</code></td><td data-label="Deps">sdk · <code>reqwest</code>, <code>rustyline</code>, <code>clap</code></td></tr>
+      <tr><td data-label="Crate"><a href="../../crates/sandcrab-bench/Cargo.toml"><code>sandcrab-bench</code></a></td><td data-label="Role">Benchmark runner across backends; emits schema-versioned JSON. <code>publish = false</code>.</td><td data-label="Key types"><code>Scenario</code> (lifecycle, calls, agent-turn, resources, density, drift)</td><td data-label="Deps">sdk · <code>bollard</code> (optional), <code>schemars</code>, <code>sha2</code></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <div class="callout"><span class="glyph"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="glyph-svg" aria-hidden="true" focusable="false">
+<rect x="3" y="20" width="11" height="22" rx="2"/><path d="M6.5 25.5h4M6.5 30h4"/><path d="M14 31H42"/><rect x="17" y="26.5" width="8" height="9" rx="1.5" fill="#F5ECD9"/><path d="M20 26.5v9" stroke="#FF6B4A" stroke-width="2"/><rect x="30" y="26.5" width="8" height="9" rx="1.5" fill="#F5ECD9"/><path d="M33 26.5v9" stroke="#FF6B4A" stroke-width="2"/><g transform="translate(51 34) scale(0.5)" stroke-width="4.0">
+<path d="M-9 4l-5 5M-5 6l-3 6M9 4l5 5M5 6l3 6"/>
+<path d="M-9 -1l-5 -5M9 -1l5 -5"/>
+<circle cx="-16" cy="-8" r="4.2" fill="#FF6B4A"/><circle cx="16" cy="-8" r="4.2" fill="#FF6B4A"/>
+<path d="M-4 -7l-1 -4M4 -7l1 -4"/>
+<path d="M-12 3a12 10 0 0 1 24 0q0 4 -12 4t-12 -4z" fill="#FF6B4A"/>
+<circle cx="-5" cy="-12" r="1.9" fill="currentColor" stroke="none"/><circle cx="5" cy="-12" r="1.9" fill="currentColor" stroke="none"/>
+</g><path d="M28 46v8M14 54h28M14 54v4M28 54v4M42 54v4" opacity=".55" stroke-width="2"/>
+</svg></span><p><strong>Boundary to protect:</strong> <code>sandcrab-core</code> must not depend on <code>bollard</code> or anything Firecracker-specific, and nothing above <code>crabd</code> may shell out with <code>docker exec</code>. Backends only hand core a <code>Connector</code>; everything else goes over the wire.</p></div>
+</section>
+
+<!-- ============================================================ 3 -->
+<section class="chap" id="toolcall">
+  <div class="chap-head"><span class="glyph lg"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="glyph-svg" aria-hidden="true" focusable="false">
+<rect x="3" y="20" width="11" height="22" rx="2"/><path d="M6.5 25.5h4M6.5 30h4"/><path d="M14 31H42"/><rect x="17" y="26.5" width="8" height="9" rx="1.5" fill="#F5ECD9"/><path d="M20 26.5v9" stroke="#FF6B4A" stroke-width="2"/><rect x="30" y="26.5" width="8" height="9" rx="1.5" fill="#F5ECD9"/><path d="M33 26.5v9" stroke="#FF6B4A" stroke-width="2"/><g transform="translate(51 34) scale(0.5)" stroke-width="4.0">
+<path d="M-9 4l-5 5M-5 6l-3 6M9 4l5 5M5 6l3 6"/>
+<path d="M-9 -1l-5 -5M9 -1l5 -5"/>
+<circle cx="-16" cy="-8" r="4.2" fill="#FF6B4A"/><circle cx="16" cy="-8" r="4.2" fill="#FF6B4A"/>
+<path d="M-4 -7l-1 -4M4 -7l1 -4"/>
+<path d="M-12 3a12 10 0 0 1 24 0q0 4 -12 4t-12 -4z" fill="#FF6B4A"/>
+<circle cx="-5" cy="-12" r="1.9" fill="currentColor" stroke="none"/><circle cx="5" cy="-12" r="1.9" fill="currentColor" stroke="none"/>
+</g><path d="M28 46v8M14 54h28M14 54v4M28 54v4M42 54v4" opacity=".55" stroke-width="2"/>
+</svg></span><div><span class="num">03</span><h2>Life of a tool call</h2></div></div>
+  <div class="symbol"><span class="glyph sm"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="glyph-svg" aria-hidden="true" focusable="false">
+<rect x="3" y="20" width="11" height="22" rx="2"/><path d="M6.5 25.5h4M6.5 30h4"/><path d="M14 31H42"/><rect x="17" y="26.5" width="8" height="9" rx="1.5" fill="#F5ECD9"/><path d="M20 26.5v9" stroke="#FF6B4A" stroke-width="2"/><rect x="30" y="26.5" width="8" height="9" rx="1.5" fill="#F5ECD9"/><path d="M33 26.5v9" stroke="#FF6B4A" stroke-width="2"/><g transform="translate(51 34) scale(0.5)" stroke-width="4.0">
+<path d="M-9 4l-5 5M-5 6l-3 6M9 4l5 5M5 6l3 6"/>
+<path d="M-9 -1l-5 -5M9 -1l5 -5"/>
+<circle cx="-16" cy="-8" r="4.2" fill="#FF6B4A"/><circle cx="16" cy="-8" r="4.2" fill="#FF6B4A"/>
+<path d="M-4 -7l-1 -4M4 -7l1 -4"/>
+<path d="M-12 3a12 10 0 0 1 24 0q0 4 -12 4t-12 -4z" fill="#FF6B4A"/>
+<circle cx="-5" cy="-12" r="1.9" fill="currentColor" stroke="none"/><circle cx="5" cy="-12" r="1.9" fill="currentColor" stroke="none"/>
+</g><path d="M28 46v8M14 54h28M14 54v4M28 54v4M42 54v4" opacity=".55" stroke-width="2"/>
+</svg></span><span><b>One wire.</b> The same frames travel over a Unix socket (Docker), TCP (tests) and vsock (Firecracker). Follow <code>sandbox.bash("ls")</code> through six hops.</span></div>
+
+  <ol class="steps">
+    <li>
+      <h3>SDK: a typed method, or an LLM's JSON</h3>
+      <p><code>Sandbox::bash</code> builds a <code>BashParams</code> and calls the typed path. An agent loop uses <code>tool_dispatch</code> instead, which parses <code>(name, input)</code> into a <code>ToolCall</code> and turns recoverable failures into a JSON <code>{"error":{…}}</code> for the model, keeping <code>Err</code> for fatal ones (sandbox gone, transport lost).</p>
+      <figure class="code"><figcaption><a href="../../crates/sandcrab-sdk/src/sandbox.rs">crates/sandcrab-sdk/src/sandbox.rs:167</a><span>Rust</span></figcaption>
+<pre><span class="k">pub async fn</span> bash(&amp;<span class="k">self</span>, command: <span class="k">impl</span> <span class="t">Into</span>&lt;<span class="t">String</span>&gt;) -&gt; <span class="t">Result</span>&lt;<span class="t">BashResult</span>&gt; {
+    <span class="k">self</span>.bash_with(<span class="t">BashParams</span> {
+        command: command.into(),
+        cwd: <span class="t">None</span>,
+        env: Default::default(),
+        timeout_ms: <span class="t">None</span>,
+    })
+    .<span class="k">await</span>
+}</pre></figure>
+      <figure class="code"><figcaption><a href="../../crates/sandcrab-sdk/src/dispatch.rs">crates/sandcrab-sdk/src/dispatch.rs:127</a><span>Rust</span></figcaption>
+<pre><span class="k">pub async fn</span> tool_dispatch(&amp;<span class="k">self</span>, name: &amp;<span class="t">str</span>, input: <span class="t">Value</span>) -&gt; <span class="t">Result</span>&lt;<span class="t">Value</span>, <span class="t">ToolError</span>&gt; {
+    <span class="k">match</span> <span class="k">self</span>.tool_call(name, input).<span class="k">await</span> {
+        <span class="t">Ok</span>(v) =&gt; <span class="t">Ok</span>(v),
+        <span class="t">Err</span>(e) <span class="k">if</span> !e.fatal =&gt; <span class="t">Ok</span>(e.to_json()),
+        <span class="t">Err</span>(e) =&gt; <span class="t">Err</span>(e),
+    }
+}</pre></figure>
+    </li>
+    <li>
+      <h3>Core: the live sandbox</h3>
+      <p><code>sandcrab_core::Sandbox::call_tool</code> refuses calls on a destroyed sandbox, forwards to the per-sandbox <code>CrabdClient</code>, and records the <code>FirstCall</code> timing mark on the first response (success or tool error).</p>
+      <figure class="code"><figcaption><a href="../../crates/sandcrab-core/src/manager.rs">crates/sandcrab-core/src/manager.rs:670</a><span>Rust</span></figcaption>
+<pre><span class="k">pub async fn</span> call_tool(&amp;<span class="k">self</span>, call: <span class="t">ToolCall</span>) -&gt; <span class="t">Result</span>&lt;<span class="t">ToolResult</span>&gt; {
+    <span class="k">if</span> <span class="k">self</span>.is_destroyed() {
+        <span class="k">return</span> <span class="t">Err</span>(<span class="t">SandboxError</span>::not_found(<span class="s">"sandbox"</span>, <span class="k">self</span>.id()));
+    }
+    <span class="k">let</span> result = <span class="k">self</span>.shared.client.call(call).<span class="k">await</span>;
+    <span class="k">if</span> matches!(result, <span class="t">Ok</span>(_) | <span class="t">Err</span>(<span class="t">SandboxError</span>::Protocol(_))) {
+        <span class="k">self</span>.shared.timings.mark(<span class="t">LifecyclePhase</span>::FirstCall);
+    }
+    result
+}</pre></figure>
+    </li>
+    <li>
+      <h3>CrabdClient: id, frame, wait</h3>
+      <p>The client is multiplexed: each request gets a fresh <code>i64</code> id and a <code>oneshot</code> waiter; a writer task sends frames and a reader task routes responses by id, so concurrent calls on one sandbox may complete out of order. The timeout is the default call timeout (150 s), or a bash <code>timeout_ms</code> plus 10 s of grace when that is longer (<a class="ref" href="../../crates/sandcrab-core/src/client.rs">client.rs:339</a> <code>effective_timeout</code>). A timed-out call does not poison the connection.</p>
+      <figure class="code"><figcaption><a href="../../crates/sandcrab-core/src/client.rs">crates/sandcrab-core/src/client.rs:225</a><span>Rust · trimmed</span></figcaption>
+<pre><span class="k">pub async fn</span> request(&amp;<span class="k">self</span>, call: &amp;<span class="t">Call</span>, timeout: <span class="t">Duration</span>) -&gt; <span class="t">Result</span>&lt;<span class="t">Value</span>&gt; {
+    <span class="k">let</span> id = <span class="k">self</span>.next_id.fetch_add(<span class="s">1</span>, <span class="t">Ordering</span>::Relaxed);
+    <span class="k">let</span> frame = encode_frame(&amp;call.to_request(id)).map_err(<span class="t">ProtocolError</span>::from)?;
+    <span class="e">// … grab the outbox sender …</span>
+    <span class="k">let</span> (tx, rx) = oneshot::channel();
+    <span class="k">self</span>.shared.register(id, tx)?;
+    <span class="e">// … PendingGuard unregisters the id if this future is dropped …</span>
+    <span class="k">let</span> exchange = <span class="k">async</span> {
+        outbox.send(frame).<span class="k">await</span>.map_err(|_| <span class="k">self</span>.closed_error())?;
+        rx.<span class="k">await</span>.map_err(|_| <span class="k">self</span>.closed_error())
+    };
+    <span class="e">// tokio::time::timeout(timeout, exchange) → SandboxError::Timeout on expiry</span>
+}</pre></figure>
+    </li>
+    <li>
+      <h3>The frame on the wire</h3>
+      <p>ADR 0001 §2 fixed the format: a 4-byte big-endian <code>u32</code> payload length, then that many bytes of JSON-RPC 2.0, with <code>method</code> = tool name and <code>params</code> = the typed params. Zero-length frames and frames over 16 MiB (<code>MAX_FRAME_LEN</code>) are rejected before allocation.</p>
+      <div class="bytes" aria-label="Frame layout">
+        <span class="byte h">00 00 00 42<small>u32 BE length</small></span>
+        <span class="byte">{"jsonrpc":"2.0","id":7,"method":"bash","params":{"command":"ls"}}<small>JSON-RPC 2.0 payload (illustrative: 0x42 = 66 bytes)</small></span>
+      </div>
+      <figure class="code"><figcaption><a href="../../crates/sandcrab-protocol/src/framing.rs">crates/sandcrab-protocol/src/framing.rs:64</a><span>Rust</span></figcaption>
+<pre><span class="k">pub fn</span> parse_header(header: [<span class="t">u8</span>; HEADER_LEN]) -&gt; <span class="t">Result</span>&lt;<span class="t">usize</span>, <span class="t">FrameError</span>&gt; {
+    <span class="k">let</span> len = <span class="t">u32</span>::from_be_bytes(header) <span class="k">as</span> <span class="t">usize</span>;
+    <span class="k">if</span> len == <span class="s">0</span> {
+        <span class="k">return</span> <span class="t">Err</span>(<span class="t">FrameError</span>::Empty);
+    }
+    <span class="k">if</span> len &gt; MAX_FRAME_LEN {
+        <span class="k">return</span> <span class="t">Err</span>(<span class="t">FrameError</span>::TooLarge { len, max: MAX_FRAME_LEN });
+    }
+    <span class="t">Ok</span>(len)
+}</pre></figure>
+      <p class="muted" style="font-size:14px">Transports: Docker returns <code>Endpoint::Unix(socket_dir.join(SOCKET_NAME))</code>, bind-mounted in the container at <code>/run/sandcrab/crabd.sock</code>. Firecracker connects to the VMM's vsock UDS, writes <code>CONNECT 1024\n</code> and expects <code>OK &lt;port&gt;\n</code> (<a class="ref" href="../../crates/sandcrab-backend-firecracker/src/vsock.rs">crates/sandcrab-backend-firecracker/src/vsock.rs:23</a>). After that the bytes are identical.</p>
+    </li>
+    <li>
+      <h3>crabd: read, spawn, answer by id</h3>
+      <p><code>serve_connection</code> reads frames under a semaphore of <code>max_inflight</code> slots and runs each request on its own task (inside an inner <code>tokio::spawn</code>, so a panicking tool still produces an <code>Internal</code> error response for its id). <code>handle_request</code> answers <code>hello</code> and <code>ping</code> itself and hands every tool to <code>tools::dispatch</code>, a single exhaustive <code>match</code>.</p>
+      <figure class="code"><figcaption><a href="../../crates/sandcrab-guest/src/server.rs">crates/sandcrab-guest/src/server.rs:116</a><span>Rust</span></figcaption>
+<pre><span class="k">pub async fn</span> handle_request(ctx: &amp;<span class="t">ToolContext</span>, req: <span class="t">RpcRequest</span>) -&gt; <span class="t">RpcResponse</span> {
+    <span class="k">let</span> outcome = <span class="k">match</span> <span class="t">Call</span>::from_request(&amp;req) {
+        <span class="t">Ok</span>(<span class="t">Call</span>::Hello(p)) =&gt; <span class="t">Ok</span>(<span class="t">Reply</span>::Hello(hello(ctx, &amp;p))),
+        <span class="t">Ok</span>(<span class="t">Call</span>::Ping) =&gt; <span class="t">Ok</span>(<span class="t">Reply</span>::Ping(<span class="t">PingResult</span> {})),
+        <span class="t">Ok</span>(<span class="t">Call</span>::Tool(call)) =&gt; {
+            <span class="k">let</span> tool = call.name();
+            <span class="k">let</span> res = tools::dispatch(ctx, call).<span class="k">await</span>;
+            <span class="e">// … debug-log failures …</span>
+            res.map(<span class="t">Reply</span>::Tool)
+        }
+        <span class="t">Err</span>(e) =&gt; <span class="t">Err</span>(e),
+    };
+    <span class="t">RpcResponse</span>::from_outcome(req.id, outcome)
+}</pre></figure>
+      <figure class="code"><figcaption><a href="../../crates/sandcrab-guest/src/tools/mod.rs">crates/sandcrab-guest/src/tools/mod.rs:29</a><span>Rust · trimmed</span></figcaption>
+<pre><span class="k">pub async fn</span> dispatch(ctx: &amp;<span class="t">ToolContext</span>, call: <span class="t">ToolCall</span>) -&gt; <span class="t">Result</span>&lt;<span class="t">ToolResult</span>, <span class="t">ProtocolError</span>&gt; {
+    <span class="k">use</span> <span class="t">ToolCall</span> <span class="k">as</span> C;
+    <span class="t">Ok</span>(<span class="k">match</span> call {
+        C::Bash(p) =&gt; exec::bash(ctx, p).<span class="k">await</span>?.into(),
+        C::ProcessStart(p) =&gt; process::process_start(ctx, p).<span class="k">await</span>?.into(),
+        <span class="e">// … process_poll/stdin/kill/list, file_read/write/edit/delete/move,</span>
+        <span class="e">//   upload, download, list_dir, glob …</span>
+        C::Grep(p) =&gt; search::grep(ctx, p).<span class="k">await</span>?.into(),
+    })
+}</pre></figure>
+    </li>
+    <li>
+      <h3><code>exec::bash</code>: process group, timeout, truncation</h3>
+      <div class="pair">
+        <div class="card"><h4><span class="glyph sm"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="glyph-svg" aria-hidden="true" focusable="false">
+<path d="M23 28V12A16 16 0 0 1 36.9 20Z" fill="#FF6B4A" stroke="none"/><circle cx="23" cy="28" r="16"/><path d="M23 28 36 20.5"/><circle cx="23" cy="28" r="2" fill="currentColor"/><path d="M51 58V46M51 46l-6 -7M51 46l6 -7M45 39l-3 -5M45 39l2 -6M57 39l-2 -6M57 39l3 -5" stroke-width="2"/><path d="M44 50l14 0" stroke="#FF6B4A" stroke-width="3"/><path d="M4 56q4-3 8 0t8 0 8 0" opacity=".55" stroke-width="2"/>
+</svg></span>Tide clock: timeout + killpg</h4><ul>
+          <li><code>bash -c</code> runs with <code>.process_group(0)</code> and <code>.kill_on_drop(true)</code>; stdin is <code>/dev/null</code>.</li>
+          <li>Timeout = <code>timeout_ms</code> or the default (120 s), capped at the max (1 h).</li>
+          <li>On timeout: SIGTERM the group, wait <code>KILL_GRACE</code> (500 ms), SIGKILL (<code>terminate_group</code>, <a class="ref" href="../../crates/sandcrab-guest/src/tools/exec.rs">exec.rs:130</a>). Not an RPC error: <code>timed_out = true</code>, <code>exit_code = None</code>.</li>
+          <li>A <code>GroupGuard</code> SIGKILLs the group if the request future is dropped, and leftovers such as <code>server &amp;</code> are killed after bash exits.</li>
+        </ul></div>
+        <div class="card"><h4><span class="glyph sm"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="glyph-svg" aria-hidden="true" focusable="false">
+<path d="M5 8h20M5 13h18M5 18h20M5 23h16M5 28h20M5 33h19M5 38h20M5 43h17M5 48h20M5 53h18" stroke-width="2" opacity=".55"/><path d="M29 31h8M34 27l4 4 -4 4" stroke="#FF6B4A"/><rect x="41" y="12" width="20" height="40" rx="3"/><path d="M45 18h12M45 23h10" /><circle cx="47" cy="30" r="1.2" fill="currentColor" stroke="none"/><circle cx="51" cy="30" r="1.2" fill="currentColor" stroke="none"/><circle cx="55" cy="30" r="1.2" fill="currentColor" stroke="none"/><path d="M45 37h12M45 42h9"/><rect x="41" y="12" width="20" height="4" rx="1.5" fill="#FF6B4A" stroke="none" opacity="0"/>
+</svg></span>Few grains: bounded output</h4><ul>
+          <li>stdout and stderr are pumped concurrently into a <code>HeadTail</code> buffer (<a class="ref" href="../../crates/sandcrab-guest/src/tools/exec.rs">exec.rs:245</a>), at most 32 KiB per stream by default.</li>
+          <li>Memory stays bounded while reading; the middle is replaced by <code>[... N bytes truncated ...]</code>, and <code>truncated</code> is set.</li>
+          <li>Output is decoded lossily as UTF-8, so one bad byte cannot break the JSON.</li>
+        </ul></div>
+      </div>
+      <figure class="code"><figcaption><a href="../../crates/sandcrab-guest/src/tools/exec.rs">crates/sandcrab-guest/src/tools/exec.rs:59</a><span>Rust · trimmed</span></figcaption>
+<pre><span class="k">let mut</span> cmd = <span class="t">Command</span>::new(<span class="s">"bash"</span>);
+cmd.arg(<span class="s">"-c"</span>)
+    .arg(&amp;p.command)
+    .current_dir(&amp;cwd)
+    .envs(&amp;p.env)
+    .stdin(<span class="t">Stdio</span>::null())
+    .stdout(<span class="t">Stdio</span>::piped())
+    .stderr(<span class="t">Stdio</span>::piped())
+    .process_group(<span class="s">0</span>)
+    .kill_on_drop(<span class="k">true</span>);
+
+<span class="k">let mut</span> child = cmd.spawn().map_err(|e| spawn_error(&amp;e))?;
+<span class="c">// Armed before anything can fail or be cancelled: SIGKILLs the group on drop.</span>
+<span class="k">let mut</span> guard = <span class="t">GroupGuard</span>::new(&amp;child);
+<span class="e">// … spawn stdout/stderr pumps into HeadTail …</span>
+<span class="k">let</span> (status, timed_out) =
+    <span class="k">match</span> tokio::time::timeout(<span class="t">Duration</span>::from_millis(timeout_ms), child.wait()).<span class="k">await</span> {
+        <span class="t">Ok</span>(status) =&gt; (status.map_err(wait_error)?, <span class="k">false</span>),
+        <span class="t">Err</span>(_) =&gt; (terminate_group(&amp;mut child, guard.pgid).<span class="k">await</span>?, <span class="k">true</span>),
+    };
+<span class="c">// Reap stragglers left in the group (backgrounded jobs) so the pipes reach EOF.</span>
+guard.kill(<span class="t">Signal</span>::KILL);</pre></figure>
+      <div class="callout warn"><span class="glyph"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="glyph-svg" aria-hidden="true" focusable="false">
+<path d="M23 28V12A16 16 0 0 1 36.9 20Z" fill="#FF6B4A" stroke="none"/><circle cx="23" cy="28" r="16"/><path d="M23 28 36 20.5"/><circle cx="23" cy="28" r="2" fill="currentColor"/><path d="M51 58V46M51 46l-6 -7M51 46l6 -7M45 39l-3 -5M45 39l2 -6M57 39l-2 -6M57 39l3 -5" stroke-width="2"/><path d="M44 50l14 0" stroke="#FF6B4A" stroke-width="3"/><path d="M4 56q4-3 8 0t8 0 8 0" opacity=".55" stroke-width="2"/>
+</svg></span><p><strong>Precise wording:</strong> <code>bash</code> makes its child a <em>process-group</em> leader (<code>setpgid</code> via <code>process_group(0)</code>), not a session leader. <code>setsid</code> is used by <code>process_start</code> in PTY mode (<a class="ref" href="../../crates/sandcrab-guest/src/tools/process.rs">crates/sandcrab-guest/src/tools/process.rs</a>). A descendant that calls <code>setsid</code>/<code>setpgid</code> itself escapes the group kill; the documented backstop is container or microVM teardown.</p></div>
+      <p>The <code>BashResult</code> (<code>exit_code</code>, <code>signal</code>, <code>stdout</code>, <code>stderr</code>, <code>truncated</code>, <code>timed_out</code>, <code>duration_ms</code>) travels back as a JSON-RPC response with the same id; the client's reader task finds the waiter and the typed value surfaces as <code>Result&lt;BashResult&gt;</code> in the SDK.</p>
+    </li>
+  </ol>
+</section>
+
+<!-- ============================================================ 4 -->
+<section class="chap" id="sandbox">
+  <div class="chap-head"><span class="glyph lg"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="glyph-svg" aria-hidden="true" focusable="false">
+<g transform="translate(17 36) scale(0.62)" stroke-width="3.23" stroke-dasharray="2.4 2.6" opacity=".55">
+<path d="M-9 4l-5 5M-5 6l-3 6M9 4l5 5M5 6l3 6"/>
+<path d="M-9 -1l-5 -5M9 -1l5 -5"/>
+<circle cx="-16" cy="-8" r="4.2" fill="none"/><circle cx="16" cy="-8" r="4.2" fill="none"/>
+<path d="M-4 -7l-1 -4M4 -7l1 -4"/>
+<path d="M-12 3a12 10 0 0 1 24 0q0 4 -12 4t-12 -4z" fill="none"/>
+<circle cx="-5" cy="-12" r="1.9" fill="currentColor" stroke="none"/><circle cx="5" cy="-12" r="1.9" fill="currentColor" stroke="none"/>
+</g><g transform="translate(45 36) scale(0.72)" stroke-width="2.78">
+<path d="M-9 4l-5 5M-5 6l-3 6M9 4l5 5M5 6l3 6"/>
+<path d="M-9 -1l-5 -5M9 -1l5 -5"/>
+<circle cx="-16" cy="-8" r="4.2" fill="#FF6B4A"/><circle cx="16" cy="-8" r="4.2" fill="#FF6B4A"/>
+<path d="M-4 -7l-1 -4M4 -7l1 -4"/>
+<path d="M-12 3a12 10 0 0 1 24 0q0 4 -12 4t-12 -4z" fill="#FF6B4A"/>
+<circle cx="-5" cy="-12" r="1.9" fill="currentColor" stroke="none"/><circle cx="5" cy="-12" r="1.9" fill="currentColor" stroke="none"/>
+</g><rect x="52" y="42" width="7" height="7" rx="1.2" fill="#1F7A8C"/><path d="M4 56H60"/><circle cx="6" cy="30" r=".9" fill="currentColor" stroke="none"/><circle cx="4" cy="36" r=".9" fill="currentColor" stroke="none"/><circle cx="7" cy="42" r=".9" fill="currentColor" stroke="none"/>
+</svg></span><div><span class="num">04</span><h2>Life of a sandbox</h2></div></div>
+  <figure class="art"><img src="assets/crab/molting.webp" alt="A crab stepping out of its old shell, which stays behind on the sand" loading="lazy"><figcaption>Molting: the shell (sandbox) is discarded every time; what the crab carries out (workspace changes) survives.</figcaption></figure>
+
+  <h3>Spawn: everything is checked before the backend is touched</h3>
+  <p><code>SandboxManager::spawn</code> (<a class="ref" href="../../crates/sandcrab-core/src/manager.rs">crates/sandcrab-core/src/manager.rs:146</a>) runs this sequence:</p>
+  <ol class="tight">
+    <li><code>config.validate()</code>; then the <strong>capability gate</strong>: <code>require_hardware_isolation</code> on a backend without it → <code>HardwareIsolationRequired</code>. Non-empty <code>secrets</code> → <code>PolicyUnenforceable</code> (reserved for Phase 3).</li>
+    <li><strong>Template resolve</strong> from the <code>TemplateRegistry</code>; the network policy defaults to the manifest's. If <code>backend.enforces_network_policy(&amp;network)</code> is false → <code>PolicyUnenforceable</code> (no V1 backend enforces <code>egress_restricted</code>).</li>
+    <li>Resources = template limits plus overrides; user = config or manifest.</li>
+    <li><strong>Mount resolution</strong> (<code>resolve_mounts</code>, <a class="ref" href="../../crates/sandcrab-core/src/mounts.rs">crates/sandcrab-core/src/mounts.rs:98</a>): guest paths normalised, no duplicates or nesting, none under <code>/proc /sys /dev /run/sandcrab /opt/sandcrab</code>. <code>default_cwd</code> = explicit → first rw mount → template workdir.</li>
+    <li><strong>Leases</strong> for each mount (rw exclusive, ro shared); the lease's verified root, <code>(dev, ino)</code> and generation are copied into the <code>ResolvedMount</code>.</li>
+    <li><code>backend.spawn(&amp;spec)</code>, mark <code>BackendStarted</code>, then a <code>SpawnGuard</code> owns the handle so a cancelled spawn future cannot leak the sandbox.</li>
+    <li><strong>Ready</strong>: <code>wait_ready</code> retries connect + <code>hello</code> (backoff 2 ms ×1.5, capped at 20 ms) until <code>ready_timeout</code> (30 s default). A protocol-version mismatch is fatal. Failure destroys the handle.</li>
+    <li>The sandbox enters the active map and the TTL reaper task is started if it is not already running.</li>
+  </ol>
+
+  <div class="pair">
+    <div class="card"><h4><span class="glyph sm"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="glyph-svg" aria-hidden="true" focusable="false">
+<rect x="18" y="6" width="28" height="7" rx="2" fill="#1F7A8C"/><path d="M20 13v3c-4 2-6 5-6 9v27a5 5 0 0 0 5 5h26a5 5 0 0 0 5-5V25c0-4-2-7-6-9v-3"/><path d="M19.5 28v14" opacity=".45"/><g transform="translate(33 44) scale(0.62)" stroke-width="3.23">
+<path d="M-9 4l-5 5M-5 6l-3 6M9 4l5 5M5 6l3 6"/>
+<path d="M-9 -1l-5 -5M9 -1l5 -5"/>
+<circle cx="-16" cy="-8" r="4.2" fill="#FF6B4A"/><circle cx="16" cy="-8" r="4.2" fill="#FF6B4A"/>
+<path d="M-4 -7l-1 -4M4 -7l1 -4"/>
+<path d="M-12 3a12 10 0 0 1 24 0q0 4 -12 4t-12 -4z" fill="#FF6B4A"/>
+<circle cx="-5" cy="-12" r="1.9" fill="currentColor" stroke="none"/><circle cx="5" cy="-12" r="1.9" fill="currentColor" stroke="none"/>
+</g>
+</svg></span>Docker spawn</h4><ul>
+      <li><code>verify_image</code>: the image ID must match this host's pin for the template (unpinned images refused unless <code>allow_unpinned_images</code>).</li>
+      <li>Per-sandbox socket dir on the host, mounted at <code>/run/sandcrab</code>.</li>
+      <li>Hardened container (§6), entrypoint pinned to <code>/opt/sandcrab/crabd serve --unix /run/sandcrab/crabd.sock</code>; <code>crabd</code> is bind-mounted read-only from the host, never baked into the image.</li>
+      <li>Workspace roots are re-verified with <code>verify_workspace_root</code> before the bind mount is built.</li>
+    </ul><p style="margin:10px 0 0"><a class="ref" href="../../crates/sandcrab-backend-docker/src/backend.rs">crates/sandcrab-backend-docker/src/backend.rs:339</a></p></div>
+    <div class="card"><h4><span class="glyph sm"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="glyph-svg" aria-hidden="true" focusable="false">
+<rect x="18" y="6" width="28" height="7" rx="2" fill="#1F7A8C"/><path d="M20 13v3c-4 2-6 5-6 9v27a5 5 0 0 0 5 5h26a5 5 0 0 0 5-5V25c0-4-2-7-6-9v-3"/><path d="M19.5 28v14" opacity=".45"/><g transform="translate(33 44) scale(0.62)" stroke-width="3.23">
+<path d="M-9 4l-5 5M-5 6l-3 6M9 4l5 5M5 6l3 6"/>
+<path d="M-9 -1l-5 -5M9 -1l5 -5"/>
+<circle cx="-16" cy="-8" r="4.2" fill="#FF6B4A"/><circle cx="16" cy="-8" r="4.2" fill="#FF6B4A"/>
+<path d="M-4 -7l-1 -4M4 -7l1 -4"/>
+<path d="M-12 3a12 10 0 0 1 24 0q0 4 -12 4t-12 -4z" fill="#FF6B4A"/>
+<circle cx="-5" cy="-12" r="1.9" fill="currentColor" stroke="none"/><circle cx="5" cy="-12" r="1.9" fill="currentColor" stroke="none"/>
+</g>
+</svg></span>Firecracker spawn</h4><ul>
+      <li>Cached read-only rootfs + a sparse per-sandbox scratch drive (overlayfs in the guest).</li>
+      <li>Each mount becomes an ext4 drive <code>ws&lt;n&gt;</code>: ro images cached, rw images built per spawn.</li>
+      <li>Optional tap from the pre-created pool (only for <code>unrestricted</code>), cgroup v2 leaf, then the VMM API: machine config, boot source, drives, <code>InstanceStart</code>.</li>
+      <li><code>crabd</code> is PID 1; the host sends <code>InitConfig</code> over vsock control port 1 (<code>init.configure</code>), and init starts <code>crabd serve</code> on port 1024 as the sandbox user.</li>
+    </ul><p style="margin:10px 0 0"><a class="ref" href="../../crates/sandcrab-backend-firecracker/src/backend.rs">crates/sandcrab-backend-firecracker/src/backend.rs:203</a></p></div>
+  </div>
+
+  <figure class="code"><figcaption><span><a href="../../crates/sandcrab-backend-firecracker/src/backend.rs">crates/sandcrab-backend-firecracker/src/backend.rs:203</a> · spawn_vm</span><span>Rust · trimmed</span></figcaption>
+<pre><span class="k">let</span> init = <span class="t">InitConfig</span> {
+    sandbox_id: spec.id.to_string(),
+    hostname: format!(<span class="s">"sc-{}"</span>, &amp;spec.id.to_string()[..<span class="s">8</span>]),
+    user: <span class="t">InitUser</span> { uid: user.uid, gid: user.gid, home: <span class="t">None</span>, name: <span class="t">None</span> },
+    env: spec.env.clone(),
+    default_cwd: spec.default_cwd.clone(),
+    mounts: guest_mounts,
+    network: net.is_some(),
+    <span class="e">// dns: only when a NIC exists</span>
+    tools_port: DEFAULT_TOOLS_PORT,
+    host_time_unix_ms: unix_ms(),
+};
+<span class="k">let</span> configured = init_guest(vm, &amp;init, deadline, t).<span class="k">await</span>?;</pre></figure>
+
+  <h3>Destroy: single-flight</h3>
+  <p>Explicit <code>destroy</code>, the SDK drop guard, the TTL reaper and <code>shutdown</code> can all race. <code>SandboxShared::start_teardown</code> takes the live handle out of a <code>Mutex&lt;Option&lt;Live&gt;&gt;</code>, so exactly one caller starts the teardown; it runs on a runtime task (a cancelled caller cannot abort it) and everyone awaits the same outcome on a <code>watch</code> channel. A <code>TeardownGuard</code> publishes an outcome even on panic or runtime shutdown, and removes the sandbox from the active list <em>before</em> waking waiters. If the backend teardown fails, rw leases are released as failed and the workspace is marked dirty.</p>
+  <figure class="code"><figcaption><a href="../../crates/sandcrab-core/src/manager.rs">crates/sandcrab-core/src/manager.rs:471</a><span>Rust</span></figcaption>
+<pre><span class="k">async fn</span> destroy(<span class="k">self</span>: &amp;<span class="t">Arc</span>&lt;<span class="t">Self</span>&gt;) -&gt; <span class="t">Result</span>&lt;<span class="t">TimingMarks</span>&gt; {
+    <span class="k">self</span>.start_teardown();
+    <span class="k">let mut</span> rx = <span class="k">self</span>.teardown.subscribe();
+    <span class="k">match</span> rx.wait_for(<span class="t">Option</span>::is_some).<span class="k">await</span> {
+        <span class="t">Ok</span>(outcome) =&gt; outcome.clone().expect(<span class="s">"checked by wait_for"</span>),
+        <span class="c">// Unreachable: the sender lives in `self`.</span>
+        <span class="t">Err</span>(_) =&gt; <span class="t">Err</span>(<span class="k">self</span>.teardown_error(<span class="s">"teardown outcome channel closed"</span>)),
+    }
+}</pre></figure>
+  <p>Backend teardown: Docker stops and removes the container and its socket dir with a stop grace. Firecracker first <strong>syncs back</strong> every rw drive (§5), then stops the VM (graceful <code>init.shutdown</code>, then fallbacks) and cleans the run dir, preserving images whose sync-back failed (<a class="ref" href="../../crates/sandcrab-backend-firecracker/src/vm.rs">crates/sandcrab-backend-firecracker/src/vm.rs:501</a>).</p>
+
+  <h3>TTL reaper</h3>
+  <div class="symbol"><span class="glyph sm"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="glyph-svg" aria-hidden="true" focusable="false">
+<path d="M23 28V12A16 16 0 0 1 36.9 20Z" fill="#FF6B4A" stroke="none"/><circle cx="23" cy="28" r="16"/><path d="M23 28 36 20.5"/><circle cx="23" cy="28" r="2" fill="currentColor"/><path d="M51 58V46M51 46l-6 -7M51 46l6 -7M45 39l-3 -5M45 39l2 -6M57 39l-2 -6M57 39l3 -5" stroke-width="2"/><path d="M44 50l14 0" stroke="#FF6B4A" stroke-width="3"/><path d="M4 56q4-3 8 0t8 0 8 0" opacity=".55" stroke-width="2"/>
+</svg></span><span><b>Tide clock.</b> Default TTL is 30 min (<code>DEFAULT_TTL_SECS</code>). <code>ensure_reaper</code> runs a tokio interval (1 s default) holding only a <code>Weak</code> to the manager, collects expired sandboxes and destroys them through the same single-flight path (<a class="ref" href="../../crates/sandcrab-core/src/manager.rs">manager.rs:349</a>).</span></div>
+
+  <h3>Timing marks</h3>
+  <p>Every sandbox carries <code>LifecycleTimings</code>; the phases are the <code>LifecyclePhase</code> enum (<a class="ref" href="../../crates/sandcrab-core/src/timings.rs">crates/sandcrab-core/src/timings.rs:18</a>). The standard phases match the benchmark spec's metric boundaries; backends add custom marks.</p>
+  <div class="marks">
+    <div class="mark"><code>spawn_requested</code><span>spawn entered</span></div>
+    <div class="mark"><code>BackendStarted</code><span>container started / <code>InstanceStart</code></span></div>
+    <div class="mark"><code>Ready</code><span>first <code>hello</code> parsed</span></div>
+    <div class="mark"><code>FirstCall</code><span>first tool response</span></div>
+    <div class="mark"><code>TeardownStarted</code><span>destroy entered</span></div>
+    <div class="mark"><code>TeardownFinished</code><span>resources released</span></div>
+  </div>
+  <p class="muted" style="font-size:14px">Custom marks: Docker <code>image_verified</code>; Firecracker <code>rootfs_ready</code>, <code>ws_attach_start</code>, <code>ws_attach_done</code>, <code>vmm_started</code>, <code>ws_sync_done</code>, <code>vmm_exited</code>, <code>cleanup_done</code>.</p>
+</section>
+
+<!-- ============================================================ 5 -->
+<section class="chap" id="workspaces">
+  <div class="chap-head"><span class="glyph lg"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="glyph-svg" aria-hidden="true" focusable="false">
+<path d="M4 28H26M38 28H60"/><path d="M26 28v8M38 28v8"/><path d="M10 58C10 42 20 36 32 36S54 42 54 58Z"/><rect x="20" y="48" width="9" height="8" rx="1"/><rect x="31" y="48" width="9" height="8" rx="1"/><rect x="25.5" y="40" width="9" height="8" rx="1" fill="#1F7A8C"/><g transform="translate(48 20) scale(0.5)" stroke-width="4.0">
+<path d="M-9 4l-5 5M-5 6l-3 6M9 4l5 5M5 6l3 6"/>
+<path d="M-9 -1l-5 -5M9 -1l5 -5"/>
+<circle cx="-16" cy="-8" r="4.2" fill="#FF6B4A"/><circle cx="16" cy="-8" r="4.2" fill="#FF6B4A"/>
+<path d="M-4 -7l-1 -4M4 -7l1 -4"/>
+<path d="M-12 3a12 10 0 0 1 24 0q0 4 -12 4t-12 -4z" fill="#FF6B4A"/>
+<circle cx="-5" cy="-12" r="1.9" fill="currentColor" stroke="none"/><circle cx="5" cy="-12" r="1.9" fill="currentColor" stroke="none"/>
+</g>
+</svg></span><div><span class="num">05</span><h2>Workspaces</h2></div></div>
+  <figure class="art"><img src="assets/crab/burrow.webp" alt="A crab's burrow under the sand, with crates of files stored below while crabs come and go above" loading="lazy"><figcaption>Burrow: sandboxes come and go above; the files stay below.</figcaption></figure>
+
+  <h3>The model</h3>
+  <p>A <code>Workspace</code> has an id, a name, a <code>generation</code> counter and a backing (<a class="ref" href="../../crates/sandcrab-core/src/workspace.rs">crates/sandcrab-core/src/workspace.rs:123</a>):</p>
+  <ul class="tight">
+    <li><code>HostDir(PathBuf)</code>: an existing user directory, registered canonical; never deleted by Sandcrab.</li>
+    <li><code>ManagedDir(PathBuf)</code>: lives at <code>&lt;state_root&gt;/workspaces/&lt;id&gt;/data</code> (state root <code>~/.sandcrab</code>, or <code>$SANDCRAB_HOME</code>).</li>
+    <li><code>BlockVolume(PathBuf)</code>: reserved in V1; a backend may attach it directly, host file ops are not implemented.</li>
+  </ul>
+  <p>Mounts are <code>MountMode::ReadWrite</code> or <code>ReadOnly</code>; one sandbox can mount several workspaces at disjoint guest paths.</p>
+  <div class="symbol"><span class="glyph sm"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="glyph-svg" aria-hidden="true" focusable="false">
+<path d="M4 58V18h6v-6h8v6h6v-6h8v6h6v-6h8v6h6v-6h8v46z"/><circle cx="18" cy="36" r="8.5"/><path d="M13.5 33.5l3 -3M14.5 38l7 -7" opacity=".45" stroke-width="2"/><rect x="22.5" y="42" width="8" height="6.5" rx="1.2" fill="#1F7A8C"/><path d="M24.5 42v-2.2a2 2 0 0 1 4 0V42" stroke-width="2"/><path d="M36 58V40a8 8 0 0 1 16 0v18"/><g transform="translate(44 52) scale(0.38)" stroke-width="5.26">
+<path d="M-9 4l-5 5M-5 6l-3 6M9 4l5 5M5 6l3 6"/>
+<path d="M-9 -1l-5 -5M9 -1l5 -5"/>
+<circle cx="-16" cy="-8" r="4.2" fill="#FF6B4A"/><circle cx="16" cy="-8" r="4.2" fill="#FF6B4A"/>
+<path d="M-4 -7l-1 -4M4 -7l1 -4"/>
+<path d="M-12 3a12 10 0 0 1 24 0q0 4 -12 4t-12 -4z" fill="#FF6B4A"/>
+<circle cx="-5" cy="-12" r="1.9" fill="currentColor" stroke="none"/><circle cx="5" cy="-12" r="1.9" fill="currentColor" stroke="none"/>
+</g>
+</svg></span><span><b>Window vs. door.</b> ro is a window (look, don't touch: the kernel enforces it on the bind mount or the drive is attached read-only); rw is a door, and only one sandbox may hold it at a time.</span></div>
+
+  <h3>Host-side mutation between turns</h3>
+  <p><code>WorkspaceRegistry::put_file</code>, <code>read_file</code>, <code>delete_file</code> and <code>list_files</code> (exposed through the SDK's <code>WorkspaceClient</code>) let the host add attachments or collect output between agent turns. While a <strong>rw lease</strong> is held by any process, host mutation fails with <code>WorkspaceBusy</code> unless the caller opts in with <code>HostWriteOptions::force</code>; reads are always allowed. <code>put_file</code> bumps the generation, which invalidates cached read-only images.</p>
+
+  <h3>Race-free, fd-relative file ops</h3>
+  <p>A rw-mounted workspace is attacker-controlled, and it can change between any two host syscalls (a guest looping <code>renameat2(RENAME_EXCHANGE)</code> to swap a directory with a symlink). So <a class="ref" href="../../crates/sandcrab-core/src/fsx.rs">crates/sandcrab-core/src/fsx.rs</a> never checks a path and then re-walks it by name:</p>
+  <ul class="tight">
+    <li>The root is opened once; every walk is relative to that fd.</li>
+    <li>On Linux the directory walk is a single <code>openat2</code> with <code>RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS</code>; elsewhere, or when <code>openat2</code> is unavailable, one <code>openat(O_DIRECTORY | O_NOFOLLOW)</code> per component.</li>
+    <li>Writes go to a fresh <code>O_CREAT | O_EXCL</code> temp file in the target dir fd, then <code>renameat</code> within that fd; deletes use <code>unlinkat</code> on the parent fd.</li>
+    <li>Any symlink on the path, even one pointing inside the workspace, is refused with <code>PathEscape</code>.</li>
+  </ul>
+  <figure class="code"><figcaption><span><a href="../../crates/sandcrab-core/src/fsx.rs">crates/sandcrab-core/src/fsx.rs:170</a> · open_dir</span><span>Rust · trimmed</span></figcaption>
+<pre><span class="k">match</span> rustix::fs::openat2(
+    root,
+    &amp;path,
+    DIR_FLAGS,
+    <span class="t">Mode</span>::empty(),
+    <span class="t">ResolveFlags</span>::BENEATH | <span class="t">ResolveFlags</span>::NO_SYMLINKS | <span class="t">ResolveFlags</span>::NO_MAGICLINKS,
+) {
+    <span class="t">Ok</span>(fd) =&gt; <span class="k">return</span> <span class="t">Ok</span>(fd),
+    <span class="c">// No openat2 (old kernel, seccomp), a spurious resolution retry, or ENOTDIR</span>
+    <span class="c">// (possibly a symlink as the last component): walk instead, which classifies.</span>
+    <span class="t">Err</span>(<span class="t">Errno</span>::NOSYS | <span class="t">Errno</span>::PERM | <span class="t">Errno</span>::AGAIN | <span class="t">Errno</span>::NOTDIR) =&gt; {}
+    <span class="t">Err</span>(e) =&gt; <span class="k">return</span> <span class="t">Err</span>(map(rel, e)),
+}</pre></figure>
+
+  <h3>Roots: overlap refusal and dev/ino pinning</h3>
+  <ul class="tight">
+    <li><strong>No overlap:</strong> workspace roots may not be equal to, an ancestor of, or a descendant of another workspace root or the state root (<code>ensure_no_overlap</code>, <a class="ref" href="../../crates/sandcrab-core/src/registry.rs">crates/sandcrab-core/src/registry.rs:426</a>). Otherwise a sandbox holding the outer one rw could swap the inner one's root. Overlapping entries in older registries are tolerated but cannot be leased.</li>
+    <li><strong>Pinned identity:</strong> each directory root is stored with its <code>(dev, ino)</code> (<code>RootIdentity</code>). Every host op and lease reopens it from <code>/</code> with <code>O_NOFOLLOW | O_DIRECTORY</code> per component and compares; a root replaced by a symlink or another directory fails with <code>WorkspaceRootChanged</code>. Backends call <code>verify_workspace_root</code> (<a class="ref" href="../../crates/sandcrab-core/src/registry.rs">registry.rs:400</a>) again right before use.</li>
+  </ul>
+
+  <h3>Leases across processes</h3>
+  <p><code>WorkspaceRegistry::lease</code> (<a class="ref" href="../../crates/sandcrab-core/src/registry.rs">registry.rs:837</a>) takes non-blocking <code>flock</code>s on <code>&lt;state root&gt;/locks/&lt;id&gt;.mount.lock</code> (exclusive for rw, shared for ro) and <code>&lt;state root&gt;/locks/&lt;id&gt;.rw.lock</code> (held exclusive by the rw lease; host mutation probes it). The lock files live outside the workspace directory, so leasing a registered host directory creates no <code>workspaces/&lt;id&gt;/</code> entry; <code>remove</code> deletes them. <code>registry.json</code> is written atomically (tmp + fsync + rename) under <code>registry.lock</code>. Releasing a rw lease bumps the generation.</p>
+
+  <h3>Firecracker: block-volume pack and sync-back</h3>
+  <p>Firecracker has no virtio-fs, so <code>supports_host_dir_mounts = false</code>: the host directory stays the source of truth, copied in at spawn and synced back at teardown (<a class="ref" href="../../docs/design/firecracker-backend.md">docs/design/firecracker-backend.md</a> §5).</p>
+  <ol class="tight">
+    <li><strong>Pack</strong> (<code>pack_dir</code>, <a class="ref" href="../../crates/sandcrab-backend-firecracker/src/workspace.rs">crates/sandcrab-backend-firecracker/src/workspace.rs:54</a>): a <code>sandcrab-tar-v1</code>-style tar. Symlinks are stored, not followed; special files skipped; setuid/setgid dropped; ownership normalised to the guest user.</li>
+    <li><strong>Image</strong> (<code>build_image</code>, :224): <code>mke2fs -d</code> turns the tar into ext4. Read-only images are cached per (generation, tree fingerprint, owner) by <code>cached_ro_image</code> (:281) and shared by every sandbox mounting that generation.</li>
+    <li><strong>Export:</strong> at teardown the guest's <code>init.export</code> acks with format <code>sandcrab-tar-v1</code> and streams the rw tree over vsock.</li>
+    <li><strong>Unpack</strong> (<code>receive_export</code>, :393 → <code>sandcrab_core::archive::unpack_safe</code>): hostile input. Absolute paths, <code>..</code>, hard links, devices and FIFOs are rejected; setuid/setgid are refused and modes masked (<code>&amp; 0o777 &amp; !umask</code>); duplicates and missing end-of-archive markers fail the whole archive; byte caps follow the <em>drive size</em>, not a constant; zero runs become holes.</li>
+    <li><strong>Commit</strong> (<code>commit</code>, :433): a <code>ManagedDir</code> is swapped atomically (<code>RENAME_EXCHANGE</code> where available); a <code>HostDir</code> is mirror-applied in place, which is not atomic (documented V1 trade-off). A failed sync-back preserves the guest image and returns an error.</li>
+  </ol>
+  <div class="symbol"><span class="glyph sm"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="glyph-svg" aria-hidden="true" focusable="false">
+<circle cx="16" cy="29" r="9"/><path d="M16 29a2 2 0 0 1 4 0a4 4 0 0 1 -8 0a6 6 0 0 1 12 0" stroke-width="2"/><path d="M39 32l8 -20 10 20z"/><path d="M42.5 24h9M40.5 28.5h14" stroke-width="2"/><path d="M26 14q6 -6 12 0" stroke="#FF6B4A"/><path d="M34.5 12.5l3.5 1.5 -1.5 3.5" stroke="#FF6B4A"/><path d="M4 38H60"/><path d="M16 38v6M48 38v6"/><rect x="10" y="44" width="44" height="13" rx="3"/><rect x="20" y="48" width="6" height="6" rx="1" fill="#1F7A8C"/><rect x="29" y="48" width="6" height="6" rx="1"/><rect x="38" y="48" width="6" height="6" rx="1" fill="#1F7A8C"/>
+</svg></span><span><b>Hermit handoff.</b> Because the workspace outlives the sandbox, a turn in <code>python-dev</code> can write a chart and the next turn in <code>render</code> can mount the same workspace (perhaps ro) and turn it into a PDF.</span></div>
+</section>
+
+<!-- ============================================================ 6 -->
+<section class="chap" id="security">
+  <div class="chap-head"><span class="glyph lg"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="glyph-svg" aria-hidden="true" focusable="false">
+<rect x="18" y="6" width="28" height="7" rx="2" fill="#1F7A8C"/><path d="M20 13v3c-4 2-6 5-6 9v27a5 5 0 0 0 5 5h26a5 5 0 0 0 5-5V25c0-4-2-7-6-9v-3"/><path d="M19.5 28v14" opacity=".45"/><g transform="translate(33 44) scale(0.62)" stroke-width="3.23">
+<path d="M-9 4l-5 5M-5 6l-3 6M9 4l5 5M5 6l3 6"/>
+<path d="M-9 -1l-5 -5M9 -1l5 -5"/>
+<circle cx="-16" cy="-8" r="4.2" fill="#FF6B4A"/><circle cx="16" cy="-8" r="4.2" fill="#FF6B4A"/>
+<path d="M-4 -7l-1 -4M4 -7l1 -4"/>
+<path d="M-12 3a12 10 0 0 1 24 0q0 4 -12 4t-12 -4z" fill="#FF6B4A"/>
+<circle cx="-5" cy="-12" r="1.9" fill="currentColor" stroke="none"/><circle cx="5" cy="-12" r="1.9" fill="currentColor" stroke="none"/>
+</g>
+</svg></span><div><span class="num">06</span><h2>Security model &amp; invariants</h2></div></div>
+  <figure class="art"><img src="assets/crab/isolation.webp" alt="A crab sealed inside its own glass jar beside crabs sharing one tide pool" loading="lazy"><figcaption>Sealed jar (Firecracker microVM, own kernel) vs. shared tide pool (Docker, shared host kernel).</figcaption></figure>
+
+  <h3>Declared capabilities</h3>
+  <div class="tbl"><table>
+    <thead><tr><th>Capability</th><th>Docker</th><th>Firecracker (V1)</th><th>Meaning</th></tr></thead>
+    <tbody>
+      <tr><td><code>hardware_isolated</code></td><td class="no">false</td><td class="yes">true</td><td>Guest behind a virtualization boundary, not a shared kernel.</td></tr>
+      <tr><td><code>multi_tenant_safe</code></td><td class="no">false</td><td class="no">false</td><td>Firecracker stays false until <code>jailer</code> confinement lands (design §8).</td></tr>
+      <tr><td><code>supports_snapshots</code></td><td class="no">false</td><td class="no">false</td><td>Not in V1.</td></tr>
+      <tr><td><code>supports_host_dir_mounts</code></td><td class="yes">true</td><td class="no">false</td><td>Live sharing vs. copy-in + sync-back.</td></tr>
+      <tr><td>network policies enforced</td><td><code>disabled</code>, <code>unrestricted</code></td><td><code>disabled</code>, <code>unrestricted</code></td><td><code>egress_restricted</code> is refused at spawn by both.</td></tr>
+    </tbody>
+  </table></div>
+  <p class="muted" style="font-size:14px"><a class="ref" href="../../crates/sandcrab-backend-docker/src/backend.rs">crates/sandcrab-backend-docker/src/backend.rs:322</a> · <a class="ref" href="../../crates/sandcrab-backend-firecracker/src/backend.rs">crates/sandcrab-backend-firecracker/src/backend.rs:426</a></p>
+
+  <h3>No silent downgrade: what you get instead</h3>
+  <p>Each of these is an explicit error. None of them is ever turned into a warning plus a weaker setup.</p>
+  <div class="tbl"><table>
+    <thead><tr><th>Situation</th><th>Where</th><th>Result</th></tr></thead>
+    <tbody>
+      <tr><td>No backend chosen in the builder</td><td><a class="ref" href="../../crates/sandcrab-sdk/src/lib.rs">sandcrab-sdk/src/lib.rs:248</a></td><td><code>InvalidConfig</code>: "Sandcrab never picks or falls back to a backend"</td></tr>
+      <tr><td><code>require_hardware_isolation</code> on Docker</td><td>SDK builder and <code>spawn</code></td><td><code>HardwareIsolationRequired</code></td></tr>
+      <tr><td><code>egress_restricted</code> on Docker</td><td><a class="ref" href="../../crates/sandcrab-backend-docker/src/spec.rs">backend-docker/src/spec.rs:88</a></td><td><code>PolicyUnenforceable</code>: "docker cannot enforce network policy `egress_restricted`…"</td></tr>
+      <tr><td>Any <code>secrets</code></td><td><code>spawn</code> + each backend's <code>reject_secrets</code></td><td><code>PolicyUnenforceable</code> (Phase 3)</td></tr>
+      <tr><td>Template image ID ≠ this host's pin</td><td>Docker <code>verify_image</code></td><td>refused unless <code>allow_unpinned_images</code> / <code>--allow-unpinned</code></td></tr>
+      <tr><td>No <code>/dev/kvm</code></td><td><code>check_kvm</code> in <code>FirecrackerBackend::new</code></td><td>error; never a switch to Docker</td></tr>
+    </tbody>
+  </table></div>
+  <p>The CLI mirrors this: the backend is always named explicitly (<code>--backend docker</code> or <code>--backend firecracker</code>); nothing falls back to Docker.</p>
+
+  <h3>Docker hardening</h3>
+  <p>Built as pure data in <code>build_container_spec</code>, so the whole matrix is unit-tested without a daemon:</p>
+  <figure class="code"><figcaption><a href="../../crates/sandcrab-backend-docker/src/spec.rs">crates/sandcrab-backend-docker/src/spec.rs:265</a><span>Rust · trimmed</span></figcaption>
+<pre>host_config: <span class="t">Some</span>(<span class="t">HostConfig</span> {
+    network_mode: <span class="t">Some</span>(mode.to_owned()),          <span class="c">// "none" unless unrestricted</span>
+    cap_drop: <span class="t">Some</span>(vec![<span class="s">"ALL"</span>.into()]),
+    security_opt: <span class="t">Some</span>(vec![<span class="s">"no-new-privileges:true"</span>.into()]),
+    privileged: <span class="t">Some</span>(<span class="k">false</span>),
+    init: <span class="t">Some</span>(<span class="k">true</span>),
+    ipc_mode: <span class="t">Some</span>(<span class="s">"private"</span>.into()),
+    readonly_rootfs: <span class="t">Some</span>(<span class="k">false</span>),
+    pids_limit: <span class="t">Some</span>(ctx.limits.pids_limit),
+    memory: <span class="t">Some</span>(memory),
+    memory_swap: <span class="t">Some</span>(memory),                   <span class="c">// no swap</span>
+    nano_cpus: <span class="t">Some</span>(nano_cpus),
+    tmpfs: <span class="t">Some</span>(HashMap::from([(
+        <span class="s">"/tmp"</span>.to_owned(),
+        format!(<span class="s">"rw,nosuid,nodev,noexec,size={}m,mode=1777"</span>, ctx.limits.tmp_size_mb),
+    )])),
+    ulimits: <span class="t">Some</span>(vec![<span class="t">ResourcesUlimits</span> {       <span class="c">// no core dumps</span>
+        name: <span class="t">Some</span>(<span class="s">"core"</span>.into()), soft: <span class="t">Some</span>(0), hard: <span class="t">Some</span>(0),
+    }]),
+    <span class="e">// …</span>
+}),</pre></figure>
+  <p class="muted" style="font-size:14px">Also: runs as the host uid:gid (so bind-mounted files stay editable on the host), published ports bind to <code>127.0.0.1</code> only, <code>/tmp</code> is <code>noexec</code> (binaries and shared objects cannot run from it; use <code>$HOME</code> or the workspace), core dumps are disabled so crashes never drop <code>core.*</code> files into a workspace, the entrypoint is pinned to <code>crabd</code>, and <code>disk_mb</code> is <strong>not</strong> enforced (a warning is logged; overlay2 would need xfs + pquota). The root filesystem stays writable on purpose: templates need a writable <code>HOME</code> and caches, and the layer is discarded on destroy.</p>
+
+  <h3>Review rounds</h3>
+  <p>The Nebula QA + security review (flow step <code>review</code>) took three rounds:</p>
+  <div class="tbl"><table>
+    <thead><tr><th>Round</th><th>Findings</th><th>Fix commits (branch <code>feat/phase-1</code>)</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td>1 HIGH (symlink / rename TOCTOU in host workspace ops) + 5 MEDIUM + 5 LOW</td><td><code>6abe868</code> fd-relative workspace ops · <code>e021c6d</code> cross-process leases · <code>a5fcf38</code>, <code>9ae2f01</code> bounded sync-back, masked modes · <code>dce638b</code> export deadline · <code>44525fa</code>, <code>ffd05d4</code> tap anti-spoofing, root-owned setup · <code>063d351</code> unpinned images refused · <code>64a3eed</code> owner-scoped reaping · <code>96a77e7</code> CLI destroys on SIGTERM/SIGHUP · <code>e999f92</code> redacted <code>.env</code></td></tr>
+      <tr><td>2</td><td>1 new HIGH: nested-registration root swap</td><td><code>9305037</code> refuse overlapping workspaces, open roots without following symlinks, pin dev/ino · <code>6ec2d38</code> bounded remove_tree, read cap · <code>079f679</code> crabagent <code>--mount-host</code></td></tr>
+      <tr><td>3</td><td>"V1 review: PASS"</td><td>n/a</td></tr>
+    </tbody>
+  </table></div>
+  <div class="callout warn"><span class="glyph"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="glyph-svg" aria-hidden="true" focusable="false">
+<path d="M4 58V18h6v-6h8v6h6v-6h8v6h6v-6h8v6h6v-6h8v46z"/><circle cx="18" cy="36" r="8.5"/><path d="M13.5 33.5l3 -3M14.5 38l7 -7" opacity=".45" stroke-width="2"/><rect x="22.5" y="42" width="8" height="6.5" rx="1.2" fill="#1F7A8C"/><path d="M24.5 42v-2.2a2 2 0 0 1 4 0V42" stroke-width="2"/><path d="M36 58V40a8 8 0 0 1 16 0v18"/><g transform="translate(44 52) scale(0.38)" stroke-width="5.26">
+<path d="M-9 4l-5 5M-5 6l-3 6M9 4l5 5M5 6l3 6"/>
+<path d="M-9 -1l-5 -5M9 -1l5 -5"/>
+<circle cx="-16" cy="-8" r="4.2" fill="#FF6B4A"/><circle cx="16" cy="-8" r="4.2" fill="#FF6B4A"/>
+<path d="M-4 -7l-1 -4M4 -7l1 -4"/>
+<path d="M-12 3a12 10 0 0 1 24 0q0 4 -12 4t-12 -4z" fill="#FF6B4A"/>
+<circle cx="-5" cy="-12" r="1.9" fill="currentColor" stroke="none"/><circle cx="5" cy="-12" r="1.9" fill="currentColor" stroke="none"/>
+</g>
+</svg></span><div><p><strong>Deferred to Phase 2 (MEDIUM), so don't assume these are closed:</strong></p>
+  <ul class="tight">
+    <li>Two registries with different <code>SANDCRAB_HOME</code> can still nest roots: the overlap check is per registry.</li>
+    <li>dockerd and the Firecracker pack step resolve the bind path <em>by name</em> after verification (4 race wins in 80 attempts in review). Planned fix: pack/commit through the verified root fd, and a <code>crabd</code> dev/ino check after start.</li>
+  </ul></div></div>
+</section>
+
+<!-- ============================================================ 7 -->
+<section class="chap" id="templates">
+  <div class="chap-head"><span class="glyph lg"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="glyph-svg" aria-hidden="true" focusable="false">
+<circle cx="16" cy="29" r="9"/><path d="M16 29a2 2 0 0 1 4 0a4 4 0 0 1 -8 0a6 6 0 0 1 12 0" stroke-width="2"/><path d="M39 32l8 -20 10 20z"/><path d="M42.5 24h9M40.5 28.5h14" stroke-width="2"/><path d="M26 14q6 -6 12 0" stroke="#FF6B4A"/><path d="M34.5 12.5l3.5 1.5 -1.5 3.5" stroke="#FF6B4A"/><path d="M4 38H60"/><path d="M16 38v6M48 38v6"/><rect x="10" y="44" width="44" height="13" rx="3"/><rect x="20" y="48" width="6" height="6" rx="1" fill="#1F7A8C"/><rect x="29" y="48" width="6" height="6" rx="1"/><rect x="38" y="48" width="6" height="6" rx="1" fill="#1F7A8C"/>
+</svg></span><div><span class="num">07</span><h2>Templates &amp; pinning</h2></div></div>
+  <p>A template is a standard <code>Dockerfile</code> plus a <code>sandcrab.toml</code> manifest in <a class="ref" href="../../templates/">templates/&lt;name&gt;/</a>. <code>TemplateRegistry::load</code> reads every directory and validates the manifest (<a class="ref" href="../../crates/sandcrab-core/src/template.rs">crates/sandcrab-core/src/template.rs:18</a>).</p>
+  <div class="tbl"><table>
+    <thead><tr><th>Template</th><th>Built from</th><th>Contents</th></tr></thead>
+    <tbody>
+      <tr><td><code>base</code></td><td><code>debian:trixie-20261104-slim@sha256:…</code></td><td>Debian 13 + core utilities</td></tr>
+      <tr><td><code>python-dev</code></td><td><code>sandcrab/base:0.1.0</code> (+ <code>uv</code> stage pinned by digest)</td><td>Python 3.15, uv, ruff, pytest, mypy</td></tr>
+      <tr><td><code>ts-dev</code></td><td><code>sandcrab/base:0.1.0</code> (+ Node 26 and bun stages pinned by digest)</td><td>Node.js 26, pnpm, bun, TypeScript, vitest, biome, Debian <code>python3</code>; no browser (use <code>render</code>)</td></tr>
+      <tr><td><code>render</code></td><td><code>sandcrab/base:0.1.0</code> (+ Node and typst stages)</td><td>Chromium, Playwright, ffmpeg, ImageMagick, Typst</td></tr>
+    </tbody>
+  </table></div>
+  <figure class="code"><figcaption><a href="../../templates/python-dev/sandcrab.toml">templates/python-dev/sandcrab.toml</a><span>TOML</span></figcaption>
+<pre>[template]
+name = <span class="s">"python-dev"</span>
+version = <span class="s">"0.1.0"</span>
+image = <span class="s">"sandcrab/python-dev:0.1.0"</span>
+<span class="c"># The built image ID is pinned per host, not here (local image IDs do not reproduce</span>
+<span class="c"># across hosts): `templates/build.sh python-dev` records it under ~/.sandcrab/template-pins.</span>
+<span class="c"># The Dockerfile FROM base images are digest-pinned.</span>
+
+[resources]
+vcpu = <span class="s">2</span>
+memory_mb = <span class="s">1024</span>
+disk_mb = <span class="s">4096</span>
+
+[workspace]
+workdir = <span class="s">"/workspace"</span>
+
+[network]
+default_policy = <span class="s">"disabled"</span>
+
+[tools]
+tiers = [<span class="s">"core"</span>, <span class="s">"process"</span>]</pre></figure>
+  <p><strong>What the pin means:</strong> <code>templates/build.sh</code> records each built image ID in a host-local pin file (<code>~/.sandcrab/template-pins/&lt;name&gt;/&lt;version&gt;/&lt;arch&gt;.json</code>), and spawns refuse an image that does not match it. That is local integrity (unchanged since this host built it), not provenance: image IDs do not reproduce across hosts yet, because apt packages are not pinned and image stores differ. <code>sandcrab template pin</code> adopts an image that is already present. Base images are pinned by digest in the Dockerfiles; reproducible template digests are a planned follow-up. See <a href="../../docs/template-pins.md">docs/template-pins.md</a>.</p>
+
+  <h3>Rootfs pipeline (Firecracker)</h3>
+  <figure class="code"><figcaption><span><a href="../../docs/design/firecracker-backend.md">docs/design/firecracker-backend.md</a> §2</span><span>pipeline</span></figcaption>
+<pre>sandcrab/&lt;tpl&gt;:0.1.0 ─docker create+export─▶ rootfs.tar ─augment─▶ rootfs+crabd.tar ─mke2fs -d─▶ rootfs.ext4 (ro, shared)</pre></figure>
+  <ul class="tight">
+    <li><code>rootfs::augment</code> appends <code>/sbin/crabd</code> (static musl, sha-pinned) and the needed empty dirs; ownership stays root.</li>
+    <li><code>rootfs::mkfs</code> runs <code>mke2fs -t ext4 -d &lt;tar&gt;</code> (rootless; strategies <code>native | container | fakeroot</code>).</li>
+    <li>Cached at <code>~/.sandcrab/cache/rootfs/&lt;key&gt;/{rootfs.ext4, manifest.json}</code> with <code>key = sha256(image_id ‖ crabd_sha256 ‖ PIPELINE_VERSION)</code> (<a class="ref" href="../../crates/sandcrab-backend-firecracker/src/rootfs/mod.rs">crates/sandcrab-backend-firecracker/src/rootfs/mod.rs:48</a>); the recorded <code>rootfs_sha256</code> is checked on load.</li>
+    <li>Guest kernel and Firecracker binaries are pinned by SHA-256 in <a class="ref" href="../../crates/sandcrab-backend-firecracker/src/artifacts.rs">crates/sandcrab-backend-firecracker/src/artifacts.rs</a> and fetched by <code>scripts/fetch-artifacts.sh</code> (or <code>sandcrab doctor --fix</code>).</li>
+    <li>Entry points: <code>scripts/build-rootfs.sh</code> (a thin wrapper), the <code>sandcrab-rootfs</code> binary and <code>sandcrab rootfs</code>.</li>
+  </ul>
+</section>
+
+<!-- ============================================================ 8 -->
+<section class="chap" id="harnesses">
+  <div class="chap-head"><span class="glyph lg"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="glyph-svg" aria-hidden="true" focusable="false">
+<g transform="translate(32 30) scale(1.45)" stroke-width="1.72">
+<path d="M-9 4l-5 5M-5 6l-3 6M9 4l5 5M5 6l3 6"/>
+<path d="M-9 -1l-5 -5M9 -1l5 -5"/>
+<circle cx="-16" cy="-8" r="4.2" fill="#FF6B4A"/><circle cx="16" cy="-8" r="4.2" fill="#FF6B4A"/>
+<path d="M-4 -7l-1 -4M4 -7l1 -4"/>
+<path d="M-12 3a12 10 0 0 1 24 0q0 4 -12 4t-12 -4z" fill="#FF6B4A"/>
+<circle cx="-5" cy="-12" r="1.9" fill="currentColor" stroke="none"/><circle cx="5" cy="-12" r="1.9" fill="currentColor" stroke="none"/>
+</g><rect x="13" y="37" width="38" height="9" rx="2.5" fill="#1F7A8C"/><path d="M18 39.5l2.5 2 -2.5 2M23 43.5h3.5" stroke="#F5ECD9" stroke-width="1.6"/><circle cx="33" cy="41" r="2" stroke="#F5ECD9" stroke-width="1.5"/><path d="M34.5 42.5l1.8 1.8" stroke="#F5ECD9" stroke-width="1.5"/><path d="M41 39.5h6M41 42h6M41 44.5h4" stroke="#F5ECD9" stroke-width="1.3"/>
+</svg></span><div><span class="num">08</span><h2>crabagent &amp; the bench harness</h2></div></div>
+  <div class="pair">
+    <div class="card"><h4><span class="glyph sm"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="glyph-svg" aria-hidden="true" focusable="false">
+<g transform="translate(32 30) scale(1.45)" stroke-width="1.72">
+<path d="M-9 4l-5 5M-5 6l-3 6M9 4l5 5M5 6l3 6"/>
+<path d="M-9 -1l-5 -5M9 -1l5 -5"/>
+<circle cx="-16" cy="-8" r="4.2" fill="#FF6B4A"/><circle cx="16" cy="-8" r="4.2" fill="#FF6B4A"/>
+<path d="M-4 -7l-1 -4M4 -7l1 -4"/>
+<path d="M-12 3a12 10 0 0 1 24 0q0 4 -12 4t-12 -4z" fill="#FF6B4A"/>
+<circle cx="-5" cy="-12" r="1.9" fill="currentColor" stroke="none"/><circle cx="5" cy="-12" r="1.9" fill="currentColor" stroke="none"/>
+</g><rect x="13" y="37" width="38" height="9" rx="2.5" fill="#1F7A8C"/><path d="M18 39.5l2.5 2 -2.5 2M23 43.5h3.5" stroke="#F5ECD9" stroke-width="1.6"/><circle cx="33" cy="41" r="2" stroke="#F5ECD9" stroke-width="1.5"/><path d="M34.5 42.5l1.8 1.8" stroke="#F5ECD9" stroke-width="1.5"/><path d="M41 39.5h6M41 42h6M41 44.5h4" stroke="#F5ECD9" stroke-width="1.3"/>
+</svg></span><code>crabagent</code></h4>
+      <p style="font-size:14.5px;color:var(--ink-2)">A minimal, pi-style coding agent (<a class="ref" href="../../crates/sandcrab-agent/src/lib.rs">crates/sandcrab-agent/src/lib.rs</a>) whose tools are exactly Sandcrab's tools. It exists to exercise the SDK the way a real agent does.</p>
+      <ul>
+        <li><code>llm::anthropic</code>: Messages API client with SSE streaming, prompt caching and retries; default model <code>claude-sonnet-5-5</code> (<code>--model</code> / <code>CRABAGENT_MODEL</code>).</li>
+        <li><code>agent</code>: the tool-use loop, running parallel tool calls through <code>Sandbox::tool_dispatch</code>.</li>
+        <li><code>session</code>: workspace resolution (<code>-w</code>, <code>--mount</code>, <code>--mount-host</code>), sandbox lifecycle, REPL or one-shot <code>-p</code> (with <code>--keep-alive SECS</code> to hold published ports after the task); template default <code>ts-dev</code>. With a managed workspace at the cwd, npm / pip / Playwright caches go to <code>&lt;cwd&gt;/.cache</code> so installs survive sessions.</li>
+        <li><code>media</code>: images returned by <code>download</code> (or a binary <code>file_read</code>) reach the model as <code>image</code> blocks, never as base64 text; other binaries are summarised.</li>
+        <li><code>llm::fake</code>: a scripted LLM, so the loop is tested on the fake backend and real Docker without an API key.</li>
+      </ul></div>
+    <div class="card"><h4><span class="glyph sm"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="glyph-svg" aria-hidden="true" focusable="false">
+<path d="M23 28V12A16 16 0 0 1 36.9 20Z" fill="#FF6B4A" stroke="none"/><circle cx="23" cy="28" r="16"/><path d="M23 28 36 20.5"/><circle cx="23" cy="28" r="2" fill="currentColor"/><path d="M51 58V46M51 46l-6 -7M51 46l6 -7M45 39l-3 -5M45 39l2 -6M57 39l-2 -6M57 39l3 -5" stroke-width="2"/><path d="M44 50l14 0" stroke="#FF6B4A" stroke-width="3"/><path d="M4 56q4-3 8 0t8 0 8 0" opacity=".55" stroke-width="2"/>
+</svg></span><code>sandcrab-bench</code></h4>
+      <p style="font-size:14.5px;color:var(--ink-2)">Backend-generic runner for <a class="ref" href="../../docs/plans/phase-1-mvp.bench-spec.md">docs/plans/phase-1-mvp.bench-spec.md</a>, documented in <a class="ref" href="../../docs/bench/README.md">docs/bench/README.md</a>.</p>
+      <ul>
+        <li>Scenarios: <code>lifecycle</code>, <code>calls</code>, <code>agent-turn</code>, <code>resources</code>, <code>density</code>, <code>drift</code>.</li>
+        <li>Seeded RNG and fixtures, ABAB scheduling, percentile and bootstrap stats, cgroup / <code>/proc</code> sampling, host declaration.</li>
+        <li>Schema-versioned JSON results; the JSON Schema is committed at <code>docs/bench/results/schema.json</code>.</li>
+        <li>V1 measures Docker only. Firecracker is wired in but is recorded as <code>unavailable</code> on hosts without <code>/dev/kvm</code>, never substituted.</li>
+      </ul></div>
+  </div>
+</section>
+
+<!-- ============================================================ 9 -->
+<section class="chap" id="start">
+  <div class="chap-head"><span class="glyph lg"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="glyph-svg" aria-hidden="true" focusable="false">
+<path d="M4 28h56M4 50h56"/><path d="M5 28a7 7 0 0 1 14 0z"/><path d="M8.5 28l1-4M12 28v-5.5M15.5 28l-1-4" stroke-width="1.6"/><path d="M25 28a7 7 0 0 1 14 0z"/><path d="M28.5 28l1-4M32 28v-5.5M35.5 28l-1-4" stroke-width="1.6"/><path d="M45 28a7 7 0 0 1 14 0z"/><path d="M48.5 28l1-4M52 28v-5.5M55.5 28l-1-4" stroke-width="1.6"/><path d="M5 50a7 7 0 0 1 14 0z"/><path d="M8.5 50l1-4M12 50v-5.5M15.5 50l-1-4" stroke-width="1.6"/><path d="M25 50a7 7 0 0 1 14 0z" fill="#FF6B4A"/><path d="M28.5 50l1-4M32 50v-5.5M35.5 50l-1-4" stroke-width="1.6"/><path d="M45 50a7 7 0 0 1 14 0z"/><path d="M48.5 50l1-4M52 50v-5.5M55.5 50l-1-4" stroke-width="1.6"/><path d="M8 12h48" stroke-width="2" opacity=".55"/><path d="M12 12v4M32 12v4M52 12v4" stroke-width="2" opacity=".55"/>
+</svg></span><div><span class="num">09</span><h2>Where to start</h2></div></div>
+  <h3>Build, test, lint</h3>
+  <figure class="code"><figcaption><span>shell</span><span>from the repo root</span></figcaption>
+<pre><span class="c"># unit tests: protocol, core (fake backend), guest tools</span>
+cargo test --workspace
+<span class="c"># Docker end-to-end suites (need a Docker daemon, built templates and a static crabd)</span>
+cargo test --workspace -- --ignored
+<span class="c"># must pass before committing</span>
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+
+<span class="c"># static musl crabd for injection (prints path + SHA-256)</span>
+scripts/build-crabd.sh            <span class="c"># or: scripts/build-crabd.sh aarch64</span>
+<span class="c"># build all four templates and pin their image IDs on this host</span>
+templates/build.sh
+<span class="c"># check the host: crabd, Docker, template pins, Firecracker prerequisites</span>
+sandcrab doctor
+<span class="c"># one command in a throwaway sandbox (the backend is always chosen explicitly)</span>
+sandcrab --backend docker run -t python-dev -- 'python3 --version'</pre></figure>
+
+  <h3>Reading order</h3>
+  <ol class="tight">
+    <li><a class="ref" href="../../crates/sandcrab-protocol/src/framing.rs">sandcrab-protocol/src/framing.rs</a> and <a class="ref" href="../../crates/sandcrab-protocol/src/rpc.rs">rpc.rs</a>: the wire, in about 600 lines.</li>
+    <li><a class="ref" href="../../crates/sandcrab-guest/src/tools/exec.rs">sandcrab-guest/src/tools/exec.rs</a>: the module doc is the <code>bash</code> contract.</li>
+    <li><a class="ref" href="../../crates/sandcrab-core/src/backend.rs">sandcrab-core/src/backend.rs</a> then <a class="ref" href="../../crates/sandcrab-core/src/manager.rs">manager.rs</a>: the trait and the lifecycle.</li>
+    <li><a class="ref" href="../../crates/sandcrab-core/src/registry.rs">registry.rs</a> (module doc) and <a class="ref" href="../../crates/sandcrab-core/src/fsx.rs">fsx.rs</a>: the security-critical host side.</li>
+    <li><a class="ref" href="../../crates/sandcrab-core/src/testing.rs">sandcrab-core/src/testing.rs</a>: <code>FakeBackend</code> and the mock crabd (feature <code>test-util</code>), the fastest way to test lifecycle changes.</li>
+    <li>The e2e suites in <a class="ref" href="../../crates/sandcrab-sdk/tests/">crates/sandcrab-sdk/tests/</a>: harness, lifecycle, security, tools, workspace.</li>
+  </ol>
+
+  <h3>Firecracker status</h3>
+  <div class="callout warn"><span class="glyph"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="glyph-svg" aria-hidden="true" focusable="false">
+<rect x="18" y="6" width="28" height="7" rx="2" fill="#1F7A8C"/><path d="M20 13v3c-4 2-6 5-6 9v27a5 5 0 0 0 5 5h26a5 5 0 0 0 5-5V25c0-4-2-7-6-9v-3"/><path d="M19.5 28v14" opacity=".45"/><g transform="translate(33 44) scale(0.62)" stroke-width="3.23">
+<path d="M-9 4l-5 5M-5 6l-3 6M9 4l5 5M5 6l3 6"/>
+<path d="M-9 -1l-5 -5M9 -1l5 -5"/>
+<circle cx="-16" cy="-8" r="4.2" fill="#FF6B4A"/><circle cx="16" cy="-8" r="4.2" fill="#FF6B4A"/>
+<path d="M-4 -7l-1 -4M4 -7l1 -4"/>
+<path d="M-12 3a12 10 0 0 1 24 0q0 4 -12 4t-12 -4z" fill="#FF6B4A"/>
+<circle cx="-5" cy="-12" r="1.9" fill="currentColor" stroke="none"/><circle cx="5" cy="-12" r="1.9" fill="currentColor" stroke="none"/>
+</g>
+</svg></span><p><strong>KVM end-to-end tests pass.</strong> The backend, rootfs pipeline, vsock transport, workspace drives, tap pool, published ports and CLI wiring are covered by a fake-VMM suite (<a class="ref" href="../../crates/sandcrab-backend-firecracker/tests/fake_vmm.rs">crates/sandcrab-backend-firecracker/tests/fake_vmm.rs</a>) and by the real-KVM tests (<a class="ref" href="../../crates/sandcrab-backend-firecracker/tests/firecracker_kvm.rs">firecracker_kvm.rs</a>, ignored by default), which pass on a bare-metal KVM host (kvm-dedicated). It still reports <code>multi_tenant_safe = false</code> until <code>jailer</code> confinement lands.</p></div>
+
+  <h3>Rules of the road</h3>
+  <ul class="tight">
+    <li>Every new backend reports honest <code>BackendCapabilities</code> and refuses what it cannot enforce.</li>
+    <li>New tools go in <code>crabd</code>, native Rust (no shelling out to <code>sed</code>/<code>grep</code>/<code>find</code>), with params/results in <code>sandcrab-protocol</code> so the schema reaches LLMs and MCP.</li>
+    <li>Host-side code that touches a workspace goes through <code>fsx</code>; never <code>canonicalize</code> and re-walk.</li>
+    <li>Conventional Commits with crate scope, atomic commits, no <code>.sandcrab/</code> state committed.</li>
+  </ul>
+</section>
+  <p class="see-also">See also <a href="symbology.html">crab symbology</a> · <a href="3d/index.html">3D kit</a> · <a href="../ROADMAP.md">roadmap</a></p>
+  </article>
+</div>
+</main>
+
+<!-- SITE-FOOTER:BEGIN note="Sandcrab V1 walkthrough, generated from branch feat/phase-1 · Apache-2.0" -->
+<footer class="site-foot">
+  <div class="site-foot-in">
+    <svg class="site-logo" viewBox="-21 -17 42 31" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M-9 4l-5 5M-5 6l-3 6M9 4l5 5M5 6l3 6"/><path d="M-9 -1l-5 -5M9 -1l5 -5"/><circle cx="-16" cy="-8" r="4.2" fill="currentColor"/><circle cx="16" cy="-8" r="4.2" fill="currentColor"/><path d="M-4 -7l-1 -4M4 -7l1 -4"/><path d="M-12 3a12 10 0 0 1 24 0q0 4 -12 4t-12 -4z" fill="currentColor"/><g stroke="none"><circle cx="-5" cy="-12" r="2.8" fill="currentColor"/><circle cx="5" cy="-12" r="2.8" fill="currentColor"/><circle class="eye" cx="-5" cy="-12" r="1.15"/><circle class="eye" cx="5" cy="-12" r="1.15"/></g></svg>
+    <nav aria-label="Footer"><a href="landing/index.html">Home</a><a href="walkthrough.html">Walkthrough</a><a href="bench-report.html">Benchmarks</a><a href="symbology.html">Symbology</a><a href="presentation.html">Presentation</a><a href="https://github.com/polvera-org/sandcrab/tree/main/docs" target="_blank" rel="noopener">Docs<span class="sr-only"> (opens in a new tab)</span></a><a href="https://github.com/polvera-org/sandcrab" target="_blank" rel="noopener">GitHub<span class="sr-only"> (opens in a new tab)</span></a></nav>
+    <p>Sandcrab V1 walkthrough, generated from branch feat/phase-1 · Apache-2.0</p>
+  </div>
+</footer>
+<!-- SITE-FOOTER:END -->
+
+<script>
+(function(){
+  // scroll-spy for the sticky TOC
+  var links = Array.prototype.slice.call(document.querySelectorAll('.toc a'));
+  var map = {}; links.forEach(function(a){ map[a.getAttribute('href').slice(1)] = a; });
+  if ('IntersectionObserver' in window) {
+    var io = new IntersectionObserver(function(es){
+      es.forEach(function(e){ if (e.isIntersecting) { links.forEach(function(a){ a.classList.remove('active'); }); var a = map[e.target.id]; if (a) a.classList.add('active'); } });
+    }, { rootMargin: '-20% 0px -70% 0px' });
+    document.querySelectorAll('section.chap').forEach(function(s){ io.observe(s); });
+  }
+  // close the mobile TOC after a pick
+  var mt = document.querySelector('.toc-mobile');
+  if (mt) mt.addEventListener('click', function(e){ if (e.target.tagName === 'A') mt.open = false; });
+})();
+</script>
+<script type="module">
+// Optional live 3D hero from the shared kit. Any failure (file:// module CORS, no WebGL,
+// reduced motion handled by the kit) leaves the static illustration in place.
+const el = document.getElementById('hero-stage');
+const img = document.getElementById('hero-fallback');
+try {
+  const { mount } = await import('./3d/src/index.js');
+  const holder = document.createElement('div');
+  holder.style.cssText = 'position:absolute;inset:0';
+  el.insertBefore(holder, img);
+  const stage = mount(holder, 'wire', { fallbackBase: 'assets/crab/' });
+  if (stage && stage.webgl) { img.style.visibility = 'hidden'; }
+  else { holder.remove(); }
+} catch (e) { /* keep the static image */ }
+</script>
+</body>
+</html>

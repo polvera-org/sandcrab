@@ -1,0 +1,30 @@
+[package]
+name = "sandcrab-rootfs"
+description = "OCI image → ext4 rootfs pipeline for Sandcrab microVM backends (export, crabd injection, rootless mke2fs, content-addressed cache)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "sandcrab-rootfs"
+path = "src/bin/sandcrab-rootfs.rs"
+
+[dependencies]
+chrono.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tar.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+uuid = { workspace = true, features = ["v5"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

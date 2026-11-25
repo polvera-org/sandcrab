@@ -1,8 +1,11 @@
 [template]
 name = "ts-dev"
 version = "0.1.0"
-description = "Node.js 26 Active LTS + pnpm + bun + TypeScript + vitest + biome sandbox for JS/TS agents"
+description = "Node.js 26 Active LTS + pnpm + bun + TypeScript + vitest + biome (+ python3) sandbox for JS/TS agents; no browser (use render)"
 image = "sandcrab/ts-dev:0.1.0"
+# The built image ID is pinned per host, not here (local image IDs do not reproduce
+# across hosts): `templates/build.sh ts-dev` records it under ~/.sandcrab/template-pins.
+# The Dockerfile FROM base images are digest-pinned.
 
 [resources]
 vcpu = 2
@@ -13,7 +16,7 @@ disk_mb = 4096
 workdir = "/workspace"
 
 [network]
-default_policy = "egress_restricted"
+default_policy = "disabled"
 
 [tools]
 tiers = ["core", "process"]

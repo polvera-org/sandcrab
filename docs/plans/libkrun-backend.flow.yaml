@@ -1,0 +1,344 @@
+# ministack execution flow — libkrun backend. Source of truth; design in docs/design/libkrun-backend.md (§16).
+# Parallelism is the ABSENCE of a dependency edge.
+# Validate with: node scripts/validate-flow.mjs docs/plans/libkrun-backend.flow.yaml
+
+slug: libkrun-backend
+name: libkrun backend (macOS + Linux microVMs)
+summary: >-
+  Hardware-isolated microVM backend on libkrun for Apple Silicon macOS (Hypervisor.framework) and Linux KVM.
+  One signed sandcrab-krun helper per sandbox, crabd over vsock→UDS, ext4 rootfs from the shared pipeline,
+  virtio-fs workspaces, TSI off by default. Spike: ~125 ms boot, crabd hello ~105 ms on an M2.
+phases: [plan, implement, verify, document]
+
+steps:
+  - id: lk-design
+    phase: plan
+    agent: turing
+    title: libkrun backend design + macOS feasibility spike
+    depends_on: []
+    artifacts: [docs/design/libkrun-backend.md]
+    status: done
+
+  - id: lk-approve
+    phase: plan
+    agent: nova
+    title: "Human approval of design + answers (2026-11-24: TSI opt-in, brew default + from-source, Docker at build, ad-hoc now / Developer ID later, libkrun in CLI defaults)"
+    depends_on: [lk-design]
+    status: done
+
+  # ---- frontier 1 (parallel)
+  - id: rootfs-crate
+    phase: implement
+    agent: ada
+    title: Extract OCI→ext4 pipeline into crates/sandcrab-rootfs (lib + sandcrab-rootfs bin), add --arch/--platform, arch in cache key; FC re-exports; build-crabd.sh uses rust-lld on Darwin
+    depends_on: [lk-approve]
+    artifacts: [crates/sandcrab-rootfs/, crates/sandcrab-backend-firecracker/src/rootfs/, crates/sandcrab-backend-firecracker/src/lib.rs, crates/sandcrab-backend-firecracker/Cargo.toml, Cargo.toml, scripts/build-crabd.sh, scripts/build-rootfs.sh]
+    status: done
+
+  - id: protocol-mounts
+    phase: implement
+    agent: ada
+    title: "protocol::init GuestMount → MountSource {Block (serde default), VirtioFs{tag}}; core TemplateManifest sha256_by_arch; update FC control.rs call sites"
+    depends_on: [lk-approve]
+    artifacts: [crates/sandcrab-protocol/src/init.rs, crates/sandcrab-core/src/template.rs, crates/sandcrab-backend-firecracker/src/control.rs]
+    status: done
+
+  # ---- frontier 2
+  - id: lk-scaffold
+    phase: implement
+    agent: ada
+    title: New crate sandcrab-backend-libkrun (Cargo, lib.rs, config.rs, helper_proto.rs HelperConfig + validation, entitlements.plist), scripts/sign-krun-helper.sh
+    depends_on: [rootfs-crate]
+    artifacts: [crates/sandcrab-backend-libkrun/Cargo.toml, crates/sandcrab-backend-libkrun/src/lib.rs, crates/sandcrab-backend-libkrun/src/config.rs, crates/sandcrab-backend-libkrun/src/helper_proto.rs, crates/sandcrab-backend-libkrun/entitlements.plist, scripts/sign-krun-helper.sh, Cargo.toml]
+    status: done
+
+  - id: guest-virtiofs
+    phase: implement
+    agent: ada
+    title: "crabd init: EBUSY-tolerant early mounts under init.krun, virtio-fs mount planning (MS_RDONLY for ro), unit tests"
+    depends_on: [protocol-mounts]
+    artifacts: [crates/sandcrab-guest/src/init/]
+    status: done
+
+  - id: templates-arm64
+    phase: implement
+    agent: ada
+    title: "Templates buildable for linux/arm64: index digests / per-arch shas in Dockerfiles, build.sh --platform, sha256_by_arch pins"
+    depends_on: [protocol-mounts]
+    artifacts: [templates/]
+    status: done
+
+  - id: template-pins-local
+    phase: implement
+    agent: ada
+    title: "Host-local template pins (option B): record image IDs per host in ~/.sandcrab at build time, verify against them; repo manifests keep base digests only; label as local integrity (reproducible pins = later option A)"
+    depends_on: [templates-arm64]
+    artifacts: [templates/, crates/sandcrab-core/src/template.rs, crates/sandcrab-cli/]
+    status: done
+
+  # ---- frontier 3 (parallel, disjoint files in the new crate)
+  - id: lk-helper
+    phase: implement
+    agent: ada
+    title: "ffi.rs (libloading table, sha-before-dlopen, safe Ctx) + bin/sandcrab-krun (config→verify→configure→lifeline→start_enter, exit codes 70-79); test /dev/fd/N for virtio-fs"
+    depends_on: [lk-scaffold]
+    artifacts: [crates/sandcrab-backend-libkrun/src/ffi.rs, crates/sandcrab-backend-libkrun/src/bin/sandcrab-krun.rs]
+    status: done
+
+  - id: lk-artifacts
+    phase: implement
+    agent: ada
+    title: "artifacts.rs pins + scripts/fetch-libkrun.sh offering Homebrew bottles (default when brew present) and --from-source pinned tags (only option without brew; Linux path); `sandcrab libkrun install` support fn"
+    depends_on: [lk-scaffold]
+    artifacts: [crates/sandcrab-backend-libkrun/src/artifacts.rs, scripts/fetch-libkrun.sh]
+    status: done
+
+  - id: lk-backend
+    phase: implement
+    agent: ada
+    title: "RuntimeBackend: vm.rs (run dir, helper spawn, lifeline, readiness, timings, crash watch), control.rs, workspace.rs, net.rs (disabled + TSI opt-in), reap.rs, cgroup.rs (Linux), capabilities"
+    depends_on: [lk-scaffold, protocol-mounts]
+    artifacts: [crates/sandcrab-backend-libkrun/src/backend.rs, crates/sandcrab-backend-libkrun/src/vm.rs, crates/sandcrab-backend-libkrun/src/control.rs, crates/sandcrab-backend-libkrun/src/workspace.rs, crates/sandcrab-backend-libkrun/src/net.rs, crates/sandcrab-backend-libkrun/src/reap.rs, crates/sandcrab-backend-libkrun/src/cgroup.rs]
+    status: done
+
+  - id: vsock-tunnel
+    phase: implement
+    agent: ada
+    title: "tunnel.open in protocol + crabd serve + core port forwarder (127.0.0.1); shared by FC and libkrun"
+    depends_on: [guest-virtiofs]
+    artifacts: [crates/sandcrab-protocol/src/, crates/sandcrab-guest/src/server.rs, crates/sandcrab-core/src/client.rs]
+    status: done
+
+  # ---- frontier 4
+  - id: lk-fake-tests
+    phase: implement
+    agent: ada
+    title: Fake sandcrab-krun integration tests (spawn/ready/destroy, crash, escalation, lifeline, reaper, leases)
+    depends_on: [lk-backend, lk-helper]
+    artifacts: [crates/sandcrab-backend-libkrun/tests/fake_helper.rs]
+    status: done
+
+  - id: lk-ports
+    phase: implement
+    agent: ada
+    title: ports.rs (127.0.0.1 listeners → tunnel.open) for libkrun; wire FC published ports on the same primitive
+    depends_on: [lk-backend, vsock-tunnel]
+    artifacts: [crates/sandcrab-backend-libkrun/src/ports.rs, crates/sandcrab-backend-firecracker/src/backend.rs]
+    status: done
+
+  - id: lk-wire
+    phase: implement
+    agent: ada
+    title: "SDK feature libkrun + .libkrun(), CLI --backend libkrun (in CLI default features on macOS aarch64 + Linux) / --libkrun-tsi / `libkrun install`, doctor checks (hv_support, entitlement, pins, /dev/kvm, APFS case), bench BackendId::Libkrun + macOS RSS sampler"
+    depends_on: [lk-backend, lk-artifacts]
+    artifacts: [crates/sandcrab-sdk/, crates/sandcrab-cli/, crates/sandcrab-bench/src/backend.rs, crates/sandcrab-bench/src/sample.rs, crates/sandcrab-bench/Cargo.toml]
+    status: done
+
+  # ---- frontier 5 (real hardware)
+  - id: guest-hardening
+    phase: implement
+    agent: ada
+    title: "crabd: set no_new_privs for sandbox processes; fix PID-1 zombie reaping (SIGCHLD reaper not firing) — found by SDK e2e on Firecracker"
+    depends_on: [fc-e2e-kvm]
+    artifacts: [crates/sandcrab-guest/]
+    status: done
+
+  - id: lk-e2e-macos
+    phase: implement
+    agent: ada
+    title: tests/libkrun_vm.rs (#[ignore]) on the Mac — shared e2e matrix + loopback/listener/ro-remount regressions; fix gaps
+    depends_on: [lk-wire, lk-fake-tests, guest-virtiofs, templates-arm64, lk-ports, template-pins-local, guest-hardening]
+    artifacts: [crates/sandcrab-backend-libkrun/tests/libkrun_vm.rs]
+    status: done
+
+  - id: lk-e2e-linux
+    phase: implement
+    agent: ada
+    title: Same suite on kvm-dedicated (x86_64 KVM); verify virtio-fs ownership as unprivileged user, cgroup leaf; fix gaps
+    depends_on: [lk-e2e-macos]
+    status: done
+
+  # ---- benchmarks: microVMs vs Docker on bare metal (kvm-dedicated) + the Mac backends
+  - id: kvm-net
+    phase: implement
+    agent: ada
+    title: "kvm-dedicated: run scripts/fc-net-setup.sh --user ubuntu --persist (taps for unrestricted networking), re-pin base template"
+    depends_on: [lk-approve]
+    artifacts: []
+    status: done
+    notes: Needs the human's OK (system change on kvm-dedicated). Host was set up 2026-11-24; FC KVM smoke 3/4 green, the 4th needs these taps.
+
+  - id: fc-e2e-kvm
+    phase: implement
+    agent: ada
+    title: Full Firecracker e2e suite on kvm-dedicated (carries over phase-1 fc-e2e); fix backend gaps; fix the flaky net tap-lock test
+    depends_on: [kvm-net]
+    artifacts: [crates/sandcrab-backend-firecracker/, crates/sandcrab-sdk/tests/]
+    status: done
+
+  - id: bench-kvm-fc
+    phase: implement
+    agent: ada
+    title: "Bench on kvm-dedicated (bare metal): --backends docker,firecracker, full matrix; sanitize host fields; record disk type (HDD RAID1) in results"
+    depends_on: [fc-e2e-kvm]
+    artifacts: [docs/bench/results/]
+    status: done
+
+  - id: lk-bench-mac
+    phase: implement
+    agent: ada
+    title: "Bench on the Mac (M2, macOS): --backends docker,libkrun (Docker Desktop vs libkrun microVMs)"
+    depends_on: [lk-e2e-macos]
+    artifacts: [docs/bench/results/]
+    status: done
+
+  - id: lk-bench-kvm
+    phase: implement
+    agent: ada
+    title: "Bench on kvm-dedicated, STANDARD tier (--resource-runs 10), --backends libkrun only; reuse the full docker,firecracker run from bench-kvm-fc"
+    depends_on: [lk-e2e-linux, bench-kvm-fc, bench-fixes, lk-w2-emfile]
+    artifacts: [docs/bench/results/]
+    status: done
+
+  - id: bench-report
+    phase: implement
+    agent: ada
+    title: "Regenerate bench report: per-host sections (dev-vps Docker, kvm-dedicated Docker vs Firecracker vs libkrun, Mac Docker vs libkrun), host/disk/arch labels, microVM vs Docker comparison; update landing/presentation numbers if they change"
+    depends_on: [bench-kvm-fc, lk-bench-mac, lk-bench-kvm]
+    artifacts: [docs/site/bench-report.html, scripts/bench-report-data.py, docs/bench/README.md]
+    status: done
+
+  - id: lk-net-userspace
+    phase: implement
+    agent: ada
+    title: "Phase B: unrestricted via passt (--no-map-gw, Linux) / gvproxy (macOS) with host-loopback-unreachable regression; deprecate TSI flag"
+    depends_on: [lk-e2e-linux]
+    artifacts: [crates/sandcrab-backend-libkrun/src/net.rs]
+    status: done
+
+  # ---- verify / document
+  # ---- follow-ups for issues found during e2e/bench (not in the original plan)
+  - id: bench-fixes
+    phase: implement
+    agent: ada
+    title: "Bench: Firecracker memory/CPU probes (currently 'not measured'), fix the wrong 'firecracker has no VMM' message"
+    depends_on: [bench-kvm-fc]
+    artifacts: [crates/sandcrab-bench/]
+    status: done
+
+  - id: fc-net-egress
+    phase: implement
+    agent: ada
+    title: "fc-net-setup.sh: block outbound SMTP (25/465/587) and the remaining reserved ranges (0/8, 192.0.0/24, 198.18/15, multicast); survive Docker restarts; re-apply on kvm-dedicated"
+    depends_on: [kvm-net]
+    artifacts: [scripts/fc-net-setup.sh, docs/hosting.md]
+    status: done
+
+  - id: guest-hardening-2
+    phase: implement
+    agent: ada
+    title: "crabd parity with Docker hardening in microVMs: drop the capability bounding set, pids limit, /tmp as size-limited nosuid,nodev,noexec tmpfs; seccomp evaluated (design note, may defer)"
+    depends_on: [guest-hardening]
+    artifacts: [crates/sandcrab-guest/]
+    status: done
+
+  - id: small-fixes
+    phase: implement
+    agent: ada
+    title: "Host-wide tap-pool lock dir (two Sandcrab processes with different run dirs can grab the same tap); build-crabd.sh honours CARGO_TARGET_DIR; unused-mut warning in sdk tests (firecracker-only build)"
+    depends_on: [fc-net-egress]
+    artifacts: [crates/sandcrab-backend-firecracker/src/net.rs, scripts/build-crabd.sh, crates/sandcrab-sdk/tests/common/mod.rs]
+    status: done
+
+  - id: lk-w2-emfile
+    phase: implement
+    agent: ada
+    title: "libkrun W2 (two workspaces) fails with EMFILE in the guest on Linux (found by bench smoke); root-cause + fix + regression test; also explain Firecracker idle CPU ~30x libkrun"
+    depends_on: [bench-fixes, lk-e2e-linux]
+    artifacts: [crates/sandcrab-backend-libkrun/, crates/sandcrab-guest/]
+    status: done
+
+  - id: guest-hardening-3
+    phase: implement
+    agent: ada
+    title: "crabd: /sys read-only for the sandbox (Docker parity), hardening sysctls in init (unprivileged userns/bpf/userfaultfd/io_uring/perf off) per docs/design/guest-seccomp.md"
+    depends_on: [guest-hardening-2, lk-w2-emfile, docker-tcp-macos]
+    artifacts: [crates/sandcrab-guest/]
+    status: done
+
+  - id: docker-tcp-macos
+    phase: implement
+    agent: ada
+    title: "Docker on macOS: loopback TCP transport (127.0.0.1 ephemeral published port) with per-sandbox token auth in hello; Unix socket stays default on Linux"
+    depends_on: [lk-w2-emfile]
+    artifacts: [crates/sandcrab-backend-docker/, crates/sandcrab-guest/, crates/sandcrab-protocol/]
+    status: done
+
+  - id: lk-review
+    phase: verify
+    agent: nebula
+    title: "QA + security review (helper unsafe island, TSI exposure, virtio-fs traversal/identity race, capability honesty, lifeline); decide: per-spawn root-disk hash, Linux lib-hash cost (~187 ms w/o SHA-NI)"
+    depends_on: [bench-report, fc-net-egress, guest-hardening-2, small-fixes, guest-hardening-3, docker-tcp-macos]
+    status: done
+
+  - id: crabagent-backends
+    phase: implement
+    agent: ada
+    title: "crabagent: --backend libkrun (macOS + Linux) and firecracker (Linux) via SDK features; needed by lk-live (crabagent was docker-only)"
+    depends_on: [bench-report]
+    artifacts: [crates/sandcrab-agent/]
+    status: done
+
+  - id: lk-live
+    phase: verify
+    agent: nova
+    title: Live crabagent session on --backend libkrun (Mac) with a host-dir workspace
+    depends_on: [bench-report, crabagent-backends]
+    status: done
+
+  - id: review-fixes
+    phase: implement
+    agent: ada
+    title: "lk-review fixes: R1 relay off the default bridge, R2 pre-auth slot DoS, R3 tiny-fragment SMTP bypass, R6 fail-closed hardening, R7 swap cap, R12, R14, R16, R19 bench hostname leak; netstack first-run readiness; known items (pty test on macOS, SDK tests without docker, bench smaps matcher)"
+    depends_on: [lk-review]
+    artifacts: [crates/sandcrab-backend-docker/, crates/sandcrab-guest/, crates/sandcrab-bench/, crates/sandcrab-backend-libkrun/src/netstack.rs]
+    status: done
+
+  - id: lk-verified-fd
+    phase: implement
+    agent: ada
+    title: "Decisions (a)+(b): verified-fd loading (inode/size/mtime/ctime record, re-hash on mismatch) for root disk, libkrun/libkrunfw, netstack, helper; R4, R5, R8, R10 signing, R18 umask"
+    depends_on: [lk-review]
+    artifacts: [crates/sandcrab-backend-libkrun/src/ffi.rs, crates/sandcrab-backend-libkrun/src/artifacts.rs, crates/sandcrab-rootfs/, crates/sandcrab-cli/src/libkrun.rs, scripts/sign-krun-helper.sh]
+    status: done
+
+  - id: lk-rereview
+    phase: verify
+    agent: nebula
+    title: "Re-review review-fixes + lk-verified-fd; integrated gate on kvm-dedicated + Mac"
+    depends_on: [review-fixes, lk-verified-fd]
+    status: done
+
+  - id: integrity-fixes
+    phase: implement
+    agent: ada
+    title: "Re-review backlog top 3: R18 wire check_private_dir for state root/bin/artifacts, N2 bind stat stamps to digests, N3 clear quarantine via fd + at install + fix hints"
+    depends_on: [lk-rereview]
+    artifacts: [crates/sandcrab-backend-libkrun/, crates/sandcrab-rootfs/, crates/sandcrab-cli/src/libkrun.rs]
+    status: done
+
+  - id: lk-docs
+    phase: document
+    agent: rosetta
+    title: "hosting.md (macOS + Linux libkrun setup, install script brew/from-source, release signing: Developer ID + hardened runtime + notarization), cli.md, README backend table, ROADMAP, CHANGELOG"
+    depends_on: [lk-rereview, lk-live]
+    artifacts: [docs/hosting.md, docs/cli.md, README.md, docs/ROADMAP.md, CHANGELOG.md]
+    status: done
+
+  - id: readme-crab
+    phase: document
+    agent: ada
+    title: "README hero: replace the old crab photo with a transparent PNG render of the 3D crab kit, one simple static scene readable at a glance (user request)"
+    depends_on: [lk-docs]
+    artifacts: [README.md, docs/assets/]
+    status: done

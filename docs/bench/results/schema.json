@@ -1,0 +1,1094 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "RunResult",
+  "type": "object",
+  "required": [
+    "backends",
+    "cells",
+    "config",
+    "density",
+    "finished_at",
+    "git",
+    "harness",
+    "host",
+    "invalid_reasons",
+    "noise",
+    "notes",
+    "run_id",
+    "schema_version",
+    "seed",
+    "shared_overhead",
+    "started_at",
+    "templates",
+    "valid"
+  ],
+  "properties": {
+    "backends": {
+      "description": "Availability of every requested backend.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/BackendStatus"
+      }
+    },
+    "cells": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/Cell"
+      }
+    },
+    "config": {
+      "$ref": "#/definitions/RunConfig"
+    },
+    "density": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/DensityRun"
+      }
+    },
+    "drift_check": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/DriftCheck"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "finished_at": {
+      "type": "string"
+    },
+    "git": {
+      "$ref": "#/definitions/GitInfo"
+    },
+    "harness": {
+      "$ref": "#/definitions/HarnessOverhead"
+    },
+    "host": {
+      "$ref": "#/definitions/HostInfo"
+    },
+    "invalid_reasons": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "noise": {
+      "$ref": "#/definitions/Noise"
+    },
+    "notes": {
+      "description": "Deviations from the spec and other context for the report.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "schema_version": {
+      "type": "string"
+    },
+    "seed": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "shared_overhead": {
+      "description": "Shared, amortised daemon memory (dockerd / containerd), reported once per run.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "integer",
+        "format": "uint64",
+        "minimum": 0.0
+      }
+    },
+    "started_at": {
+      "description": "RFC 3339, UTC.",
+      "type": "string"
+    },
+    "templates": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/TemplateInfo"
+      }
+    },
+    "valid": {
+      "type": "boolean"
+    }
+  },
+  "definitions": {
+    "Availability": {
+      "type": "string",
+      "enum": [
+        "available",
+        "unavailable"
+      ]
+    },
+    "BackendStatus": {
+      "type": "object",
+      "required": [
+        "backend",
+        "status",
+        "todo"
+      ],
+      "properties": {
+        "backend": {
+          "type": "string"
+        },
+        "capabilities": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Capabilities"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/definitions/Availability"
+        },
+        "todo": {
+          "description": "Measuring this backend is still to do (e.g. needs a KVM host).",
+          "type": "boolean"
+        }
+      }
+    },
+    "Capabilities": {
+      "type": "object",
+      "required": [
+        "hardware_isolated",
+        "multi_tenant_safe",
+        "supports_host_dir_mounts",
+        "supports_snapshots"
+      ],
+      "properties": {
+        "hardware_isolated": {
+          "type": "boolean"
+        },
+        "multi_tenant_safe": {
+          "type": "boolean"
+        },
+        "supports_host_dir_mounts": {
+          "type": "boolean"
+        },
+        "supports_snapshots": {
+          "type": "boolean"
+        }
+      }
+    },
+    "Cell": {
+      "type": "object",
+      "required": [
+        "backend",
+        "cache",
+        "failures",
+        "metrics",
+        "n",
+        "phases",
+        "scenario",
+        "status",
+        "template",
+        "todo",
+        "unreliable",
+        "warmup",
+        "workspace"
+      ],
+      "properties": {
+        "backend": {
+          "type": "string"
+        },
+        "cache": {
+          "description": "`cold` | `warm` | `cold-uncached`.",
+          "type": "string"
+        },
+        "capabilities": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Capabilities"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "failures": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/Failure"
+          }
+        },
+        "metrics": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/definitions/Metric"
+          }
+        },
+        "n": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "phases": {
+          "description": "Backend-reported spawn/teardown marks, as offsets (ns) from the spawn request.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/definitions/Phase"
+          }
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scenario": {
+          "description": "`lifecycle` | `agent-turn` | `resources`.",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/CellStatus"
+        },
+        "template": {
+          "type": "string"
+        },
+        "todo": {
+          "type": "boolean"
+        },
+        "unreliable": {
+          "description": "Failure rate > 1%.",
+          "type": "boolean"
+        },
+        "warmup": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "workspace": {
+          "description": "`W0` | `W1` | `W2`.",
+          "type": "string"
+        }
+      }
+    },
+    "CellStatus": {
+      "type": "string",
+      "enum": [
+        "ok",
+        "unavailable",
+        "not_measured"
+      ]
+    },
+    "CrabdInfo": {
+      "type": "object",
+      "required": [
+        "path",
+        "sha256",
+        "version"
+      ],
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string"
+        },
+        "version": {
+          "description": "From the first `hello` of the run.",
+          "type": "string"
+        }
+      }
+    },
+    "DensityRun": {
+      "type": "object",
+      "required": [
+        "backend",
+        "budget_bytes",
+        "cap",
+        "max_n",
+        "rep",
+        "steps",
+        "stop_reason",
+        "template",
+        "variant"
+      ],
+      "properties": {
+        "backend": {
+          "type": "string"
+        },
+        "budget_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "cap": {
+          "description": "Safety cap on the sandbox count (`--density-cap`).",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "max_n": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "rep": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/DensityStep"
+          }
+        },
+        "stop_reason": {
+          "description": "`budget` | `failure` | `cap` | `floor` (host `MemAvailable` safety floor).",
+          "type": "string"
+        },
+        "template": {
+          "type": "string"
+        },
+        "variant": {
+          "description": "`idle` | `touched`.",
+          "type": "string"
+        }
+      }
+    },
+    "DensityStep": {
+      "type": "object",
+      "required": [
+        "host_mem_available",
+        "i",
+        "spawn_ready_ns"
+      ],
+      "properties": {
+        "cgroup_mem_total": {
+          "description": "Sum of the sandbox cgroups' `memory.current`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "host_mem_available": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "host_pss_total": {
+          "description": "Sum of per-sandbox PSS (None when `/proc/<pid>/smaps_rollup` is unreadable).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "i": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "spawn_ready_ns": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "DockerInfo": {
+      "type": "object",
+      "required": [
+        "cgroup",
+        "containerd",
+        "engine",
+        "runc",
+        "storage_driver"
+      ],
+      "properties": {
+        "cgroup": {
+          "type": "string"
+        },
+        "containerd": {
+          "type": "string"
+        },
+        "engine": {
+          "type": "string"
+        },
+        "runc": {
+          "type": "string"
+        },
+        "storage_driver": {
+          "type": "string"
+        }
+      }
+    },
+    "DriftCheck": {
+      "type": "object",
+      "required": [
+        "backend",
+        "drift_pct",
+        "end_p50_ns",
+        "flagged",
+        "n",
+        "start_p50_ns"
+      ],
+      "properties": {
+        "backend": {
+          "type": "string"
+        },
+        "drift_pct": {
+          "type": "number",
+          "format": "double"
+        },
+        "end_p50_ns": {
+          "type": "number",
+          "format": "double"
+        },
+        "flagged": {
+          "type": "boolean"
+        },
+        "n": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "start_p50_ns": {
+          "type": "number",
+          "format": "double"
+        }
+      }
+    },
+    "Failure": {
+      "type": "object",
+      "required": [
+        "error",
+        "iter",
+        "metric"
+      ],
+      "properties": {
+        "error": {
+          "type": "string"
+        },
+        "iter": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "metric": {
+          "type": "string"
+        }
+      }
+    },
+    "FirecrackerInfo": {
+      "type": "object",
+      "required": [
+        "guest_kernel",
+        "guest_kernel_sha256",
+        "jailer",
+        "version"
+      ],
+      "properties": {
+        "guest_kernel": {
+          "type": "string"
+        },
+        "guest_kernel_sha256": {
+          "type": "string"
+        },
+        "jailer": {
+          "type": "boolean"
+        },
+        "version": {
+          "type": "string"
+        }
+      }
+    },
+    "GitInfo": {
+      "type": "object",
+      "required": [
+        "branch",
+        "commit",
+        "dirty"
+      ],
+      "properties": {
+        "branch": {
+          "type": "string"
+        },
+        "commit": {
+          "type": "string"
+        },
+        "dirty": {
+          "type": "boolean"
+        }
+      }
+    },
+    "HarnessOverhead": {
+      "type": "object",
+      "required": [
+        "noop_overhead_ns"
+      ],
+      "properties": {
+        "noop_overhead_ns": {
+          "description": "Median cost of timing an empty future.",
+          "type": "number",
+          "format": "double"
+        },
+        "sampler_cpu_pct": {
+          "description": "CPU used by the 10 Hz cgroup sampler, % of one core. `None` (JSON `null`) where it cannot be measured: no cgroups and no per-thread CPU clock in procfs (macOS).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      }
+    },
+    "HostInfo": {
+      "type": "object",
+      "required": [
+        "cores",
+        "cpu_model",
+        "crabd",
+        "docker",
+        "firecracker",
+        "governor",
+        "hostname",
+        "kernel",
+        "kind",
+        "kind_overridden",
+        "ksm",
+        "kvm_available",
+        "mem_total_bytes",
+        "nested_virt",
+        "smt",
+        "sockets",
+        "storage",
+        "swap_bytes",
+        "thp",
+        "threads",
+        "turbo",
+        "virt"
+      ],
+      "properties": {
+        "cores": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "cpu_model": {
+          "type": "string"
+        },
+        "crabd": {
+          "$ref": "#/definitions/CrabdInfo"
+        },
+        "docker": {
+          "$ref": "#/definitions/DockerInfo"
+        },
+        "firecracker": {
+          "$ref": "#/definitions/FirecrackerInfo"
+        },
+        "governor": {
+          "type": "string"
+        },
+        "hostname": {
+          "type": "string"
+        },
+        "hypervisor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kernel": {
+          "type": "string"
+        },
+        "kind": {
+          "description": "`bare-metal`, `vm` (no nested virt exposed) or `vm-nested`.",
+          "type": "string"
+        },
+        "kind_overridden": {
+          "type": "boolean"
+        },
+        "ksm": {
+          "$ref": "#/definitions/Ksm"
+        },
+        "kvm_available": {
+          "description": "`/dev/kvm` usable by this process.",
+          "type": "boolean"
+        },
+        "mem_total_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "nested_virt": {
+          "description": "VT-x/AMD-V exposed to this kernel (needed for Firecracker inside a VM).",
+          "type": "boolean"
+        },
+        "smt": {
+          "type": "boolean"
+        },
+        "sockets": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "storage": {
+          "$ref": "#/definitions/Storage"
+        },
+        "swap_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "thp": {
+          "type": "string"
+        },
+        "threads": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "turbo": {
+          "description": "`on` | `off` | `unknown`.",
+          "type": "string"
+        },
+        "virt": {
+          "description": "`systemd-detect-virt` output (`none` on bare metal).",
+          "type": "string"
+        }
+      }
+    },
+    "Ksm": {
+      "type": "object",
+      "required": [
+        "pages_sharing",
+        "run"
+      ],
+      "properties": {
+        "pages_sharing": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "run": {
+          "type": "integer",
+          "format": "int64"
+        }
+      }
+    },
+    "Metric": {
+      "type": "object",
+      "required": [
+        "samples",
+        "unit"
+      ],
+      "properties": {
+        "not_measured": {
+          "description": "Set when the metric could not be measured on this backend/host.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "samples": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "stats": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Stats"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "unit": {
+          "$ref": "#/definitions/Unit"
+        }
+      }
+    },
+    "Noise": {
+      "type": "object",
+      "required": [
+        "declared",
+        "load_end",
+        "load_start",
+        "max_load",
+        "noisy",
+        "other_guests",
+        "swap_used_start",
+        "top_cpu",
+        "top_cpu_end"
+      ],
+      "properties": {
+        "declared": {
+          "type": "string"
+        },
+        "load_end": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        },
+        "load_start": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        },
+        "max_load": {
+          "type": "number",
+          "format": "double"
+        },
+        "noisy": {
+          "description": "The 1-minute load at start exceeded `max_load`.",
+          "type": "boolean"
+        },
+        "other_guests": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "swap_used_start": {
+          "description": "Swap in use at start (bytes).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "top_cpu": {
+          "description": "Top 10 processes by CPU at start.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "top_cpu_end": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "Phase": {
+      "type": "object",
+      "required": [
+        "samples"
+      ],
+      "properties": {
+        "samples": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "stats": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Stats"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "RunConfig": {
+      "type": "object",
+      "required": [
+        "allow_small_n",
+        "argv",
+        "backends",
+        "caches",
+        "call_warmups",
+        "calls_per_sandbox",
+        "density_budget",
+        "density_cap",
+        "density_reps",
+        "idle_window_s",
+        "network",
+        "quick",
+        "resource_runs",
+        "runs",
+        "scenarios",
+        "settle_s",
+        "templates",
+        "touch_mib",
+        "warmups",
+        "workspaces"
+      ],
+      "properties": {
+        "allow_small_n": {
+          "type": "boolean"
+        },
+        "argv": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "backends": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "caches": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "call_warmups": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "calls_per_sandbox": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "density_budget": {
+          "type": "string"
+        },
+        "density_cap": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "density_reps": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "idle_window_s": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "network": {
+          "type": "string"
+        },
+        "quick": {
+          "type": "boolean"
+        },
+        "resource_runs": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "runs": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "scenarios": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "settle_s": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "templates": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "touch_mib": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "warmups": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "workspaces": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "Stats": {
+      "type": "object",
+      "required": [
+        "max",
+        "mean",
+        "min",
+        "n",
+        "p50",
+        "p50_ci95",
+        "p95",
+        "p99",
+        "p99_indicative",
+        "stddev"
+      ],
+      "properties": {
+        "max": {
+          "type": "number",
+          "format": "double"
+        },
+        "mean": {
+          "type": "number",
+          "format": "double"
+        },
+        "min": {
+          "type": "number",
+          "format": "double"
+        },
+        "n": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "p50": {
+          "type": "number",
+          "format": "double"
+        },
+        "p50_ci95": {
+          "description": "Bootstrap 95% CI of the median.",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 2,
+          "minItems": 2
+        },
+        "p95": {
+          "type": "number",
+          "format": "double"
+        },
+        "p99": {
+          "type": "number",
+          "format": "double"
+        },
+        "p99_indicative": {
+          "description": "`true` when n < 100: p99 is indicative only.",
+          "type": "boolean"
+        },
+        "stddev": {
+          "description": "Sample standard deviation (n − 1); 0 for a single sample.",
+          "type": "number",
+          "format": "double"
+        }
+      }
+    },
+    "Storage": {
+      "type": "object",
+      "required": [
+        "device",
+        "fs",
+        "probed_path",
+        "reflink",
+        "type"
+      ],
+      "properties": {
+        "device": {
+          "type": "string"
+        },
+        "fs": {
+          "type": "string"
+        },
+        "probed_path": {
+          "description": "Directory the storage was probed for (Docker root dir).",
+          "type": "string"
+        },
+        "reflink": {
+          "type": "boolean"
+        },
+        "type": {
+          "description": "`nvme` | `ssd` | `hdd` | `unknown`.",
+          "type": "string"
+        }
+      }
+    },
+    "TemplateInfo": {
+      "type": "object",
+      "required": [
+        "image",
+        "memory_mb",
+        "name",
+        "oci_digest",
+        "pinned_digest",
+        "rootfs_sha256",
+        "vcpu"
+      ],
+      "properties": {
+        "image": {
+          "type": "string"
+        },
+        "memory_mb": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "name": {
+          "type": "string"
+        },
+        "oci_digest": {
+          "description": "Image ID actually present on this host.",
+          "type": "string"
+        },
+        "pinned_digest": {
+          "description": "Pin in `sandcrab.toml` (empty if none).",
+          "type": "string"
+        },
+        "rootfs_sha256": {
+          "type": "string"
+        },
+        "vcpu": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    },
+    "Unit": {
+      "type": "string",
+      "enum": [
+        "ns",
+        "bytes",
+        "cpu_s"
+      ]
+    }
+  }
+}

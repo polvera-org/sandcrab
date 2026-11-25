@@ -1,0 +1,45 @@
+[package]
+name = "sandcrab-backend-firecracker"
+description = "Hardware-isolated Firecracker microVM RuntimeBackend for Sandcrab (VMM lifecycle, vsock transport, workspace drives, rootfs pipeline, pinned artifacts)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+
+[[bin]]
+name = "sandcrab-fc-fetch"
+path = "src/bin/sandcrab-fc-fetch.rs"
+
+[dependencies]
+sandcrab-core.workspace = true
+sandcrab-protocol.workspace = true
+sandcrab-rootfs.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+clap.workspace = true
+flate2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tar.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+rustix = { workspace = true, features = ["fs", "process"] }
+uuid = { workspace = true, features = ["v5"] }
+
+[dev-dependencies]
+sandcrab-core = { workspace = true, features = ["test-util"] }
+tempfile.workspace = true
+
+# Spawn → API → vsock → destroy against a fake `firecracker` (this test binary re-executes
+# itself as the fake VMM, so it needs its own `main`).
+[[test]]
+name = "fake_vmm"
+harness = false
+
+[lints]
+workspace = true

@@ -1,0 +1,909 @@
+[
+  {
+    "name": "bash",
+    "description": "Run a shell command with `bash -c` and wait for it to finish. Returns the exit code, stdout and stderr; long output is truncated keeping the head and tail. On timeout the command and all its children are killed. Each call starts a fresh shell, so `cd` and `export` do not persist: pass `cwd` and `env` instead. For servers, watchers or anything long-running, use `process_start`.",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "description": "Shell command to run with `bash -c`. Pipes, redirects, `&&` and multi-line scripts are allowed.",
+          "type": "string"
+        },
+        "cwd": {
+          "description": "Working directory for the command. Defaults to the sandbox working directory.",
+          "type": "string"
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Extra environment variables for this command only.",
+          "type": "object"
+        },
+        "timeout_ms": {
+          "description": "Kill the command and all its child processes after this many milliseconds. Defaults to 120000 (2 minutes).",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "properties": {
+        "duration_ms": {
+          "description": "Wall-clock run time in milliseconds.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "exit_code": {
+          "description": "Exit status, or `null` if the command was killed by a signal.",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "signal": {
+          "description": "Signal number that terminated the command, if any.",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "stderr": {
+          "description": "Captured stderr (head and tail kept when truncated).",
+          "type": "string"
+        },
+        "stdout": {
+          "description": "Captured stdout (head and tail kept when truncated).",
+          "type": "string"
+        },
+        "timed_out": {
+          "description": "True if the command hit its timeout and was killed.",
+          "type": "boolean"
+        },
+        "truncated": {
+          "description": "True if stdout or stderr was truncated.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "duration_ms",
+        "stderr",
+        "stdout",
+        "timed_out",
+        "truncated"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "file_read",
+    "description": "Read a text file. Returns lines prefixed with their 1-based line numbers. Use `offset` and `limit` to page through large files. Binary files are detected and not returned; use `download` for those.",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "limit": {
+          "description": "Maximum number of lines to return. Defaults to 2000.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "offset": {
+          "description": "1-based line number to start reading from. Defaults to 1.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "description": "Path of the file to read.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "properties": {
+        "content": {
+          "description": "Requested lines, each formatted as `{line_number:>6}\\t{line}` (like `cat -n`). Empty for binary files.",
+          "type": "string"
+        },
+        "end_line": {
+          "description": "1-based number of the last returned line (`start_line - 1` when nothing was returned).",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "is_binary": {
+          "description": "True if the file looks binary; `content` is then empty.",
+          "type": "boolean"
+        },
+        "start_line": {
+          "description": "1-based number of the first returned line.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "total_lines": {
+          "description": "Total number of lines in the file.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "truncated": {
+          "description": "True if the file has more lines after `end_line` or long lines were cut.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "content",
+        "end_line",
+        "is_binary",
+        "start_line",
+        "total_lines",
+        "truncated"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "file_write",
+    "description": "Create or overwrite a text file with the given content, creating parent directories as needed. Set `append` to add to the end instead. Prefer `file_edit` for changing part of an existing file.",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "append": {
+          "default": false,
+          "description": "Append `content` to the end of the file instead of replacing it.",
+          "type": "boolean"
+        },
+        "content": {
+          "description": "Full text content to write.",
+          "type": "string"
+        },
+        "path": {
+          "description": "Path of the file to write. Missing parent directories are created.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "content",
+        "path"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "properties": {
+        "bytes_written": {
+          "description": "Number of bytes written by this call.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "created": {
+          "description": "True if the file did not exist before.",
+          "type": "boolean"
+        },
+        "path": {
+          "description": "Absolute path written.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "bytes_written",
+        "created",
+        "path"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "file_edit",
+    "description": "Replace an exact string in a file. `old_string` must match the file exactly, including whitespace and indentation, and must be unique unless `replace_all` is set; otherwise the edit fails and the file is unchanged. Read the file first. Returns a unified diff of the change.",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "new_string": {
+          "description": "Replacement text. Must differ from `old_string`.",
+          "type": "string"
+        },
+        "old_string": {
+          "description": "Exact text to replace, including whitespace and indentation. Must occur exactly once unless `replace_all` is set.",
+          "type": "string"
+        },
+        "path": {
+          "description": "Path of the file to edit.",
+          "type": "string"
+        },
+        "replace_all": {
+          "default": false,
+          "description": "Replace every occurrence of `old_string` instead of requiring a unique match.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "new_string",
+        "old_string",
+        "path"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "properties": {
+        "diff": {
+          "description": "Compact unified diff of the change.",
+          "type": "string"
+        },
+        "replacements": {
+          "description": "Number of occurrences replaced.",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "diff",
+        "replacements"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "file_delete",
+    "description": "Delete a file, symlink or directory. Deleting a directory requires `recursive: true`.",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "description": "Path of the file, symlink or directory to delete.",
+          "type": "string"
+        },
+        "recursive": {
+          "default": false,
+          "description": "Required to delete a directory and everything inside it.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "properties": {
+        "kind": {
+          "description": "Kind of entry that was deleted.",
+          "enum": [
+            "file",
+            "dir",
+            "symlink",
+            "other"
+          ],
+          "type": "string"
+        },
+        "path": {
+          "description": "Absolute path deleted.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "path"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "file_move",
+    "description": "Move or rename a file or directory. Fails if the destination exists unless `overwrite` is set.",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "from": {
+          "description": "Existing path to move.",
+          "type": "string"
+        },
+        "overwrite": {
+          "default": false,
+          "description": "Replace the destination if it already exists.",
+          "type": "boolean"
+        },
+        "to": {
+          "description": "Destination path. Missing parent directories are created.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "from",
+        "to"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "properties": {
+        "from": {
+          "description": "Absolute source path.",
+          "type": "string"
+        },
+        "to": {
+          "description": "Absolute destination path.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "from",
+        "to"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "list_dir",
+    "description": "List a directory's entries with their kind, size and permission bits. Increase `depth` to recurse. Skips .gitignore'd entries by default.",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "depth": {
+          "description": "How many directory levels to descend. 1 lists only direct children. Defaults to 1.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "description": "Directory to list. Defaults to the sandbox working directory.",
+          "type": "string"
+        },
+        "respect_gitignore": {
+          "default": true,
+          "description": "Skip entries ignored by .gitignore and similar ignore files.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "output_schema": {
+      "properties": {
+        "entries": {
+          "description": "Entries in depth-first, name-sorted order.",
+          "items": {
+            "description": "One `list_dir` entry.",
+            "properties": {
+              "kind": {
+                "description": "Entry kind.",
+                "enum": [
+                  "file",
+                  "dir",
+                  "symlink",
+                  "other"
+                ],
+                "type": "string"
+              },
+              "mode": {
+                "description": "Unix permission bits, e.g. 420 for 0644.",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "path": {
+                "description": "Path relative to the listed directory.",
+                "type": "string"
+              },
+              "size": {
+                "description": "Size in bytes (0 for directories).",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "mode",
+              "path",
+              "size"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "truncated": {
+          "description": "True if the entry limit was hit.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "entries",
+        "truncated"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "glob",
+    "description": "Find files whose paths match a glob pattern such as `**/*.rs` or `src/**/test_*.py`. Returns paths relative to `root`. Skips .gitignore'd files by default.",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "pattern": {
+          "description": "Glob pattern matched against paths relative to `root`, e.g. `**/*.rs` or `src/**/test_*.py`.",
+          "type": "string"
+        },
+        "respect_gitignore": {
+          "default": true,
+          "description": "Skip files ignored by .gitignore and similar ignore files.",
+          "type": "boolean"
+        },
+        "root": {
+          "description": "Directory to search from. Defaults to the sandbox working directory.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "pattern"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "properties": {
+        "paths": {
+          "description": "Matching paths relative to the search root.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "truncated": {
+          "description": "True if the result limit was hit.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "paths",
+        "truncated"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "grep",
+    "description": "Search file contents for a regular expression (or a literal string with `literal: true`). Returns each matching line with its file path, line number and optional context lines. Skips .gitignore'd files; narrow the search with `root` and `glob`.",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "case_insensitive": {
+          "default": false,
+          "description": "Match case-insensitively.",
+          "type": "boolean"
+        },
+        "context_lines": {
+          "description": "Number of lines of context to include before and after each match. Defaults to 0.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "glob": {
+          "description": "Only search files whose path matches this glob, e.g. `*.ts` or `src/**/*.py`.",
+          "type": "string"
+        },
+        "literal": {
+          "default": false,
+          "description": "Treat `pattern` as a literal string instead of a regular expression.",
+          "type": "boolean"
+        },
+        "pattern": {
+          "description": "Regular expression (Rust regex syntax) to search for, or a plain string when `literal` is set.",
+          "type": "string"
+        },
+        "root": {
+          "description": "File or directory to search. Defaults to the sandbox working directory.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "pattern"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "properties": {
+        "matches": {
+          "description": "Matches grouped by file, in line order.",
+          "items": {
+            "description": "One `grep` match.",
+            "properties": {
+              "context_after": {
+                "default": [],
+                "description": "Lines immediately after the match.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "context_before": {
+                "default": [],
+                "description": "Lines immediately before the match.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "line": {
+                "description": "The matching line, without its trailing newline.",
+                "type": "string"
+              },
+              "line_number": {
+                "description": "1-based line number of the match.",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "path": {
+                "description": "File path relative to the search root.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "line",
+              "line_number",
+              "path"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "truncated": {
+          "description": "True if the match limit was hit.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "matches",
+        "truncated"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "process_start",
+    "description": "Start a long-running command in the background (dev server, file watcher, REPL) and return immediately with a `process_id`. Read its output with `process_poll`, send input with `process_stdin`, stop it with `process_kill`.",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "description": "Shell command to run in the background with `bash -c`.",
+          "type": "string"
+        },
+        "cwd": {
+          "description": "Working directory for the process. Defaults to the sandbox working directory.",
+          "type": "string"
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Extra environment variables for this process only.",
+          "type": "object"
+        },
+        "pty": {
+          "default": false,
+          "description": "Run attached to a pseudo-terminal. Use for interactive programs (REPLs, prompts) that need a TTY.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "properties": {
+        "pid": {
+          "description": "OS process ID inside the sandbox.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "process_id": {
+          "description": "Handle for `process_poll`, `process_stdin` and `process_kill`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "pid",
+        "process_id"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "process_poll",
+    "description": "Get a background process's status and the stdout/stderr it produced since the previous poll.",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "process_id": {
+          "description": "ID returned by `process_start`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "process_id"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "properties": {
+        "exit_code": {
+          "description": "Exit status once exited normally.",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "running": {
+          "description": "True while the process is still running.",
+          "type": "boolean"
+        },
+        "signal": {
+          "description": "Terminating signal number, if killed by a signal.",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "stderr": {
+          "description": "Stderr produced since the previous poll.",
+          "type": "string"
+        },
+        "stdout": {
+          "description": "Stdout produced since the previous poll (PTY output appears here).",
+          "type": "string"
+        },
+        "truncated": {
+          "description": "True if output was dropped because the buffer overflowed between polls.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "running",
+        "stderr",
+        "stdout",
+        "truncated"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "process_stdin",
+    "description": "Write text to a background process's stdin. End with a newline to submit a line.",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "description": "Text to write to the process's stdin. End with `\\n` to submit a line.",
+          "type": "string"
+        },
+        "process_id": {
+          "description": "ID returned by `process_start`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "data",
+        "process_id"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "properties": {
+        "bytes_written": {
+          "description": "Number of bytes written.",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "bytes_written"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "process_kill",
+    "description": "Stop a background process and all of its children.",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "process_id": {
+          "description": "ID returned by `process_start`.",
+          "type": "string"
+        },
+        "signal": {
+          "default": "TERM",
+          "description": "Signal sent to the whole process group: `TERM` (graceful, default), `INT` (like Ctrl-C) or `KILL` (immediate).",
+          "enum": [
+            "TERM",
+            "INT",
+            "KILL"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "process_id"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "properties": {
+        "was_running": {
+          "description": "False if the process had already exited.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "was_running"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "process_list",
+    "description": "List the background processes started with `process_start`, both running and exited.",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {},
+      "type": "object"
+    },
+    "output_schema": {
+      "properties": {
+        "processes": {
+          "description": "Managed processes, oldest first.",
+          "items": {
+            "description": "One managed process in `process_list`.",
+            "properties": {
+              "command": {
+                "description": "Command line as started.",
+                "type": "string"
+              },
+              "exit_code": {
+                "description": "Exit status once exited normally.",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "pid": {
+                "description": "OS process ID inside the sandbox.",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "process_id": {
+                "description": "Handle returned by `process_start`.",
+                "type": "string"
+              },
+              "pty": {
+                "description": "True if attached to a pseudo-terminal.",
+                "type": "boolean"
+              },
+              "running": {
+                "description": "True while running.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "command",
+              "pid",
+              "process_id",
+              "pty",
+              "running"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "processes"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "upload",
+    "description": "Write a file from base64-encoded bytes, e.g. an image or archive. Use `file_write` for text.",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "content_base64": {
+          "description": "File content, base64-encoded (standard alphabet, padded). At most 10 MiB once decoded.",
+          "type": "string"
+        },
+        "mode": {
+          "description": "Unix permission bits as a decimal number, e.g. 420 for 0644 or 493 for 0755. Defaults to 0644.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "overwrite": {
+          "default": false,
+          "description": "Replace the file if it already exists.",
+          "type": "boolean"
+        },
+        "path": {
+          "description": "Destination file path. Missing parent directories are created.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "content_base64",
+        "path"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "properties": {
+        "bytes_written": {
+          "description": "Number of decoded bytes written.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "created": {
+          "description": "True if the file did not exist before.",
+          "type": "boolean"
+        },
+        "path": {
+          "description": "Absolute path written.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "bytes_written",
+        "created",
+        "path"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "download",
+    "description": "Read a file as base64-encoded bytes, e.g. an image or archive. Use `file_read` for text.",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "max_bytes": {
+          "description": "Fail instead of returning files larger than this many bytes. Defaults to and is capped at 10485760 (10 MiB).",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "description": "Path of the file to download.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "properties": {
+        "content_base64": {
+          "description": "File content, base64-encoded (standard alphabet, padded).",
+          "type": "string"
+        },
+        "mode": {
+          "description": "Unix permission bits.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "description": "Absolute path read.",
+          "type": "string"
+        },
+        "size": {
+          "description": "File size in bytes.",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "content_base64",
+        "mode",
+        "path",
+        "size"
+      ],
+      "type": "object"
+    }
+  }
+]

@@ -1,0 +1,416 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sandcrab Symbology</title>
+<meta name="description" content="The Sandcrab crab symbology set: one illustrated scene and glyph per core concept, with style guide and 3D translation notes.">
+<meta name="color-scheme" content="light">
+<meta name="theme-color" content="#FAFAF7">
+<link rel="icon" href="assets/brand/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="assets/brand/favicon-32.png" type="image/png" sizes="32x32">
+<link rel="apple-touch-icon" href="assets/brand/apple-touch-icon.png" sizes="180x180">
+<link rel="stylesheet" href="assets/brand/brand.css">
+<script src="assets/brand/theme.js"></script>
+<style>
+:root { --glyph-ink:var(--ink); --glyph-fill:var(--bg-2); }
+.wrap { max-width:1280px; margin:0 auto; padding:0 var(--gutter); }
+.glyph-svg [fill="#F5ECD9"] { fill:var(--glyph-fill); }
+.intro { padding:clamp(40px,7vw,96px) 0 0; max-width:960px; }
+.intro h1 { margin:0; font-size:clamp(40px,6.4vw,88px); font-stretch:78%; line-height:.92; letter-spacing:-.01em; text-transform:uppercase; }
+.intro > p:not(.eyebrow) { margin:28px 0 0; color:var(--ink-2); font-size:clamp(17px,1.5vw,20px); line-height:1.55; max-width:40em; }
+.chips { display:flex; flex-wrap:wrap; gap:8px; margin:40px 0 clamp(56px,7vw,96px); padding-top:18px; border-top:2px solid var(--ink); }
+.chip { display:inline-flex; align-items:center; gap:8px; text-decoration:none; color:var(--ink); border:1.5px solid var(--line); border-radius:999px; padding:5px 14px 5px 6px; font-size:14px; font-weight:500; transition:border-color .15s, color .15s; }
+.chip:hover { border-color:var(--rust); color:var(--rust-text); }
+.glyph { display:inline-grid; place-items:center; width:56px; height:56px; flex:none; }
+.glyph.sm { width:26px; height:26px; }
+.glyph-svg { width:100%; height:100%; color:var(--glyph-ink); }
+.grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(min(100%,520px),1fr)); gap:clamp(56px,6vw,88px) clamp(24px,3.5vw,48px); }
+.card { display:flex; flex-direction:column; scroll-margin-top:calc(var(--bar-h) + 20px); }
+.hero { margin:0; aspect-ratio:1536/1030; border-radius:14px; overflow:hidden; background:var(--bg-2); box-shadow:var(--shadow); }
+.hero img { display:block; width:100%; height:100%; object-fit:cover; filter:var(--img-filter); }
+.body { padding:24px 2px 0; display:flex; flex-direction:column; gap:14px; }
+.card-head { display:flex; gap:16px; align-items:center; }
+.card-head .eyebrow { margin:0 0 6px; color:var(--rust-text); }
+.card-head h2 { margin:0; font-size:clamp(28px,2.6vw,36px); }
+.label { display:block; font:400 11px/1.4 var(--mono); text-transform:uppercase; letter-spacing:.16em; color:var(--ink-3); margin-bottom:4px; }
+.tech, .meta { margin:0; }
+.meta { color:var(--ink-2); }
+details { border-top:1px solid var(--line); border-bottom:1px solid var(--line); padding:12px 0; }
+summary { cursor:pointer; font-weight:600; font-size:14.5px; }
+summary:hover { color:var(--rust-text); }
+details ul { margin:10px 0 2px; padding-left:18px; color:var(--ink-2); font-size:14.5px; }
+details li + li { margin-top:4px; }
+.files { margin:0; display:flex; flex-wrap:wrap; gap:6px; }
+.files code { font-size:11.5px; overflow-wrap:anywhere; }
+section.guide { margin:clamp(96px,11vw,160px) 0 0; }
+section.guide > h2 { margin:0 0 12px; font-size:clamp(34px,4.2vw,60px); font-stretch:86%; letter-spacing:-.03em; }
+section.guide > p { color:var(--ink-2); max-width:44em; }
+.guide-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(min(100%,340px),1fr)); gap:40px clamp(24px,3vw,40px); margin-top:36px; }
+.panel { border-top:2px solid var(--ink); padding-top:16px; }
+.panel h3 { margin:0 0 12px; font-size:21px; }
+.panel ul { margin:0; padding-left:18px; color:var(--ink-2); font-size:14.5px; }
+.panel li + li { margin-top:5px; }
+.swatches { display:grid; grid-template-columns:repeat(auto-fill,minmax(140px,1fr)); gap:12px; }
+.sw { border:1px solid var(--line); border-radius:12px; overflow:hidden; font-size:13px; background:var(--surface); }
+.sw i { display:block; height:56px; }
+.sw div { padding:8px 10px; }
+.sw b { display:block; font-weight:600; }
+.sw code { font-size:11.5px; }
+@media (max-width:560px) { .card-head h2 { font-size:25px; } .glyph { width:46px; height:46px; } }
+@media (prefers-reduced-motion: reduce) { .chip { transition:none; } }
+</style>
+</head>
+<body>
+<!-- SITE-HEADER:BEGIN -->
+<a class="sr-only" href="#main" onfocus="this.classList.remove('sr-only')" onblur="this.classList.add('sr-only')">Skip to content</a>
+<header class="site-bar">
+  <div class="site-bar-in">
+    <a class="site-brand" href="landing/index.html" aria-label="Sandcrab home"><svg class="site-logo" viewBox="-21 -17 42 31" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M-9 4l-5 5M-5 6l-3 6M9 4l5 5M5 6l3 6"/><path d="M-9 -1l-5 -5M9 -1l5 -5"/><circle cx="-16" cy="-8" r="4.2" fill="currentColor"/><circle cx="16" cy="-8" r="4.2" fill="currentColor"/><path d="M-4 -7l-1 -4M4 -7l1 -4"/><path d="M-12 3a12 10 0 0 1 24 0q0 4 -12 4t-12 -4z" fill="currentColor"/><g stroke="none"><circle cx="-5" cy="-12" r="2.8" fill="currentColor"/><circle cx="5" cy="-12" r="2.8" fill="currentColor"/><circle class="eye" cx="-5" cy="-12" r="1.15"/><circle class="eye" cx="5" cy="-12" r="1.15"/></g></svg><span>Sandcrab</span></a>
+    <nav class="site-nav" aria-label="Site"><a href="landing/index.html">Home</a><a href="walkthrough.html">Walkthrough</a><a href="bench-report.html">Benchmarks</a><a href="symbology.html" aria-current="page">Symbology</a><a href="presentation.html">Presentation</a><a href="https://github.com/polvera-org/sandcrab/tree/main/docs" target="_blank" rel="noopener">Docs<span class="sr-only"> (opens in a new tab)</span></a></nav>
+    <div class="site-actions"><a class="icon-btn" href="https://github.com/polvera-org/sandcrab" target="_blank" rel="noopener" aria-label="Sandcrab on GitHub (opens in a new tab)"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" d="M12 .5a11.5 11.5 0 0 0-3.64 22.41c.58.1.79-.25.79-.56v-2c-3.2.7-3.88-1.37-3.88-1.37-.52-1.33-1.28-1.69-1.28-1.69-1.05-.71.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.69 0-1.26.45-2.28 1.18-3.09-.12-.29-.51-1.46.11-3.04 0 0 .97-.31 3.17 1.18a11 11 0 0 1 5.76 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.58.23 2.75.11 3.04.74.81 1.18 1.83 1.18 3.09 0 4.42-2.7 5.4-5.27 5.68.41.36.78 1.06.78 2.14v3.17c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .5Z"/></svg></a><button class="icon-btn" type="button" data-theme-toggle aria-pressed="false" aria-label="Light theme on. Switch to dark theme"><svg class="ico ico-light" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2.5M12 19v2.5M2.5 12H5M19 12h2.5M5.3 5.3l1.8 1.8M16.9 16.9l1.8 1.8M5.3 18.7l1.8-1.8M16.9 7.1l1.8-1.8"/></svg><svg class="ico ico-dark" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z"/></svg></button><a class="pill pill-sm" href="landing/index.html#start">Quickstart</a></div>
+  </div>
+</header>
+<!-- SITE-HEADER:END -->
+<main id="main" class="wrap">
+  <section class="intro">
+    <p class="eyebrow">Symbology</p>
+    <h1>The Sandcrab crab, one scene per concept</h1>
+    <p>Each core idea in Sandcrab has a crab metaphor that is also technically accurate. Every concept has a hero illustration (WebP, 1536&nbsp;px) for slides and landing pages, a 64&nbsp;px line glyph (SVG, <code>currentColor</code>) for docs and UI, and notes for the three.js scene.</p>
+  </section>
+  <nav class="chips" aria-label="Concepts"><a href="#molting" class="chip"><span class="glyph sm"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="glyph-svg" aria-hidden="true">
+<g transform="translate(17 36) scale(0.62)" stroke-width="3.23" stroke-dasharray="2.4 2.6" opacity=".55">
+<path d="M-9 4l-5 5M-5 6l-3 6M9 4l5 5M5 6l3 6"/>
+<path d="M-9 -1l-5 -5M9 -1l5 -5"/>
+<circle cx="-16" cy="-8" r="4.2" fill="none"/><circle cx="16" cy="-8" r="4.2" fill="none"/>
+<path d="M-4 -7l-1 -4M4 -7l1 -4"/>
+<path d="M-12 3a12 10 0 0 1 24 0q0 4 -12 4t-12 -4z" fill="none"/>
+<circle cx="-5" cy="-12" r="1.9" fill="currentColor" stroke="none"/><circle cx="5" cy="-12" r="1.9" fill="currentColor" stroke="none"/>
+</g><g transform="translate(45 36) scale(0.72)" stroke-width="2.78">
+<path d="M-9 4l-5 5M-5 6l-3 6M9 4l5 5M5 6l3 6"/>
+<path d="M-9 -1l-5 -5M9 -1l5 -5"/>
+<circle cx="-16" cy="-8" r="4.2" fill="#FF6B4A"/><circle cx="16" cy="-8" r="4.2" fill="#FF6B4A"/>
+<path d="M-4 -7l-1 -4M4 -7l1 -4"/>
+<path d="M-12 3a12 10 0 0 1 24 0q0 4 -12 4t-12 -4z" fill="#FF6B4A"/>
+<circle cx="-5" cy="-12" r="1.9" fill="currentColor" stroke="none"/><circle cx="5" cy="-12" r="1.9" fill="currentColor" stroke="none"/>
+</g><rect x="52" y="42" width="7" height="7" rx="1.2" fill="#1F7A8C"/><path d="M4 56H60"/><circle cx="6" cy="30" r=".9" fill="currentColor" stroke="none"/><circle cx="4" cy="36" r=".9" fill="currentColor" stroke="none"/><circle cx="7" cy="42" r=".9" fill="currentColor" stroke="none"/>
+</svg></span>Molting</a><a href="#burrow" class="chip"><span class="glyph sm"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="glyph-svg" aria-hidden="true">
+<path d="M4 28H26M38 28H60"/><path d="M26 28v8M38 28v8"/><path d="M10 58C10 42 20 36 32 36S54 42 54 58Z"/><rect x="20" y="48" width="9" height="8" rx="1"/><rect x="31" y="48" width="9" height="8" rx="1"/><rect x="25.5" y="40" width="9" height="8" rx="1" fill="#1F7A8C"/><g transform="translate(48 20) scale(0.5)" stroke-width="4.0">
+<path d="M-9 4l-5 5M-5 6l-3 6M9 4l5 5M5 6l3 6"/>
+<path d="M-9 -1l-5 -5M9 -1l5 -5"/>
+<circle cx="-16" cy="-8" r="4.2" fill="#FF6B4A"/><circle cx="16" cy="-8" r="4.2" fill="#FF6B4A"/>
+<path d="M-4 -7l-1 -4M4 -7l1 -4"/>
+<path d="M-12 3a12 10 0 0 1 24 0q0 4 -12 4t-12 -4z" fill="#FF6B4A"/>
+<circle cx="-5" cy="-12" r="1.9" fill="currentColor" stroke="none"/><circle cx="5" cy="-12" r="1.9" fill="currentColor" stroke="none"/>
+</g>
+</svg></span>Burrow</a><a href="#isolation" class="chip"><span class="glyph sm"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="glyph-svg" aria-hidden="true">
+<rect x="18" y="6" width="28" height="7" rx="2" fill="#1F7A8C"/><path d="M20 13v3c-4 2-6 5-6 9v27a5 5 0 0 0 5 5h26a5 5 0 0 0 5-5V25c0-4-2-7-6-9v-3"/><path d="M19.5 28v14" opacity=".45"/><g transform="translate(33 44) scale(0.62)" stroke-width="3.23">
+<path d="M-9 4l-5 5M-5 6l-3 6M9 4l5 5M5 6l3 6"/>
+<path d="M-9 -1l-5 -5M9 -1l5 -5"/>
+<circle cx="-16" cy="-8" r="4.2" fill="#FF6B4A"/><circle cx="16" cy="-8" r="4.2" fill="#FF6B4A"/>
+<path d="M-4 -7l-1 -4M4 -7l1 -4"/>
+<path d="M-12 3a12 10 0 0 1 24 0q0 4 -12 4t-12 -4z" fill="#FF6B4A"/>
+<circle cx="-5" cy="-12" r="1.9" fill="currentColor" stroke="none"/><circle cx="5" cy="-12" r="1.9" fill="currentColor" stroke="none"/>
+</g>
+</svg></span>Sealed jar vs. tide pool</a><a href="#handoff" class="chip"><span class="glyph sm"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="glyph-svg" aria-hidden="true">
+<circle cx="16" cy="29" r="9"/><path d="M16 29a2 2 0 0 1 4 0a4 4 0 0 1 -8 0a6 6 0 0 1 12 0" stroke-width="2"/><path d="M39 32l8 -20 10 20z"/><path d="M42.5 24h9M40.5 28.5h14" stroke-width="2"/><path d="M26 14q6 -6 12 0" stroke="#FF6B4A"/><path d="M34.5 12.5l3.5 1.5 -1.5 3.5" stroke="#FF6B4A"/><path d="M4 38H60"/><path d="M16 38v6M48 38v6"/><rect x="10" y="44" width="44" height="13" rx="3"/><rect x="20" y="48" width="6" height="6" rx="1" fill="#1F7A8C"/><rect x="29" y="48" width="6" height="6" rx="1"/><rect x="38" y="48" width="6" height="6" rx="1" fill="#1F7A8C"/>
+</svg></span>Hermit shell swap</a><a href="#toolbelt" class="chip"><span class="glyph sm"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="glyph-svg" aria-hidden="true">
+<g transform="translate(32 30) scale(1.45)" stroke-width="1.72">
+<path d="M-9 4l-5 5M-5 6l-3 6M9 4l5 5M5 6l3 6"/>
+<path d="M-9 -1l-5 -5M9 -1l5 -5"/>
+<circle cx="-16" cy="-8" r="4.2" fill="#FF6B4A"/><circle cx="16" cy="-8" r="4.2" fill="#FF6B4A"/>
+<path d="M-4 -7l-1 -4M4 -7l1 -4"/>
+<path d="M-12 3a12 10 0 0 1 24 0q0 4 -12 4t-12 -4z" fill="#FF6B4A"/>
+<circle cx="-5" cy="-12" r="1.9" fill="currentColor" stroke="none"/><circle cx="5" cy="-12" r="1.9" fill="currentColor" stroke="none"/>
+</g><rect x="13" y="37" width="38" height="9" rx="2.5" fill="#1F7A8C"/><path d="M18 39.5l2.5 2 -2.5 2M23 43.5h3.5" stroke="#F5ECD9" stroke-width="1.6"/><circle cx="33" cy="41" r="2" stroke="#F5ECD9" stroke-width="1.5"/><path d="M34.5 42.5l1.8 1.8" stroke="#F5ECD9" stroke-width="1.5"/><path d="M41 39.5h6M41 42h6M41 44.5h4" stroke="#F5ECD9" stroke-width="1.3"/>
+</svg></span>Claws &amp; toolbelt</a><a href="#one-wire" class="chip"><span class="glyph sm"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="glyph-svg" aria-hidden="true">
+<rect x="3" y="20" width="11" height="22" rx="2"/><path d="M6.5 25.5h4M6.5 30h4"/><path d="M14 31H42"/><rect x="17" y="26.5" width="8" height="9" rx="1.5" fill="#F5ECD9"/><path d="M20 26.5v9" stroke="#FF6B4A" stroke-width="2"/><rect x="30" y="26.5" width="8" height="9" rx="1.5" fill="#F5ECD9"/><path d="M33 26.5v9" stroke="#FF6B4A" stroke-width="2"/><g transform="translate(51 34) scale(0.5)" stroke-width="4.0">
+<path d="M-9 4l-5 5M-5 6l-3 6M9 4l5 5M5 6l3 6"/>
+<path d="M-9 -1l-5 -5M9 -1l5 -5"/>
+<circle cx="-16" cy="-8" r="4.2" fill="#FF6B4A"/><circle cx="16" cy="-8" r="4.2" fill="#FF6B4A"/>
+<path d="M-4 -7l-1 -4M4 -7l1 -4"/>
+<path d="M-12 3a12 10 0 0 1 24 0q0 4 -12 4t-12 -4z" fill="#FF6B4A"/>
+<circle cx="-5" cy="-12" r="1.9" fill="currentColor" stroke="none"/><circle cx="5" cy="-12" r="1.9" fill="currentColor" stroke="none"/>
+</g><path d="M28 46v8M14 54h28M14 54v4M28 54v4M42 54v4" opacity=".55" stroke-width="2"/>
+</svg></span>One wire</a><a href="#tide-clock" class="chip"><span class="glyph sm"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="glyph-svg" aria-hidden="true">
+<path d="M23 28V12A16 16 0 0 1 36.9 20Z" fill="#FF6B4A" stroke="none"/><circle cx="23" cy="28" r="16"/><path d="M23 28 36 20.5"/><circle cx="23" cy="28" r="2" fill="currentColor"/><path d="M51 58V46M51 46l-6 -7M51 46l6 -7M45 39l-3 -5M45 39l2 -6M57 39l-2 -6M57 39l3 -5" stroke-width="2"/><path d="M44 50l14 0" stroke="#FF6B4A" stroke-width="3"/><path d="M4 56q4-3 8 0t8 0 8 0" opacity=".55" stroke-width="2"/>
+</svg></span>Tide clock &amp; pinch</a><a href="#few-grains" class="chip"><span class="glyph sm"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="glyph-svg" aria-hidden="true">
+<path d="M5 8h20M5 13h18M5 18h20M5 23h16M5 28h20M5 33h19M5 38h20M5 43h17M5 48h20M5 53h18" stroke-width="2" opacity=".55"/><path d="M29 31h8M34 27l4 4 -4 4" stroke="#FF6B4A"/><rect x="41" y="12" width="20" height="40" rx="3"/><path d="M45 18h12M45 23h10" /><circle cx="47" cy="30" r="1.2" fill="currentColor" stroke="none"/><circle cx="51" cy="30" r="1.2" fill="currentColor" stroke="none"/><circle cx="55" cy="30" r="1.2" fill="currentColor" stroke="none"/><path d="M45 37h12M45 42h9"/><rect x="41" y="12" width="20" height="4" rx="1.5" fill="#FF6B4A" stroke="none" opacity="0"/>
+</svg></span>A few grains</a><a href="#window-door" class="chip"><span class="glyph sm"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="glyph-svg" aria-hidden="true">
+<path d="M4 58V18h6v-6h8v6h6v-6h8v6h6v-6h8v6h6v-6h8v46z"/><circle cx="18" cy="36" r="8.5"/><path d="M13.5 33.5l3 -3M14.5 38l7 -7" opacity=".45" stroke-width="2"/><rect x="22.5" y="42" width="8" height="6.5" rx="1.2" fill="#1F7A8C"/><path d="M24.5 42v-2.2a2 2 0 0 1 4 0V42" stroke-width="2"/><path d="M36 58V40a8 8 0 0 1 16 0v18"/><g transform="translate(44 52) scale(0.38)" stroke-width="5.26">
+<path d="M-9 4l-5 5M-5 6l-3 6M9 4l5 5M5 6l3 6"/>
+<path d="M-9 -1l-5 -5M9 -1l5 -5"/>
+<circle cx="-16" cy="-8" r="4.2" fill="#FF6B4A"/><circle cx="16" cy="-8" r="4.2" fill="#FF6B4A"/>
+<path d="M-4 -7l-1 -4M4 -7l1 -4"/>
+<path d="M-12 3a12 10 0 0 1 24 0q0 4 -12 4t-12 -4z" fill="#FF6B4A"/>
+<circle cx="-5" cy="-12" r="1.9" fill="currentColor" stroke="none"/><circle cx="5" cy="-12" r="1.9" fill="currentColor" stroke="none"/>
+</g>
+</svg></span>Window &amp; door</a><a href="#reef" class="chip"><span class="glyph sm"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="glyph-svg" aria-hidden="true">
+<path d="M4 28h56M4 50h56"/><path d="M5 28a7 7 0 0 1 14 0z"/><path d="M8.5 28l1-4M12 28v-5.5M15.5 28l-1-4" stroke-width="1.6"/><path d="M25 28a7 7 0 0 1 14 0z"/><path d="M28.5 28l1-4M32 28v-5.5M35.5 28l-1-4" stroke-width="1.6"/><path d="M45 28a7 7 0 0 1 14 0z"/><path d="M48.5 28l1-4M52 28v-5.5M55.5 28l-1-4" stroke-width="1.6"/><path d="M5 50a7 7 0 0 1 14 0z"/><path d="M8.5 50l1-4M12 50v-5.5M15.5 50l-1-4" stroke-width="1.6"/><path d="M25 50a7 7 0 0 1 14 0z" fill="#FF6B4A"/><path d="M28.5 50l1-4M32 50v-5.5M35.5 50l-1-4" stroke-width="1.6"/><path d="M45 50a7 7 0 0 1 14 0z"/><path d="M48.5 50l1-4M52 50v-5.5M55.5 50l-1-4" stroke-width="1.6"/><path d="M8 12h48" stroke-width="2" opacity=".55"/><path d="M12 12v4M32 12v4M52 12v4" stroke-width="2" opacity=".55"/>
+</svg></span>The reef</a></nav>
+  <div class="grid">
+    <article class="card" id="molting">
+      <figure class="hero"><img src="assets/crab/molting.webp" width="1536" height="1030" loading="eager" alt="Molting: The empty husk is the sandbox; the glowing teal cube the crab carries out is the turn&#x27;s output, saved to the workspace."></figure>
+      <div class="body">
+        <header class="card-head">
+          <span class="glyph"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="glyph-svg" aria-hidden="true">
+<g transform="translate(17 36) scale(0.62)" stroke-width="3.23" stroke-dasharray="2.4 2.6" opacity=".55">
+<path d="M-9 4l-5 5M-5 6l-3 6M9 4l5 5M5 6l3 6"/>
+<path d="M-9 -1l-5 -5M9 -1l5 -5"/>
+<circle cx="-16" cy="-8" r="4.2" fill="none"/><circle cx="16" cy="-8" r="4.2" fill="none"/>
+<path d="M-4 -7l-1 -4M4 -7l1 -4"/>
+<path d="M-12 3a12 10 0 0 1 24 0q0 4 -12 4t-12 -4z" fill="none"/>
+<circle cx="-5" cy="-12" r="1.9" fill="currentColor" stroke="none"/><circle cx="5" cy="-12" r="1.9" fill="currentColor" stroke="none"/>
+</g><g transform="translate(45 36) scale(0.72)" stroke-width="2.78">
+<path d="M-9 4l-5 5M-5 6l-3 6M9 4l5 5M5 6l3 6"/>
+<path d="M-9 -1l-5 -5M9 -1l5 -5"/>
+<circle cx="-16" cy="-8" r="4.2" fill="#FF6B4A"/><circle cx="16" cy="-8" r="4.2" fill="#FF6B4A"/>
+<path d="M-4 -7l-1 -4M4 -7l1 -4"/>
+<path d="M-12 3a12 10 0 0 1 24 0q0 4 -12 4t-12 -4z" fill="#FF6B4A"/>
+<circle cx="-5" cy="-12" r="1.9" fill="currentColor" stroke="none"/><circle cx="5" cy="-12" r="1.9" fill="currentColor" stroke="none"/>
+</g><rect x="52" y="42" width="7" height="7" rx="1.2" fill="#1F7A8C"/><path d="M4 56H60"/><circle cx="6" cy="30" r=".9" fill="currentColor" stroke="none"/><circle cx="4" cy="36" r=".9" fill="currentColor" stroke="none"/><circle cx="7" cy="42" r=".9" fill="currentColor" stroke="none"/>
+</svg></span>
+          <div><p class="eyebrow">01 · Ephemeral sandbox</p><h2>Molting</h2></div>
+        </header>
+        <p class="tech"><span class="label">What it means</span>Every agent turn runs in a fresh sandbox (microVM or hardened container). On teardown the whole thing is discarded: processes, scratch files, memory. Only what was written into a mounted workspace survives.</p>
+        <p class="meta"><span class="label">The picture</span>The empty husk is the sandbox; the glowing teal cube the crab carries out is the turn&#x27;s output, saved to the workspace.</p>
+        <details><summary>3D translation</summary><ul><li>Crab: rounded dome (squashed sphere) + capsule legs + sphere claws, coral matte clay.</li><li>Husk: same mesh, frosted translucent white (transmission ~0.6, roughness 0.4), split seam along the back.</li><li>Loop (4 s): crab steps out → husk cracks → dissolves into instanced sand particles drifting left → fresh husk re-forms around the crab for the next turn.</li></ul></details>
+        <p class="files"><code>assets/crab/molting.webp</code> <code>assets/crab/svg/molting.svg</code></p>
+      </div>
+    </article>
+    <article class="card" id="burrow">
+      <figure class="hero"><img src="assets/crab/burrow.webp" width="1536" height="1030" loading="eager" alt="Burrow: The burrow survives every molt. While the crab is away (no sandbox), the host&#x27;s hand tidies it: drops in attachments, collects outputs."></figure>
+      <div class="body">
+        <header class="card-head">
+          <span class="glyph"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="glyph-svg" aria-hidden="true">
+<path d="M4 28H26M38 28H60"/><path d="M26 28v8M38 28v8"/><path d="M10 58C10 42 20 36 32 36S54 42 54 58Z"/><rect x="20" y="48" width="9" height="8" rx="1"/><rect x="31" y="48" width="9" height="8" rx="1"/><rect x="25.5" y="40" width="9" height="8" rx="1" fill="#1F7A8C"/><g transform="translate(48 20) scale(0.5)" stroke-width="4.0">
+<path d="M-9 4l-5 5M-5 6l-3 6M9 4l5 5M5 6l3 6"/>
+<path d="M-9 -1l-5 -5M9 -1l5 -5"/>
+<circle cx="-16" cy="-8" r="4.2" fill="#FF6B4A"/><circle cx="16" cy="-8" r="4.2" fill="#FF6B4A"/>
+<path d="M-4 -7l-1 -4M4 -7l1 -4"/>
+<path d="M-12 3a12 10 0 0 1 24 0q0 4 -12 4t-12 -4z" fill="#FF6B4A"/>
+<circle cx="-5" cy="-12" r="1.9" fill="currentColor" stroke="none"/><circle cx="5" cy="-12" r="1.9" fill="currentColor" stroke="none"/>
+</g>
+</svg></span>
+          <div><p class="eyebrow">02 · Persistent workspace</p><h2>Burrow</h2></div>
+        </header>
+        <p class="tech"><span class="label">What it means</span>Workspaces are durable storage decoupled from compute: a host dir, a managed dir, or a block volume (Firecracker). Between turns, with no sandbox running, the host can put, read or delete files at zero idle compute cost.</p>
+        <p class="meta"><span class="label">The picture</span>The burrow survives every molt. While the crab is away (no sandbox), the host&#x27;s hand tidies it: drops in attachments, collects outputs.</p>
+        <details><summary>3D translation</summary><ul><li>Beach cutaway block: sand slab with an excavated dome chamber, crates as bevelled teal boxes.</li><li>Water: flat teal plane with a scrolling white foam edge to show the tide receding.</li><li>Loop: tide out → robotic arm lowers a crate into the chamber → arm lifts away → crab walks back in → tide returns.</li></ul></details>
+        <p class="files"><code>assets/crab/burrow.webp</code> <code>assets/crab/svg/burrow.svg</code></p>
+      </div>
+    </article>
+    <article class="card" id="isolation">
+      <figure class="hero"><img src="assets/crab/isolation.webp" width="1536" height="1030" loading="lazy" alt="Sealed jar vs. tide pool: Each crab gets its own jar. The shared pool sits behind a caution barrier: entering it is a deliberate, labelled choice."></figure>
+      <div class="body">
+        <header class="card-head">
+          <span class="glyph"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="glyph-svg" aria-hidden="true">
+<rect x="18" y="6" width="28" height="7" rx="2" fill="#1F7A8C"/><path d="M20 13v3c-4 2-6 5-6 9v27a5 5 0 0 0 5 5h26a5 5 0 0 0 5-5V25c0-4-2-7-6-9v-3"/><path d="M19.5 28v14" opacity=".45"/><g transform="translate(33 44) scale(0.62)" stroke-width="3.23">
+<path d="M-9 4l-5 5M-5 6l-3 6M9 4l5 5M5 6l3 6"/>
+<path d="M-9 -1l-5 -5M9 -1l5 -5"/>
+<circle cx="-16" cy="-8" r="4.2" fill="#FF6B4A"/><circle cx="16" cy="-8" r="4.2" fill="#FF6B4A"/>
+<path d="M-4 -7l-1 -4M4 -7l1 -4"/>
+<path d="M-12 3a12 10 0 0 1 24 0q0 4 -12 4t-12 -4z" fill="#FF6B4A"/>
+<circle cx="-5" cy="-12" r="1.9" fill="currentColor" stroke="none"/><circle cx="5" cy="-12" r="1.9" fill="currentColor" stroke="none"/>
+</g>
+</svg></span>
+          <div><p class="eyebrow">03 · Hardware isolation, no silent fallback</p><h2>Sealed jar vs. tide pool</h2></div>
+        </header>
+        <p class="tech"><span class="label">What it means</span>MicroVM backends (Firecracker in V1) give each sandbox its own kernel behind KVM: the sealed jar. Docker shares the host kernel (the tide pool): an officially supported backend for single-tenant, trusted-host workloads that reports hardware_isolated=false, so it is only ever chosen explicitly. Every backend reports its capabilities; Sandcrab never quietly moves a crab from jar to pool.</p>
+        <p class="meta"><span class="label">The picture</span>Each crab gets its own jar. The shared pool sits behind a caution barrier: entering it is a deliberate, labelled choice.</p>
+        <details><summary>3D translation</summary><ul><li>Jar: lathed glass cylinder, physical transmission + thickness, teal metal screw lid with thread ridges.</li><li>Pool: low irregular rock rim, shallow animated water, 4–6 desaturated grey-teal crabs.</li><li>Loop: jar lid tightens with a soft click glint; pool crabs jostle; a gap of sand and a striped barrier stay fixed between them.</li></ul></details>
+        <p class="files"><code>assets/crab/isolation.webp</code> <code>assets/crab/svg/isolation.svg</code></p>
+      </div>
+    </article>
+    <article class="card" id="handoff">
+      <figure class="hero"><img src="assets/crab/handoff.webp" width="1536" height="1030" loading="lazy" alt="Hermit shell swap: The hermit crab trades a python shell for a render shell, but both sit over the same burrow."></figure>
+      <div class="body">
+        <header class="card-head">
+          <span class="glyph"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="glyph-svg" aria-hidden="true">
+<circle cx="16" cy="29" r="9"/><path d="M16 29a2 2 0 0 1 4 0a4 4 0 0 1 -8 0a6 6 0 0 1 12 0" stroke-width="2"/><path d="M39 32l8 -20 10 20z"/><path d="M42.5 24h9M40.5 28.5h14" stroke-width="2"/><path d="M26 14q6 -6 12 0" stroke="#FF6B4A"/><path d="M34.5 12.5l3.5 1.5 -1.5 3.5" stroke="#FF6B4A"/><path d="M4 38H60"/><path d="M16 38v6M48 38v6"/><rect x="10" y="44" width="44" height="13" rx="3"/><rect x="20" y="48" width="6" height="6" rx="1" fill="#1F7A8C"/><rect x="29" y="48" width="6" height="6" rx="1"/><rect x="38" y="48" width="6" height="6" rx="1" fill="#1F7A8C"/>
+</svg></span>
+          <div><p class="eyebrow">04 · Cross-template handoff</p><h2>Hermit shell swap</h2></div>
+        </header>
+        <p class="tech"><span class="label">What it means</span>Run turn 1 in python-dev, tear it down, then mount the same workspace into render for turn 2. Templates are swappable compute environments; the workspace is the constant.</p>
+        <p class="meta"><span class="label">The picture</span>The hermit crab trades a python shell for a render shell, but both sit over the same burrow.</p>
+        <details><summary>3D translation</summary><ul><li>Shells: one spiral (torus-knot style) with a snake coil motif, one taller turret with a film-frame/aperture decal; both teal.</li><li>Below: cutaway with a single burrow chamber linked by shafts to both shells.</li><li>Loop: crab backs out of shell A → scuttles across → backs into shell B → crates in the burrow stay perfectly still.</li></ul></details>
+        <p class="files"><code>assets/crab/handoff.webp</code> <code>assets/crab/svg/handoff.svg</code></p>
+      </div>
+    </article>
+    <article class="card" id="toolbelt">
+      <figure class="hero"><img src="assets/crab/toolbelt.webp" width="1536" height="1030" loading="lazy" alt="Claws &amp; toolbelt: The crab carries its own tools on its belt: a terminal, a page, a pencil, a magnifier, a folder tree."></figure>
+      <div class="body">
+        <header class="card-head">
+          <span class="glyph"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="glyph-svg" aria-hidden="true">
+<g transform="translate(32 30) scale(1.45)" stroke-width="1.72">
+<path d="M-9 4l-5 5M-5 6l-3 6M9 4l5 5M5 6l3 6"/>
+<path d="M-9 -1l-5 -5M9 -1l5 -5"/>
+<circle cx="-16" cy="-8" r="4.2" fill="#FF6B4A"/><circle cx="16" cy="-8" r="4.2" fill="#FF6B4A"/>
+<path d="M-4 -7l-1 -4M4 -7l1 -4"/>
+<path d="M-12 3a12 10 0 0 1 24 0q0 4 -12 4t-12 -4z" fill="#FF6B4A"/>
+<circle cx="-5" cy="-12" r="1.9" fill="currentColor" stroke="none"/><circle cx="5" cy="-12" r="1.9" fill="currentColor" stroke="none"/>
+</g><rect x="13" y="37" width="38" height="9" rx="2.5" fill="#1F7A8C"/><path d="M18 39.5l2.5 2 -2.5 2M23 43.5h3.5" stroke="#F5ECD9" stroke-width="1.6"/><circle cx="33" cy="41" r="2" stroke="#F5ECD9" stroke-width="1.5"/><path d="M34.5 42.5l1.8 1.8" stroke="#F5ECD9" stroke-width="1.5"/><path d="M41 39.5h6M41 42h6M41 44.5h4" stroke="#F5ECD9" stroke-width="1.3"/>
+</svg></span>
+          <div><p class="eyebrow">05 · crabd&#x27;s native tools</p><h2>Claws &amp; toolbelt</h2></div>
+        </header>
+        <p class="tech"><span class="label">What it means</span>crabd, a small static musl binary inside every sandbox, exposes bash, file_read/write/edit/delete/move, list_dir, glob, grep, process_* and upload/download. File and search tools are native Rust (ignore, globset, grep-searcher), not shell-outs.</p>
+        <p class="meta"><span class="label">The picture</span>The crab carries its own tools on its belt: a terminal, a page, a pencil, a magnifier, a folder tree.</p>
+        <details><summary>3D translation</summary><ul><li>Crab hero pose on a sand disc; belt as a teal torus segment around the shell.</li><li>Tools as small low-poly props in holsters (terminal block, sheet, pencil, magnifier, broom, gear).</li><li>Loop: claw draws a tool → tiny action pulse (glint or ripple) → re-holsters; cycle through tools.</li></ul></details>
+        <p class="files"><code>assets/crab/toolbelt.webp</code> <code>assets/crab/svg/toolbelt.svg</code></p>
+      </div>
+    </article>
+    <article class="card" id="one-wire">
+      <figure class="hero"><img src="assets/crab/one-wire.webp" width="1536" height="1030" loading="lazy" alt="One wire: A single cable from host to crab. Each packet has a header segment (the length prefix). Jar, container and chip all plug into the same wire."></figure>
+      <div class="body">
+        <header class="card-head">
+          <span class="glyph"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="glyph-svg" aria-hidden="true">
+<rect x="3" y="20" width="11" height="22" rx="2"/><path d="M6.5 25.5h4M6.5 30h4"/><path d="M14 31H42"/><rect x="17" y="26.5" width="8" height="9" rx="1.5" fill="#F5ECD9"/><path d="M20 26.5v9" stroke="#FF6B4A" stroke-width="2"/><rect x="30" y="26.5" width="8" height="9" rx="1.5" fill="#F5ECD9"/><path d="M33 26.5v9" stroke="#FF6B4A" stroke-width="2"/><g transform="translate(51 34) scale(0.5)" stroke-width="4.0">
+<path d="M-9 4l-5 5M-5 6l-3 6M9 4l5 5M5 6l3 6"/>
+<path d="M-9 -1l-5 -5M9 -1l5 -5"/>
+<circle cx="-16" cy="-8" r="4.2" fill="#FF6B4A"/><circle cx="16" cy="-8" r="4.2" fill="#FF6B4A"/>
+<path d="M-4 -7l-1 -4M4 -7l1 -4"/>
+<path d="M-12 3a12 10 0 0 1 24 0q0 4 -12 4t-12 -4z" fill="#FF6B4A"/>
+<circle cx="-5" cy="-12" r="1.9" fill="currentColor" stroke="none"/><circle cx="5" cy="-12" r="1.9" fill="currentColor" stroke="none"/>
+</g><path d="M28 46v8M14 54h28M14 54v4M28 54v4M42 54v4" opacity=".55" stroke-width="2"/>
+</svg></span>
+          <div><p class="eyebrow">06 · One guest protocol</p><h2>One wire</h2></div>
+        </header>
+        <p class="tech"><span class="label">What it means</span>Host and crabd always talk over one protocol: u32 big-endian length-prefixed JSON-RPC 2.0, with method = tool name. The same frames run over vsock (microVMs), UDS or TCP (Docker). No backend-specific shortcuts like docker exec.</p>
+        <p class="meta"><span class="label">The picture</span>A single cable from host to crab. Each packet has a header segment (the length prefix). Jar, container and chip all plug into the same wire.</p>
+        <details><summary>3D translation</summary><ul><li>Host: small teal server tower. Cable: TubeGeometry along a gentle catenary.</li><li>Packets: rounded boxes with a coral header slab on the leading face, flowing as instances along the curve.</li><li>Loop: packets slide host → crab (requests) and back (results); backend platforms below light up in turn while the wire stays the same.</li></ul></details>
+        <p class="files"><code>assets/crab/one-wire.webp</code> <code>assets/crab/svg/one-wire.svg</code></p>
+      </div>
+    </article>
+    <article class="card" id="tide-clock">
+      <figure class="hero"><img src="assets/crab/tide-clock.webp" width="1536" height="1030" loading="lazy" alt="Tide clock &amp; pinch: The tide clock&#x27;s coral wedge is elapsed time. When it runs out, the crab pinches the runaway tangle at its root, cutting the whole tree, not one branch."></figure>
+      <div class="body">
+        <header class="card-head">
+          <span class="glyph"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="glyph-svg" aria-hidden="true">
+<path d="M23 28V12A16 16 0 0 1 36.9 20Z" fill="#FF6B4A" stroke="none"/><circle cx="23" cy="28" r="16"/><path d="M23 28 36 20.5"/><circle cx="23" cy="28" r="2" fill="currentColor"/><path d="M51 58V46M51 46l-6 -7M51 46l6 -7M45 39l-3 -5M45 39l2 -6M57 39l-2 -6M57 39l3 -5" stroke-width="2"/><path d="M44 50l14 0" stroke="#FF6B4A" stroke-width="3"/><path d="M4 56q4-3 8 0t8 0 8 0" opacity=".55" stroke-width="2"/>
+</svg></span>
+          <div><p class="eyebrow">07 · TTL, timeouts, killpg</p><h2>Tide clock &amp; pinch</h2></div>
+        </header>
+        <p class="tech"><span class="label">What it means</span>SandboxManager enforces a sandbox TTL, and bash calls take timeout_ms. On timeout crabd kills the whole process group (killpg), so forked children can&#x27;t outlive the call.</p>
+        <p class="meta"><span class="label">The picture</span>The tide clock&#x27;s coral wedge is elapsed time. When it runs out, the crab pinches the runaway tangle at its root, cutting the whole tree, not one branch.</p>
+        <details><summary>3D translation</summary><ul><li>Clock: chunky teal disc with an emissive coral sector that grows; single hand.</li><li>Process tree: thin teal tubes branching from one root stem, sprouting procedurally.</li><li>Loop: tree grows as the wedge fills → wedge closes → claw snaps at the root → whole tree shrinks to nothing at once → wave washes, reset.</li></ul></details>
+        <p class="files"><code>assets/crab/tide-clock.webp</code> <code>assets/crab/svg/tide-clock.svg</code></p>
+      </div>
+    </article>
+    <article class="card" id="few-grains">
+      <figure class="hero"><img src="assets/crab/few-grains.webp" width="1536" height="1030" loading="lazy" alt="A few grains: A pipe dumps a mountain of sand. The crab passes only a small pile from the start and one from the end into the tray, with an ellipsis between."></figure>
+      <div class="body">
+        <header class="card-head">
+          <span class="glyph"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="glyph-svg" aria-hidden="true">
+<path d="M5 8h20M5 13h18M5 18h20M5 23h16M5 28h20M5 33h19M5 38h20M5 43h17M5 48h20M5 53h18" stroke-width="2" opacity=".55"/><path d="M29 31h8M34 27l4 4 -4 4" stroke="#FF6B4A"/><rect x="41" y="12" width="20" height="40" rx="3"/><path d="M45 18h12M45 23h10" /><circle cx="47" cy="30" r="1.2" fill="currentColor" stroke="none"/><circle cx="51" cy="30" r="1.2" fill="currentColor" stroke="none"/><circle cx="55" cy="30" r="1.2" fill="currentColor" stroke="none"/><path d="M45 37h12M45 42h9"/><rect x="41" y="12" width="20" height="4" rx="1.5" fill="#FF6B4A" stroke="none" opacity="0"/>
+</svg></span>
+          <div><p class="eyebrow">08 · Bounded output truncation</p><h2>A few grains</h2></div>
+        </header>
+        <p class="tech"><span class="label">What it means</span>Tool output is capped: crabd keeps a bounded head and tail and drops the middle, so a runaway log can&#x27;t flood the model&#x27;s context window.</p>
+        <p class="meta"><span class="label">The picture</span>A pipe dumps a mountain of sand. The crab passes only a small pile from the start and one from the end into the tray, with an ellipsis between.</p>
+        <details><summary>3D translation</summary><ul><li>Pipe: teal cylinder; sand stream as a particle emitter piling into a heap.</li><li>Tray: shallow rounded teal dish with two small cone piles and three dot spheres between them.</li><li>Loop: sand pours endlessly → claw scoops the first grains and the last grains → tray fills to a fixed cap and never overflows.</li></ul></details>
+        <p class="files"><code>assets/crab/few-grains.webp</code> <code>assets/crab/svg/few-grains.svg</code></p>
+      </div>
+    </article>
+    <article class="card" id="window-door">
+      <figure class="hero"><img src="assets/crab/window-door.webp" width="1536" height="1030" loading="lazy" alt="Window &amp; door: Through the locked porthole the crab can look at the crates but not touch them (ReadOnly). Through the open door it carries crates in and out (ReadWrite)."></figure>
+      <div class="body">
+        <header class="card-head">
+          <span class="glyph"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="glyph-svg" aria-hidden="true">
+<path d="M4 58V18h6v-6h8v6h6v-6h8v6h6v-6h8v6h6v-6h8v46z"/><circle cx="18" cy="36" r="8.5"/><path d="M13.5 33.5l3 -3M14.5 38l7 -7" opacity=".45" stroke-width="2"/><rect x="22.5" y="42" width="8" height="6.5" rx="1.2" fill="#1F7A8C"/><path d="M24.5 42v-2.2a2 2 0 0 1 4 0V42" stroke-width="2"/><path d="M36 58V40a8 8 0 0 1 16 0v18"/><g transform="translate(44 52) scale(0.38)" stroke-width="5.26">
+<path d="M-9 4l-5 5M-5 6l-3 6M9 4l5 5M5 6l3 6"/>
+<path d="M-9 -1l-5 -5M9 -1l5 -5"/>
+<circle cx="-16" cy="-8" r="4.2" fill="#FF6B4A"/><circle cx="16" cy="-8" r="4.2" fill="#FF6B4A"/>
+<path d="M-4 -7l-1 -4M4 -7l1 -4"/>
+<path d="M-12 3a12 10 0 0 1 24 0q0 4 -12 4t-12 -4z" fill="#FF6B4A"/>
+<circle cx="-5" cy="-12" r="1.9" fill="currentColor" stroke="none"/><circle cx="5" cy="-12" r="1.9" fill="currentColor" stroke="none"/>
+</g>
+</svg></span>
+          <div><p class="eyebrow">09 · ReadOnly vs. ReadWrite mounts</p><h2>Window &amp; door</h2></div>
+        </header>
+        <p class="tech"><span class="label">What it means</span>Each mounted workspace is ReadOnly or ReadWrite, enforced by the kernel or VMM, at an explicit guest path, with canonical path-traversal and symlink guards.</p>
+        <p class="meta"><span class="label">The picture</span>Through the locked porthole the crab can look at the crates but not touch them (ReadOnly). Through the open door it carries crates in and out (ReadWrite).</p>
+        <details><summary>3D translation</summary><ul><li>Building: teal castle block with crenellations; porthole as a torus frame with a glass disc and a small padlock.</li><li>Door: open arched doorway with a dark interior.</li><li>Loop: crab peers at the window (glass glints, nothing moves) → walks through the door → swaps a crate → walks out.</li></ul></details>
+        <p class="files"><code>assets/crab/window-door.webp</code> <code>assets/crab/svg/window-door.svg</code></p>
+      </div>
+    </article>
+    <article class="card" id="reef">
+      <figure class="hero"><img src="assets/crab/reef.webp" width="1536" height="1030" loading="lazy" alt="The reef: A curated reef market: shelves of distinct shells, each tagged; the crab browses and picks one."></figure>
+      <div class="body">
+        <header class="card-head">
+          <span class="glyph"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="glyph-svg" aria-hidden="true">
+<path d="M4 28h56M4 50h56"/><path d="M5 28a7 7 0 0 1 14 0z"/><path d="M8.5 28l1-4M12 28v-5.5M15.5 28l-1-4" stroke-width="1.6"/><path d="M25 28a7 7 0 0 1 14 0z"/><path d="M28.5 28l1-4M32 28v-5.5M35.5 28l-1-4" stroke-width="1.6"/><path d="M45 28a7 7 0 0 1 14 0z"/><path d="M48.5 28l1-4M52 28v-5.5M55.5 28l-1-4" stroke-width="1.6"/><path d="M5 50a7 7 0 0 1 14 0z"/><path d="M8.5 50l1-4M12 50v-5.5M15.5 50l-1-4" stroke-width="1.6"/><path d="M25 50a7 7 0 0 1 14 0z" fill="#FF6B4A"/><path d="M28.5 50l1-4M32 50v-5.5M35.5 50l-1-4" stroke-width="1.6"/><path d="M45 50a7 7 0 0 1 14 0z"/><path d="M48.5 50l1-4M52 50v-5.5M55.5 50l-1-4" stroke-width="1.6"/><path d="M8 12h48" stroke-width="2" opacity=".55"/><path d="M12 12v4M32 12v4M52 12v4" stroke-width="2" opacity=".55"/>
+</svg></span>
+          <div><p class="eyebrow">10 · Template marketplace (future, Phase 4)</p><h2>The reef</h2></div>
+        </header>
+        <p class="tech"><span class="label">What it means</span>Planned: a signed template registry and marketplace with public curated and private org templates, each pinned with SHA-256 provenance.</p>
+        <p class="meta"><span class="label">The picture</span>A curated reef market: shelves of distinct shells, each tagged; the crab browses and picks one.</p>
+        <details><summary>3D translation</summary><ul><li>Reef ledges as stepped sand-coloured shelves at the water&#x27;s edge; shells as varied teal lathe/spiral meshes.</li><li>Tags: small coral cards on strings (blank: no text in the 3D scene).</li><li>Loop: slow camera dolly along the shelves; the crab lifts a shell, its tag flips, and it moves on.</li></ul></details>
+        <p class="files"><code>assets/crab/reef.webp</code> <code>assets/crab/svg/reef.svg</code></p>
+      </div>
+    </article>
+  </div>
+
+  <section class="guide" id="style-guide">
+    <h2>Style guide</h2>
+    <p>Clean flat isometric vector. Friendly but premium, with a developer-tool feel. Sand and teal carry the world; coral belongs to the crab. Later 3D work should follow the same rules.</p>
+    <div class="panel" style="margin-top:20px">
+      <h3>Palette</h3>
+      <div class="swatches">
+        <div class="sw"><i style="background:#F5ECD9"></i><div><b>Light sand</b><code>#F5ECD9</code> backgrounds</div></div>
+        <div class="sw"><i style="background:#E8D5B0"></i><div><b>Warm sand</b><code>#E8D5B0</code> ground</div></div>
+        <div class="sw"><i style="background:#1F7A8C"></i><div><b>Mid teal</b><code>#1F7A8C</code> water, glass, props</div></div>
+        <div class="sw"><i style="background:#0F4C5C"></i><div><b>Deep ocean teal</b><code>#0F4C5C</code> structures</div></div>
+        <div class="sw"><i style="background:#0B2F38"></i><div><b>Ink teal</b><code>#0B2F38</code> outlines, text</div></div>
+        <div class="sw"><i style="background:#FF6B4A"></i><div><b>Coral</b><code>#FF6B4A</code> the crab only</div></div>
+      </div>
+    </div>
+    <div class="panel" style="margin-top:40px">
+      <h3>Site and UI</h3>
+      <div class="swatches">
+        <div class="sw"><i style="background:#FAFAF7"></i><div><b>Chalk</b><code>#FAFAF7</code> page (light, the default)</div></div>
+        <div class="sw"><i style="background:#1D2529"></i><div><b>Ink</b><code>#1D2529</code> text, pills, code panels</div></div>
+        <div class="sw"><i style="background:#CF4B26"></i><div><b>Rust</b><code>#CF4B26</code> logo, links, accents</div></div>
+        <div class="sw"><i style="background:#111A20"></i><div><b>Night</b><code>#111A20</code> page (dark, by toggle)</div></div>
+        <div class="sw"><i style="background:#F07B55"></i><div><b>Ember</b><code>#F07B55</code> rust on dark</div></div>
+      </div>
+      <ul style="margin-top:16px">
+        <li>Type: Bricolage Grotesque 800 for headings and numbers, Instrument Sans for text, JetBrains Mono for code and kickers. All self-hosted under <code>docs/site/assets/brand/</code>.</li>
+        <li>The flat rust crab (no outline, eyes cut out in the page colour) is the logo and favicon.</li>
+      </ul>
+    </div>
+    <div class="guide-grid">
+      <div class="panel"><h3>Mascot</h3><ul>
+        <li>One chunky coral crab: smooth domed shell, two big rounded claws, dot eyes on short stalks, six short legs.</li>
+        <li>No mouth, no eyebrows, no accessories except scene props.</li>
+        <li>Coral (<code>#FF6B4A</code>) is reserved for the crab and one key accent per scene, such as the elapsed-time wedge or packet headers.</li>
+      </ul></div>
+      <div class="panel"><h3>Line &amp; shading</h3><ul>
+        <li>Illustrations: thin, even ink-teal outlines, flat fills with two-tone shading, soft long shadows. No grain, noise or busy gradients.</li>
+        <li>Glyphs: 64×64 grid, 2.5&nbsp;px round-cap/round-join stroke, scaled crabs at a 2&nbsp;px visual weight, <code>currentColor</code> line plus coral/teal fills.</li>
+        <li>No text, letters or logos inside any image.</li>
+      </ul></div>
+      <div class="panel"><h3>Composition</h3><ul>
+        <li>3:2 landscape, about a 30° isometric camera, one subject centred with generous negative space.</li>
+        <li>Scenes sit on a sand tile, disc or cutaway block, which works as the base of a 3D diorama.</li>
+        <li>Use cutaways (the burrow) to show what persists under the surface.</li>
+      </ul></div>
+      <div class="panel"><h3>3D translation rules</h3><ul>
+        <li>Materials: matte clay for the crab and sand (roughness 0.6–0.8), physical glass with transmission for jars and portholes, satin teal for props.</li>
+        <li>Lighting: one warm key light at about 35° elevation plus a cool teal fill; soft contact shadows, no hard rim light.</li>
+        <li>Orthographic or long-lens camera matching the isometric angle. Loops of 4–8 s that ease in and out and end where they began.</li>
+        <li>The crab rig is shared across scenes: dome body, capsule legs, sphere claws on hinged arms, eye-stalk cylinders.</li>
+      </ul></div>
+    </div>
+  </section>
+</main>
+<!-- SITE-FOOTER:BEGIN note="Illustrations generated with a shared style prompt and reviewed by hand. Glyphs are hand-authored SVG. Source: docs/site/assets/crab/." -->
+<footer class="site-foot">
+  <div class="site-foot-in">
+    <svg class="site-logo" viewBox="-21 -17 42 31" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M-9 4l-5 5M-5 6l-3 6M9 4l5 5M5 6l3 6"/><path d="M-9 -1l-5 -5M9 -1l5 -5"/><circle cx="-16" cy="-8" r="4.2" fill="currentColor"/><circle cx="16" cy="-8" r="4.2" fill="currentColor"/><path d="M-4 -7l-1 -4M4 -7l1 -4"/><path d="M-12 3a12 10 0 0 1 24 0q0 4 -12 4t-12 -4z" fill="currentColor"/><g stroke="none"><circle cx="-5" cy="-12" r="2.8" fill="currentColor"/><circle cx="5" cy="-12" r="2.8" fill="currentColor"/><circle class="eye" cx="-5" cy="-12" r="1.15"/><circle class="eye" cx="5" cy="-12" r="1.15"/></g></svg>
+    <nav aria-label="Footer"><a href="landing/index.html">Home</a><a href="walkthrough.html">Walkthrough</a><a href="bench-report.html">Benchmarks</a><a href="symbology.html">Symbology</a><a href="presentation.html">Presentation</a><a href="https://github.com/polvera-org/sandcrab/tree/main/docs" target="_blank" rel="noopener">Docs<span class="sr-only"> (opens in a new tab)</span></a><a href="https://github.com/polvera-org/sandcrab" target="_blank" rel="noopener">GitHub<span class="sr-only"> (opens in a new tab)</span></a></nav>
+    <p>Illustrations generated with a shared style prompt and reviewed by hand. Glyphs are hand-authored SVG. Source: docs/site/assets/crab/.</p>
+  </div>
+</footer>
+<!-- SITE-FOOTER:END -->
+</body>
+</html>

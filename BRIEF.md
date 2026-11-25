@@ -46,7 +46,7 @@ We evaluated [`kombuse-microvm`](https://docs.rs/kombuse-microvm/latest/microvm/
 | **Firecracker** | Hardware VM (Linux KVM, ~5 MB overhead) | `virtio-blk` only (no `virtio-fs`) | Sub-50ms warm restore | Cloud / high-density production |
 | **Cloud Hypervisor** | Hardware VM (Linux KVM, `rust-vmm`) | Native `virtio-fs` + `virtio-blk` | Supported | Self-hosted Linux host-folder mounts & future GPU/hotplug |
 | **libkrun** | Hardware VM (macOS HVF / Linux KVM) | Native `virtio-fs` | Limited | Local macOS Apple Silicon & Linux hardware-isolated dev |
-| **DockerDev (`bollard`)** | Shared kernel (**dev/CI only**) | Native bind mounts | No | Phase 1 local dev & CI integration testing |
+| **Docker (`bollard`)** | Shared kernel, hardened (not hardware isolation) | Native bind mounts | No | Officially supported for single-tenant / trusted-host workloads, local dev and CI; never a silent fallback |
 
 ---
 

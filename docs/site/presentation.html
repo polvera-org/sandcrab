@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How Sandcrab Works</title>
+<meta name="description" content="An interactive 3D presentation of how Sandcrab works: sandboxes, the one wire protocol, crabd's tools, workspaces, isolation, safety and benchmark numbers.">
+<meta name="color-scheme" content="light">
+<meta name="theme-color" content="#FAFAF7">
+<link rel="icon" href="assets/brand/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="assets/brand/favicon-32.png" type="image/png" sizes="32x32">
+<link rel="apple-touch-icon" href="assets/brand/apple-touch-icon.png" sizes="180x180">
+<link rel="stylesheet" href="assets/brand/brand.css">
+<script src="assets/brand/theme.js"></script>
+<style>
+/* deck-only tokens on top of the brand layer (assets/brand/brand.css) */
+:root {
+  --dot:var(--line-2); --dot-on:var(--rust);
+  --lbl-bg:rgba(255,255,255,.92); --lbl-ink:var(--ink); --lbl-line:rgba(29,37,41,.14);
+  --deck-top:var(--bar-h); /* deck.js sets the real header height */
+}
+:root[data-theme="dark"] {
+  --lbl-bg:rgba(22,34,42,.92); --lbl-line:rgba(233,231,224,.16);
+}
+html, body { height:100%; }
+body { overflow:hidden; font-size:16px; line-height:1.55; }
+.site-bar { position:fixed; left:0; right:0; top:0; }
+code, .mono { font-family:var(--mono); }
+
+#stage { position:fixed; left:0; right:0; bottom:0; top:var(--deck-top); cursor:pointer; touch-action:pan-y; }
+#stage canvas { display:block; width:100%; height:100%; }
+#labels { position:fixed; left:0; right:0; bottom:0; top:var(--deck-top); pointer-events:none; overflow:hidden; }
+.lbl { position:absolute; left:0; top:0; white-space:nowrap; font:500 11px/1.2 var(--mono); letter-spacing:.1em; text-transform:uppercase;
+  color:var(--lbl-ink); background:var(--lbl-bg); border:1px solid var(--lbl-line); border-radius:999px; padding:4px 9px; will-change:transform, opacity; }
+.lbl.quiet { color:var(--ink-2); }
+.lbl.mono { text-transform:none; letter-spacing:0; white-space:pre; line-height:1.45; border-radius:8px; }
+.lbl.stat { font-size:13px; text-transform:none; letter-spacing:0; font-weight:500; }
+.lbl.bar { font-size:12px; }
+
+.btn, .pill { font-family:var(--font); }
+.btn { font:600 13px/1 var(--font); color:var(--ink); background:transparent; border:1.5px solid var(--ink); border-radius:999px; padding:8px 12px; cursor:pointer; text-decoration:none; }
+.btn:hover { border-color:var(--rust); color:var(--rust-text); }
+.btn:focus-visible, .dot:focus-visible, .nav:focus-visible { outline:2px solid var(--rust); outline-offset:2px; }
+#counter { font:500 12px/1 var(--mono); color:var(--ink-2); letter-spacing:.1em; min-width:64px; text-align:left; font-variant-numeric:tabular-nums; }
+
+/* captions */
+.slide { position:fixed; left:0; right:0; bottom:0; top:var(--deck-top); pointer-events:none; z-index:2; visibility:hidden; }
+.slide.active { visibility:visible; }
+.cap { position:absolute; left:var(--gutter); bottom:96px; width:min(440px, 34vw); pointer-events:auto; cursor:auto;
+  opacity:0; transform:translateY(10px); transition:opacity .45s ease, transform .45s ease; }
+.slide.active .cap { opacity:1; transform:none; transition-delay:.35s; }
+.cap .eyebrow { margin:0 0 14px; font:400 11.5px/1.4 var(--mono); text-transform:uppercase; letter-spacing:.16em; color:var(--rust-text); }
+.cap h1, .cap h2 { font-family:var(--display); font-weight:800; font-stretch:82%; letter-spacing:-.035em; line-height:.94; margin:0; color:var(--ink); }
+.cap h2 { font-size:clamp(34px, 3.9vw, 56px); }
+.cap h1 { font-size:clamp(64px, 8.6vw, 128px); letter-spacing:-.045em; color:var(--rust); }
+.cap p { margin:14px 0 0; font-size:clamp(16px, 1.3vw, 18px); color:var(--ink-2); max-width:40ch; }
+.cap .epigraph { font:500 clamp(18px, 1.55vw, 22px)/1.35 var(--display); font-stretch:92%; letter-spacing:-.01em; color:var(--ink); border-left:3px solid var(--teal); padding-left:14px; }
+.cap .src { font:12px/1.5 var(--mono); color:var(--ink-3); margin-top:14px; overflow-wrap:anywhere; }
+.cap .go { margin-top:20px; display:flex; gap:8px; flex-wrap:wrap; }
+.cap :not(pre) > code { background:var(--bg-2); }
+img.fb { display:none; }
+
+/* bottom controls */
+.ctrl { position:fixed; left:0; right:0; bottom:20px; display:flex; align-items:center; justify-content:center; gap:14px; z-index:3; pointer-events:none; }
+.ctrl > * { pointer-events:auto; }
+.nav { width:42px; height:42px; border-radius:50%; border:1.5px solid var(--ink); background:var(--bg); color:var(--ink); cursor:pointer; display:grid; place-items:center; font:500 17px/1 var(--mono); }
+.nav:hover:not(:disabled) { background:var(--rust); border-color:var(--rust); color:#fff; }
+.nav:disabled { opacity:.3; cursor:default; }
+#dots { display:flex; gap:6px; align-items:center; }
+.dot { width:10px; height:10px; padding:0; border-radius:999px; border:0; background:var(--dot); cursor:pointer; transition:width .3s ease, background .3s ease; }
+.dot:hover { background:var(--teal); }
+.dot[aria-current] { width:28px; background:var(--dot-on); }
+.dot[aria-current]:hover { background:var(--dot-on); }
+.ctrl #counter { margin-left:4px; }
+.keys { position:fixed; right:var(--gutter); bottom:33px; margin:0; font:11px/1 var(--mono); color:var(--ink-3); letter-spacing:.08em; text-transform:uppercase; z-index:3; }
+
+/* file:// / no-WebGL hint */
+#hint { position:fixed; left:50%; top:calc(var(--deck-top) + 12px); transform:translateX(-50%); width:min(640px, calc(100vw - 32px)); z-index:4; background:var(--surface); border:1.5px solid var(--rust);
+  border-radius:14px; box-shadow:var(--shadow); padding:12px 16px; font-size:14px; color:var(--ink); }
+#hint p { margin:0; }
+#hint p + p { margin-top:6px; }
+#hint code { white-space:nowrap; }
+
+/* no-3D fallback: illustration beside (desktop) or above (phone) the caption */
+.no3d #stage { display:none; }
+.no3d img.fb { display:block; position:absolute; left:calc(min(440px, 34vw) + var(--gutter) + 48px); right:48px; top:24px; bottom:84px; width:auto; height:auto;
+  max-width:calc(100% - min(440px, 34vw) - var(--gutter) - 96px); max-height:calc(100% - 108px); margin:auto; object-fit:contain; border-radius:16px; filter:var(--img-filter); }
+
+/* tuning panel (?tune) */
+.tune { position:fixed; right:16px; top:calc(var(--deck-top) + 8px); width:min(320px, calc(100vw - 32px)); max-height:calc(100vh - var(--deck-top) - 90px); overflow:auto; z-index:5;
+  background:var(--surface); border:1px solid var(--line); border-radius:16px; box-shadow:var(--shadow); padding:14px 16px; font-size:13px; }
+.tune h3 { margin:0 0 8px; font:600 12px/1.2 var(--mono); text-transform:uppercase; letter-spacing:.08em; }
+.tune label { display:grid; grid-template-columns:72px 1fr 40px; align-items:center; gap:8px; margin:6px 0; color:var(--ink-2); }
+.tune output { font:12px var(--mono); color:var(--ink); text-align:right; }
+.tune .row { display:flex; gap:6px; flex-wrap:wrap; margin-top:10px; }
+.tune .row .btn { padding:7px 10px; font-size:12px; }
+.tune .stat { color:var(--ink-2); font:11.5px/1.5 var(--mono); margin-top:8px; }
+.tune input[type=range] { -webkit-appearance:none; appearance:none; width:100%; height:4px; border-radius:4px; background:var(--line); outline:none; }
+.tune input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; height:14px; border-radius:50%; background:var(--teal); border:2px solid var(--surface); box-shadow:0 0 0 1px var(--teal); cursor:pointer; }
+.tune input[type=range]::-moz-range-thumb { width:12px; height:12px; border-radius:50%; background:var(--teal); border:2px solid var(--surface); cursor:pointer; }
+.tune input[type=range]:focus-visible { outline:2px solid var(--rust); outline-offset:4px; }
+.custom-scrollbar { scrollbar-width:thin; scrollbar-color:var(--line) transparent; }
+.custom-scrollbar::-webkit-scrollbar { width:8px; }
+.custom-scrollbar::-webkit-scrollbar-thumb { background:var(--line); border-radius:8px; }
+
+@media (max-width: 899px) {
+  .keys { display:none; }
+  .cap { left:16px; right:16px; bottom:72px; width:auto; }
+  .cap h1 { font-size:60px; }
+  .cap h2 { font-size:32px; }
+  .cap p { font-size:15.5px; margin-top:8px; max-width:none; }
+  .cap .epigraph { font-size:17px; }
+  .cap .eyebrow { margin-bottom:8px; font-size:11px; }
+  .ctrl { bottom:16px; gap:10px; }
+  .nav { width:38px; height:38px; }
+  .dot { width:8px; height:8px; }
+  .dot[aria-current] { width:20px; }
+  #counter { min-width:0; font-size:11px; }
+  .lbl { font-size:9.5px; padding:3px 6px; letter-spacing:.04em; }
+  .lbl.stat { font-size:11px; }
+  .lbl.ghost { visibility:hidden; } /* the caption names the dashed slots on phones */
+  .no3d .slide.active { display:flex; flex-direction:column; padding:12px 16px 64px; }
+  .no3d img.fb { position:static; flex:1 1 auto; min-height:0; max-width:100%; max-height:none; width:100%; margin:0 0 12px; }
+  .no3d .cap { position:static; }
+  #hint code { white-space:normal; overflow-wrap:anywhere; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cap, .slide.active .cap, .dot { transition:none; }
+}
+</style>
+</head>
+<body>
+<div id="stage" aria-label="3D scene. Click the right side for the next slide, the left side for the previous one."></div>
+<div id="labels" aria-hidden="true"></div>
+
+<!-- SITE-HEADER:BEGIN -->
+<a class="sr-only" href="#main" onfocus="this.classList.remove('sr-only')" onblur="this.classList.add('sr-only')">Skip to content</a>
+<header class="site-bar">
+  <div class="site-bar-in">
+    <a class="site-brand" href="landing/index.html" aria-label="Sandcrab home"><svg class="site-logo" viewBox="-21 -17 42 31" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M-9 4l-5 5M-5 6l-3 6M9 4l5 5M5 6l3 6"/><path d="M-9 -1l-5 -5M9 -1l5 -5"/><circle cx="-16" cy="-8" r="4.2" fill="currentColor"/><circle cx="16" cy="-8" r="4.2" fill="currentColor"/><path d="M-4 -7l-1 -4M4 -7l1 -4"/><path d="M-12 3a12 10 0 0 1 24 0q0 4 -12 4t-12 -4z" fill="currentColor"/><g stroke="none"><circle cx="-5" cy="-12" r="2.8" fill="currentColor"/><circle cx="5" cy="-12" r="2.8" fill="currentColor"/><circle class="eye" cx="-5" cy="-12" r="1.15"/><circle class="eye" cx="5" cy="-12" r="1.15"/></g></svg><span>Sandcrab</span></a>
+    <nav class="site-nav" aria-label="Site"><a href="landing/index.html">Home</a><a href="walkthrough.html">Walkthrough</a><a href="bench-report.html">Benchmarks</a><a href="symbology.html">Symbology</a><a href="presentation.html" aria-current="page">Presentation</a><a href="https://github.com/polvera-org/sandcrab/tree/main/docs" target="_blank" rel="noopener">Docs<span class="sr-only"> (opens in a new tab)</span></a></nav>
+    <div class="site-actions"><a class="icon-btn" href="https://github.com/polvera-org/sandcrab" target="_blank" rel="noopener" aria-label="Sandcrab on GitHub (opens in a new tab)"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" d="M12 .5a11.5 11.5 0 0 0-3.64 22.41c.58.1.79-.25.79-.56v-2c-3.2.7-3.88-1.37-3.88-1.37-.52-1.33-1.28-1.69-1.28-1.69-1.05-.71.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.69 0-1.26.45-2.28 1.18-3.09-.12-.29-.51-1.46.11-3.04 0 0 .97-.31 3.17 1.18a11 11 0 0 1 5.76 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.58.23 2.75.11 3.04.74.81 1.18 1.83 1.18 3.09 0 4.42-2.7 5.4-5.27 5.68.41.36.78 1.06.78 2.14v3.17c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .5Z"/></svg></a><button class="icon-btn" type="button" data-theme-toggle aria-pressed="false" aria-label="Light theme on. Switch to dark theme"><svg class="ico ico-light" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2.5M12 19v2.5M2.5 12H5M19 12h2.5M5.3 5.3l1.8 1.8M16.9 16.9l1.8 1.8M5.3 18.7l1.8-1.8M16.9 7.1l1.8-1.8"/></svg><svg class="ico ico-dark" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z"/></svg></button><a class="pill pill-sm" href="landing/index.html#start">Quickstart</a></div>
+  </div>
+</header>
+<!-- SITE-HEADER:END -->
+
+<main id="deck">
+  <section class="slide" data-scene="shore" data-title="Sandcrab" aria-roledescription="slide">
+    <img class="fb" data-src="assets/crab/molting.webp" alt="The Sandcrab crab">
+    <div class="cap">
+      <p class="eyebrow">Sandcrab · how it works</p>
+      <h1>Sandcrab</h1>
+      <p class="epigraph">An architect of the impermanent, born of iron and grit, carving safe harbors from the chaotic shoreline.</p>
+      <p>Sandboxes for AI agents. Press → to begin.</p>
+    </div>
+  </section>
+
+  <section class="slide" data-scene="sharedbox" data-title="The problem" aria-roledescription="slide">
+    <img class="fb" data-src="assets/crab/isolation.webp" alt="Crabs crowded in a shared tide pool beside a sealed jar">
+    <div class="cap">
+      <p class="eyebrow">02 · The problem</p>
+      <h2>Agents need real computers</h2>
+      <p>Agents install packages, edit files and run code. Put them all on one shared box and one bad command breaks everyone’s work.</p>
+    </div>
+  </section>
+
+  <section class="slide" data-scene="lifeline" data-title="Sandbox lifecycle" aria-roledescription="slide">
+    <img class="fb" data-src="assets/crab/molting.webp" alt="A crab steps out of its old shell carrying a teal cube">
+    <div class="cap">
+      <p class="eyebrow">03 · Molting</p>
+      <h2>One sandbox per turn</h2>
+      <p>Spawn, wait for crabd’s hello, call tools, destroy. On Docker: spawn → ready p50 <span data-v="spawnRange">227–258 ms</span>, destroy p50 <span data-v="tearRange">96–104 ms</span>.</p>
+    </div>
+  </section>
+
+  <section class="slide" data-scene="frames" data-title="One protocol" aria-roledescription="slide">
+    <img class="fb" data-src="assets/crab/one-wire.webp" alt="A single cable from a host server to a crab in a jar">
+    <div class="cap">
+      <p class="eyebrow">04 · One wire</p>
+      <h2>One protocol, every backend</h2>
+      <p>SDK, CLI and crabagent send the same frames: a 4-byte length, then JSON-RPC. Unix socket into Docker, vsock into Firecracker.</p>
+    </div>
+  </section>
+
+  <section class="slide" data-scene="tools" data-title="Tools inside crabd" aria-roledescription="slide">
+    <img class="fb" data-src="assets/crab/toolbelt.webp" alt="A crab wearing a toolbelt of tools">
+    <div class="cap">
+      <p class="eyebrow">05 · Toolbelt &amp; tide clock</p>
+      <h2>Tools inside crabd</h2>
+      <p>Sixteen native Rust tools. A bash timeout kills the whole process group. Output keeps head and tail, 32&nbsp;KiB per stream.</p>
+    </div>
+  </section>
+
+  <section class="slide" data-scene="mounts" data-title="Workspaces" aria-roledescription="slide">
+    <img class="fb" data-src="assets/crab/burrow.webp" alt="Cutaway of a burrow full of crates">
+    <div class="cap">
+      <p class="eyebrow">06 · Burrow · window &amp; door</p>
+      <h2>Workspaces outlive sandboxes</h2>
+      <p>The burrow stays while shells molt. Mounts are read-only windows or read-write doors. Hosts edit between turns; Firecracker syncs an ext4 drive back.</p>
+    </div>
+  </section>
+
+  <section class="slide" data-scene="isolation" data-title="Isolation" aria-roledescription="slide">
+    <img class="fb" data-src="assets/crab/isolation.webp" alt="A shared tide pool beside a sealed jar">
+    <div class="cap">
+      <p class="eyebrow">07 · Tide pool vs. sealed jar</p>
+      <h2>What isolates what</h2>
+      <p>Docker: a hardened container on the shared host kernel, for single-tenant, trusted hosts. Firecracker: its own kernel behind KVM, built, first real-KVM benchmarks in the report.</p>
+    </div>
+  </section>
+
+  <section class="slide" data-scene="safety" data-title="Safety" aria-roledescription="slide">
+    <img class="fb" data-src="assets/crab/window-door.webp" alt="A read-only window and a read-write door">
+    <div class="cap">
+      <p class="eyebrow">08 · Refuse, never downgrade</p>
+      <h2>Unsafe requests fail loudly</h2>
+      <p>No silent backend fallback. Symlink and rename-swap tricks hit fd-relative <code>openat2</code>; overlapping workspace roots are refused. Three review rounds ended in PASS.</p>
+    </div>
+  </section>
+
+  <section class="slide" data-scene="bars" data-title="Numbers" aria-roledescription="slide">
+    <img class="fb" data-src="assets/crab/few-grains.webp" alt="A few grains of sand kept from a large pile">
+    <div class="cap">
+      <p class="eyebrow">09 · The numbers</p>
+      <h2>Measured, and what isn’t yet</h2>
+      <p>Canonical Docker run on dev-vps (2-vCPU SSD VPS): n=<span data-v="benchN">30</span> per cell, p50 bars, p95 whiskers. Firecracker and libkrun were measured on other hosts (bare-metal KVM, Apple M2), so they stay dashed here; the full report compares them host by host.</p>
+      <p class="src"><span data-v="benchFile">results.json</span> · commit <span data-v="benchCommit">—</span> · <a href="bench-report.html">full report</a></p>
+    </div>
+  </section>
+
+  <section class="slide" data-scene="screen" data-title="crabagent built this" aria-roledescription="slide">
+    <img class="fb" data-src="assets/crab/handoff.webp" alt="A hermit crab moving between shells over one burrow">
+    <div class="cap">
+      <p class="eyebrow">10 · Live check</p>
+      <h2>crabagent built the landing page</h2>
+      <p>Our test agent wrote it from inside Sandcrab sandboxes: <span data-v="toolCalls">188</span> tool calls, <span data-v="wall">36 minutes</span>, <span data-v="cost">$4.51</span>, <span data-v="toolErrors">zero</span> tool errors.</p>
+      <p class="go"><a class="pill pill-sm" href="landing/index.html">Open the landing page</a></p>
+    </div>
+  </section>
+
+  <section class="slide" data-scene="roadmap" data-title="Roadmap" aria-roledescription="slide">
+    <img class="fb" data-src="assets/crab/reef.webp" alt="A reef of many crabs">
+    <div class="cap">
+      <p class="eyebrow">11 · Next</p>
+      <h2>Stepping stones</h2>
+      <p>Publish a valid microVM-vs-Docker run on an SSD KVM host, add Cloud Hypervisor, then build the control plane.</p>
+      <p class="go"><a class="pill pill-sm" href="walkthrough.html">Read the walkthrough</a></p>
+    </div>
+  </section>
+</main>
+
+<nav class="ctrl" aria-label="Slides">
+  <button class="nav" id="prev" type="button" aria-label="Previous slide">←</button>
+  <div id="dots"></div>
+  <button class="nav" id="next" type="button" aria-label="Next slide">→</button>
+  <span id="counter" aria-live="polite"></span>
+</nav>
+<p class="keys" aria-hidden="true">← → space · 1–9 · click</p>
+
+<div id="hint" role="note" hidden>
+  <p class="why">The 3D scenes are ES modules, which browsers block on <code>file://</code>. You are seeing the illustrations instead.</p>
+  <p>For 3D, serve the repo: <code>python3 -m http.server 8000</code> from the repo root, then open <code>http://localhost:8000/docs/site/presentation.html</code>.</p>
+</div>
+
+<script src="presentation/data.js"></script>
+<script src="presentation/deck.js"></script>
+<script type="module" src="presentation/world.js" onerror="window.__deck && window.__deck.fallback('module')"></script>
+</body>
+</html>

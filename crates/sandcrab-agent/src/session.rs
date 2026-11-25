@@ -1,0 +1,1045 @@
+//! A crabagent session: resolve workspaces, spawn the sandbox, run the REPL or a one-shot
+//! task, tear everything down.
+
+use std::collections::HashSet;
+use std::io::Read as _;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use anyhow::{Context, bail};
+use sandcrab_sdk::{
+    BackendCapabilities, MountMode, Sandbox, SandboxConfig, SandboxError, Sandcrab,
+    WorkspaceBacking, WorkspaceClient, WorkspaceMount, WorkspaceRef,
+};
+use serde_json::json;
+
+use crate::agent::{Agent, Interrupt, TurnOutcome};
+use crate::cli::{Cli, HostMount, host_workspace_name, truthy};
+use crate::llm::LlmClient;
+use crate::llm::anthropic::{AnthropicClient, AnthropicConfig};
+use crate::prompt::{MountInfo, PromptContext, system_prompt};
+use crate::tools::anthropic_tools;
+use crate::transcript::{self, Transcript};
+use crate::ui::Ui;
+
+/// Deprecated, no-op docker opt-in (warned about, otherwise ignored) kept for one release.
+pub const DEPRECATED_INSECURE_ENV: &str = "SANDCRAB_ALLOW_INSECURE";
+pub const DEPRECATED_INSECURE_WARNING: &str = "warning: --allow-insecure / \
+    SANDCRAB_ALLOW_INSECURE is deprecated and has no effect: the docker backend is officially \
+    supported and needs no opt-in";
+
+/// Was the deprecated opt-in used? Only decides whether to warn.
+pub fn deprecated_opt_in_used(flag: bool, env: Option<&str>) -> bool {
+    flag || env.is_some_and(truthy)
+}
+pub const SSH_HOST_ENV: &str = "CRABAGENT_SSH_HOST";
+pub const DEFAULT_GUEST_WORKSPACE: &str = "/workspace";
+
+/// Values from a `.env` file (never exported into the process environment).
+///
+/// `Debug` prints the keys only: values hold secrets such as `ANTHROPIC_API_KEY`.
+#[derive(Default, Clone)]
+pub struct DotEnv {
+    pub path: Option<PathBuf>,
+    vars: Vec<(String, String)>,
+}
+
+impl std::fmt::Debug for DotEnv {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DotEnv")
+            .field("path", &self.path)
+            .field(
+                "keys",
+                &self
+                    .vars
+                    .iter()
+                    .map(|(k, _)| k.as_str())
+                    .collect::<Vec<_>>(),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+impl DotEnv {
+    /// Load `explicit`, else the first `.env` from `start` upwards, stopping at the
+    /// repository root (a directory containing `.git`).
+    pub fn load(explicit: Option<&Path>, start: &Path) -> anyhow::Result<Self> {
+        let path = match explicit {
+            Some(p) => Some(p.to_owned()),
+            None => find_dotenv(start),
+        };
+        let Some(path) = path else {
+            return Ok(Self::default());
+        };
+        let vars = dotenvy::from_path_iter(&path)
+            .with_context(|| format!("reading {}", path.display()))?
+            .collect::<Result<Vec<_>, _>>()
+            .with_context(|| format!("parsing {}", path.display()))?;
+        Ok(Self {
+            path: Some(path),
+            vars,
+        })
+    }
+
+    #[must_use]
+    pub fn get(&self, key: &str) -> Option<String> {
+        self.vars
+            .iter()
+            .rev()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.clone())
+    }
+
+    /// Process environment first, then the file. Empty values count as unset.
+    #[must_use]
+    pub fn lookup(&self, key: &str) -> Option<String> {
+        std::env::var(key)
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .or_else(|| self.get(key).filter(|v| !v.trim().is_empty()))
+    }
+}
+
+#[must_use]
+pub fn find_dotenv(start: &Path) -> Option<PathBuf> {
+    for dir in start.ancestors() {
+        let p = dir.join(".env");
+        if p.is_file() {
+            return Some(p);
+        }
+        if dir.join(".git").exists() {
+            break;
+        }
+    }
+    None
+}
+
+/// Everything a session needs besides the backend and the model.
+#[derive(Debug, Clone, Default)]
+pub struct SessionOptions {
+    pub workspace: Option<String>,
+    pub template: String,
+    pub mounts: Vec<WorkspaceMount>,
+    pub host_mounts: Vec<HostMount>,
+    pub cwd: Option<String>,
+    pub network: Option<sandcrab_sdk::NetworkPolicy>,
+    pub ports: Vec<u16>,
+    pub env: Vec<(String, String)>,
+    pub max_turns: u32,
+    pub transcript: Option<PathBuf>,
+    /// One-shot task; `None` = REPL.
+    pub prompt: Option<String>,
+    /// One-shot only: seconds to keep the sandbox up after the task (0 = destroy at once).
+    pub keep_alive_secs: u64,
+    /// `user@host` for the port-forward hint.
+    pub ssh_host: Option<String>,
+    pub quiet: bool,
+}
+
+impl SessionOptions {
+    #[must_use]
+    pub fn from_cli(cli: &Cli) -> Self {
+        Self {
+            workspace: cli.workspace.clone(),
+            template: cli.template.clone(),
+            mounts: cli.mounts.clone(),
+            host_mounts: cli.mount_hosts.clone(),
+            cwd: cli.cwd.clone(),
+            network: cli.network,
+            ports: cli.ports.clone(),
+            env: cli.env.clone(),
+            max_turns: cli.max_turns,
+            transcript: cli.transcript.clone(),
+            prompt: cli.prompt.clone(),
+            keep_alive_secs: cli.keep_alive,
+            ssh_host: None,
+            quiet: false,
+        }
+    }
+}
+
+/// The result of a finished session.
+#[derive(Debug, Clone)]
+pub struct SessionReport {
+    pub exit_code: u8,
+    pub outcome: Option<TurnOutcome>,
+    pub transcript: Option<PathBuf>,
+    pub usage_summary: String,
+    pub sandbox_id: String,
+}
+
+/// Register `host` as a workspace (or reuse the existing registration of the same
+/// canonical directory); returns its name. A directory inside or containing another
+/// workspace is refused (nested workspaces are unsafe) with a hint to mount the existing
+/// workspace instead.
+pub fn ensure_host_workspace(ws: &WorkspaceClient, host: &Path) -> anyhow::Result<String> {
+    let canon = std::fs::canonicalize(host)
+        .with_context(|| format!("--mount-host: cannot resolve {}", host.display()))?;
+    let all = ws.list()?;
+    if let Some(w) = all
+        .iter()
+        .find(|w| matches!(&w.backing, WorkspaceBacking::HostDir(p) if *p == canon))
+    {
+        return Ok(w.name.clone());
+    }
+    for w in all.iter().filter(|w| w.backing.is_dir()) {
+        let p = w.backing.path();
+        if let Ok(sub) = canon.strip_prefix(p) {
+            bail!(
+                "--mount-host {}: it is inside workspace `{}` ({}); nested workspaces are \
+                 refused. Mount the parent instead, e.g. `--mount {}:/parent:ro`, and use \
+                 `/parent/{}` in the sandbox",
+                canon.display(),
+                w.name,
+                p.display(),
+                w.name,
+                sub.display()
+            );
+        }
+        if p.starts_with(&canon) {
+            bail!(
+                "--mount-host {}: it contains workspace `{}` ({}); nested workspaces are \
+                 refused. Mount `{}` with `--mount {}:<guest_path>` instead, or remove it \
+                 first with `sandcrab workspace rm {}`",
+                canon.display(),
+                w.name,
+                p.display(),
+                w.name,
+                w.name,
+                w.name
+            );
+        }
+    }
+    let taken: HashSet<&str> = all.iter().map(|w| w.name.as_str()).collect();
+    let base = host_workspace_name(&canon);
+    let mut name = base.clone();
+    let mut n = 2;
+    while taken.contains(name.as_str()) {
+        name = format!("{base}-{n}");
+        n += 1;
+    }
+    ws.register_host_dir(&name, &canon)
+        .with_context(|| format!("registering {} as workspace `{name}`", canon.display()))?;
+    Ok(name)
+}
+
+/// Create the named workspace if it does not exist. Returns `true` if created.
+pub fn ensure_workspace(ws: &WorkspaceClient, name: &str) -> anyhow::Result<bool> {
+    match ws.get(WorkspaceRef::parse(name)) {
+        Ok(_) => Ok(false),
+        Err(SandboxError::NotFound { .. }) => {
+            ws.create(name)
+                .with_context(|| format!("creating workspace `{name}`"))?;
+            Ok(true)
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn describe_workspace(ws: &WorkspaceClient, r: &WorkspaceRef) -> String {
+    match ws.get(r.clone()) {
+        Ok(w) => match &w.backing {
+            WorkspaceBacking::HostDir(p) => {
+                format!("host directory {} (workspace `{}`)", p.display(), w.name)
+            }
+            _ => format!("persistent workspace `{}`", w.name),
+        },
+        Err(_) => format!("workspace {r}"),
+    }
+}
+
+/// Run a whole session on `sc` with `llm`. Destroys the sandbox before returning.
+pub async fn run_session(
+    sc: &Sandcrab,
+    llm: Arc<dyn LlmClient>,
+    opts: SessionOptions,
+    intr: &Interrupt,
+) -> anyhow::Result<SessionReport> {
+    let mut ui = if opts.quiet {
+        Ui::quiet()
+    } else {
+        Ui::default()
+    };
+    let ws = sc.workspaces();
+
+    // 1. Mounts.
+    let mut mounts = Vec::new();
+    let mut infos: Vec<MountInfo> = Vec::new();
+    let mut cwd = opts.cwd.clone();
+    if let Some(name) = &opts.workspace {
+        let created = ensure_workspace(&ws, name)?;
+        let guest = opts
+            .cwd
+            .clone()
+            .unwrap_or_else(|| DEFAULT_GUEST_WORKSPACE.to_owned());
+        cwd.get_or_insert_with(|| guest.clone());
+        mounts.push(WorkspaceMount {
+            workspace: WorkspaceRef::parse(name),
+            guest_path: PathBuf::from(&guest),
+            mode: MountMode::ReadWrite,
+        });
+        if created {
+            ui.info(&format!("created workspace `{name}`"));
+        }
+    }
+    mounts.extend(opts.mounts.iter().cloned());
+    for h in &opts.host_mounts {
+        let name = ensure_host_workspace(&ws, &h.host)?;
+        mounts.push(WorkspaceMount {
+            workspace: WorkspaceRef::parse(&name),
+            guest_path: h.guest.clone(),
+            mode: h.mode,
+        });
+    }
+    for m in &mounts {
+        infos.push(MountInfo {
+            guest_path: m.guest_path.display().to_string(),
+            read_only: m.mode == MountMode::ReadOnly,
+            description: describe_workspace(&ws, &m.workspace),
+        });
+    }
+    if cwd.is_none() {
+        cwd = mounts
+            .iter()
+            .find(|m| m.mode == MountMode::ReadWrite)
+            .map(|m| m.guest_path.display().to_string());
+    }
+
+    // 2. Spawn.
+    let mut config = SandboxConfig::from_template(&opts.template);
+    config.mounts.clone_from(&mounts);
+    config.default_cwd = cwd.as_ref().map(PathBuf::from);
+    // Caches go into the managed workspace at the cwd, so `npm i`, `uv sync` or a
+    // Playwright browser download survive across sessions ($HOME does not). Not into a
+    // host directory: that is the user's repo. --env wins.
+    let cache_dir = workspace_cache_dir(&ws, &mounts, cwd.as_deref());
+    if let Some(dir) = &cache_dir {
+        for (k, v) in cache_env(dir) {
+            config.env.insert(k, v);
+        }
+    }
+    config.env.extend(opts.env.iter().cloned());
+    if let Some(n) = opts.network {
+        config = config.network(n);
+    }
+    for p in &opts.ports {
+        config = config.port(*p);
+    }
+    let network = match opts.network {
+        Some(n) => n.to_string(),
+        None => sc
+            .templates()
+            .get(&opts.template)
+            .map(|t| t.manifest.network.default_policy.to_string())
+            .unwrap_or_else(|_| "template default".into()),
+    };
+    ui.info(&backend_line(
+        &sc.backend_kind().to_string(),
+        sc.backend_capabilities(),
+        enforces_disk_limit(sc),
+    ));
+    ui.info(&format!("spawning `{}` sandbox…", opts.template));
+    let sandbox = sc
+        .spawn(config)
+        .await
+        .with_context(|| format!("spawning a `{}` sandbox", opts.template))?;
+    let sandbox = Arc::new(sandbox);
+    let sandbox_id = sandbox.id().to_string();
+
+    let state_root = sc.state_dir().to_path_buf();
+    let result = drive(
+        &sandbox,
+        llm,
+        &opts,
+        &infos,
+        &network,
+        cache_dir.as_deref(),
+        &state_root,
+        intr,
+        &mut ui,
+    )
+    .await;
+
+    // 3. Teardown (always).
+    match Arc::try_unwrap(sandbox) {
+        Ok(sb) => {
+            if let Err(e) = sb.destroy().await {
+                ui.line(&format!("warning: destroying sandbox {sandbox_id}: {e}"));
+            } else {
+                ui.info(&format!("sandbox {sandbox_id} destroyed"));
+            }
+        }
+        Err(_still_shared) => {
+            // A tool task still holds it; dropping triggers a background destroy and the
+            // caller's `Sandcrab::shutdown` is the final safety net.
+        }
+    }
+    let mut report = result?;
+    report.sandbox_id = sandbox_id;
+    Ok(report)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn drive(
+    sandbox: &Arc<Sandbox>,
+    llm: Arc<dyn LlmClient>,
+    opts: &SessionOptions,
+    infos: &[MountInfo],
+    network: &str,
+    cache_dir: Option<&str>,
+    state_root: &Path,
+    intr: &Interrupt,
+    ui: &mut Ui,
+) -> anyhow::Result<SessionReport> {
+    let session = transcript::new_session_id();
+    let tpath = match &opts.transcript {
+        Some(p) => p.clone(),
+        None => transcript::default_path(state_root, &session),
+    };
+    let transcript = Transcript::open(&tpath)
+        .map_err(|e| {
+            ui.line(&format!(
+                "warning: no transcript ({}): {e}",
+                tpath.display()
+            ))
+        })
+        .ok();
+
+    // Banner.
+    let cwd = sandbox.default_cwd().display().to_string();
+    ui.line(&format!(
+        "{} {}  template {}  backend {}  model {}",
+        ui.bold("🦀 sandbox"),
+        sandbox.id(),
+        sandbox.template(),
+        sandbox.backend(),
+        llm.model()
+    ));
+    ui.info(&format!("   cwd {cwd}  network {network}"));
+    for m in infos {
+        ui.info(&format!(
+            "   mount {} ({}) — {}",
+            m.guest_path,
+            if m.read_only { "ro" } else { "rw" },
+            m.description
+        ));
+    }
+    let one_shot = opts.prompt.is_some();
+    let lifetime = match (one_shot, opts.keep_alive_secs) {
+        (false, _) => "",
+        (true, 0) => "  — live only while the task runs (--keep-alive SECS to hold it)",
+        (true, _) => "  — live while the task runs and during --keep-alive",
+    };
+    let mut ports = Vec::new();
+    for p in sandbox.published_ports() {
+        ports.push((p.guest, p.host.to_string()));
+        ui.line(&format!(
+            "   port {} → {}  (http://{}){lifetime}",
+            p.host, p.guest, p.host
+        ));
+        if let Some(h) = &opts.ssh_host {
+            let hp = p.host.port();
+            ui.info(&format!("     tunnel: ssh -L {hp}:127.0.0.1:{hp} {h}"));
+        }
+    }
+    if let Some(t) = &transcript {
+        ui.info(&format!("   transcript {}", t.path().display()));
+    }
+
+    let defs = sandbox.tool_definitions();
+    let tools = anthropic_tools(&defs);
+    let system = system_prompt(&PromptContext {
+        template: sandbox.template().to_owned(),
+        cwd: cwd.clone(),
+        mounts: infos.to_vec(),
+        network: network.to_owned(),
+        ports: ports.clone(),
+        tools: defs.iter().map(|d| d.name.to_owned()).collect(),
+        one_shot,
+        keep_alive_secs: opts.keep_alive_secs,
+        cache_dir: cache_dir.map(str::to_owned),
+    });
+
+    let mut agent = Agent::new(llm.clone(), sandbox.clone(), system, tools).with_ui(ui.clone());
+    agent.max_turns = opts.max_turns.max(1);
+    if let Some(t) = transcript {
+        agent = agent.with_transcript(t);
+    }
+    agent.log(
+        "session_start",
+        json!({
+            "session": session,
+            "sandbox": sandbox.id().to_string(),
+            "template": sandbox.template(),
+            "backend": sandbox.backend().to_string(),
+            "model": llm.model(),
+            "cwd": cwd,
+            "network": network,
+            "mounts": infos.iter().map(|m| json!({"guest": m.guest_path, "read_only": m.read_only, "desc": m.description})).collect::<Vec<_>>(),
+            "ports": ports.iter().map(|(g, h)| json!({"guest": g, "host": h})).collect::<Vec<_>>(),
+            "system": agent.system(),
+            "tools": defs.iter().map(|d| d.name).collect::<Vec<_>>(),
+        }),
+    );
+
+    let (exit_code, outcome) = if intr.count() > 0 {
+        (130, Some(TurnOutcome::Interrupted))
+    } else if let Some(prompt) = &opts.prompt {
+        let out = agent.run(prompt, intr).await;
+        let code = match out {
+            TurnOutcome::Done => 0,
+            TurnOutcome::Interrupted => 130,
+            _ => 1,
+        };
+        if opts.keep_alive_secs > 0
+            && !matches!(out, TurnOutcome::Interrupted | TurnOutcome::SandboxLost(_))
+        {
+            hold(sandbox, opts.keep_alive_secs, intr, &mut agent.ui).await;
+        }
+        (code, Some(out))
+    } else {
+        repl(
+            &mut agent,
+            intr,
+            sandbox,
+            &state_root.join("crabagent_history"),
+        )
+        .await?;
+        (0, None)
+    };
+
+    let usage_summary = agent.usage.summary();
+    agent.log(
+        "session_end",
+        json!({
+            "exit_code": exit_code,
+            "outcome": outcome.as_ref().map(|o| format!("{o:?}")),
+            "usage": agent.usage.by_model,
+            "requests": agent.usage.requests,
+            "cost_usd": agent.usage.cost().0,
+        }),
+    );
+    let tpath = agent.transcript_path().map(Path::to_path_buf);
+    ui.info(&format!("usage: {usage_summary}"));
+    if let Some(p) = &tpath {
+        ui.info(&format!("transcript: {}", p.display()));
+    }
+    Ok(SessionReport {
+        exit_code,
+        outcome,
+        transcript: tpath,
+        usage_summary,
+        sandbox_id: String::new(),
+    })
+}
+
+/// The workspace cache dir (`<cwd>/.cache`) when the cwd is a read-write mount of a
+/// Sandcrab-managed workspace (`ManagedDir`). A `HostDir` workspace is the user's own
+/// directory (often a git repo): caches are not redirected there.
+#[must_use]
+pub fn workspace_cache_dir(
+    ws: &WorkspaceClient,
+    mounts: &[WorkspaceMount],
+    cwd: Option<&str>,
+) -> Option<String> {
+    let cwd = cwd?;
+    let m = mounts
+        .iter()
+        .find(|m| m.mode == MountMode::ReadWrite && m.guest_path == Path::new(cwd))?;
+    let managed = ws
+        .get(m.workspace.clone())
+        .is_ok_and(|w| matches!(w.backing, WorkspaceBacking::ManagedDir(_)));
+    managed.then(|| format!("{}/.cache", cwd.trim_end_matches('/')))
+}
+
+/// Env pointing package / browser caches at `dir`. Playwright (Linux) and pip / uv follow
+/// `XDG_CACHE_HOME`; npm needs its own variable. Templates that set an explicit path in
+/// the image (the `render` template's `PLAYWRIGHT_BROWSERS_PATH`) keep it.
+#[must_use]
+pub fn cache_env(dir: &str) -> [(String, String); 2] {
+    [
+        ("XDG_CACHE_HOME".into(), dir.to_owned()),
+        ("npm_config_cache".into(), format!("{dir}/npm")),
+    ]
+}
+
+/// One-shot `--keep-alive`: keep the sandbox (and its ports) up until the timeout or Ctrl-C.
+async fn hold(sandbox: &Sandbox, secs: u64, intr: &Interrupt, ui: &mut Ui) {
+    let urls: Vec<String> = sandbox
+        .published_ports()
+        .iter()
+        .map(|p| format!("http://{}", p.host))
+        .collect();
+    let what = if urls.is_empty() {
+        String::new()
+    } else {
+        format!(" — {}", urls.join(", "))
+    };
+    ui.line(&format!(
+        "⏸ keeping the sandbox up for {secs}s{what} (Ctrl-C to stop)"
+    ));
+    let base = intr.count();
+    tokio::select! {
+        () = tokio::time::sleep(std::time::Duration::from_secs(secs)) => {}
+        () = intr.beyond(base) => {}
+    }
+}
+
+const HELP: &str = "/exit  quit (destroys the sandbox; the workspace persists)\n\
+                    /reset  forget the conversation (same sandbox)\n\
+                    /ports  published ports\n\
+                    /cost   token usage and cost so far\n\
+                    Ctrl-C during a turn interrupts it; Ctrl-D quits.";
+
+async fn repl(
+    agent: &mut Agent,
+    intr: &Interrupt,
+    sandbox: &Sandbox,
+    history: &Path,
+) -> anyhow::Result<()> {
+    use rustyline::error::ReadlineError;
+
+    let mut ed = rustyline::DefaultEditor::new().context("starting the line editor")?;
+    let _ = ed.load_history(history);
+    agent.ui.info("type a task, /help for commands");
+    loop {
+        let (e, line) = tokio::task::spawn_blocking(move || {
+            let r = ed.readline("\ncrab› ");
+            (ed, r)
+        })
+        .await
+        .context("line editor task")?;
+        ed = e;
+        let line = match line {
+            Ok(l) => l,
+            Err(ReadlineError::Interrupted) => continue,
+            Err(ReadlineError::Eof) => break,
+            Err(e) => return Err(e.into()),
+        };
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let _ = ed.add_history_entry(line);
+        match line {
+            "/exit" | "/quit" | "/q" => break,
+            "/help" | "/?" => agent.ui.info(HELP),
+            "/reset" => {
+                agent.reset();
+                agent.ui.info("conversation cleared");
+            }
+            "/cost" => {
+                let s = agent.usage.summary();
+                agent.ui.info(&s);
+            }
+            "/ports" => {
+                if sandbox.published_ports().is_empty() {
+                    agent.ui.info("no published ports (use --port)");
+                }
+                for p in sandbox.published_ports() {
+                    agent
+                        .ui
+                        .info(&format!("{} → {}  (http://{})", p.host, p.guest, p.host));
+                }
+            }
+            cmd if cmd.starts_with('/') => agent.ui.info(&format!("unknown command {cmd}; /help")),
+            task => {
+                if let TurnOutcome::SandboxLost(_) = agent.run(task, intr).await {
+                    break;
+                }
+            }
+        }
+    }
+    let _ = ed.save_history(history);
+    Ok(())
+}
+
+/// `--crabd`, else `$SANDCRAB_CRABD`, else `<target dir>/<arch>-unknown-linux-musl/release/crabd`
+/// (target dir: `$CARGO_TARGET_DIR`, else `target/`). Same resolution as the `sandcrab` CLI.
+#[must_use]
+pub fn crabd_path(cli: &Cli) -> PathBuf {
+    cli.crabd.clone().unwrap_or_else(|| {
+        std::env::var_os("SANDCRAB_CRABD")
+            .filter(|v| !v.is_empty())
+            .map_or_else(
+                || sandcrab_sdk::core::crabd_build_path(Path::new("")),
+                PathBuf::from,
+            )
+    })
+}
+
+/// microVM backends inject `crabd` into the template rootfs: fail fast, with the fix.
+#[cfg(any(
+    all(feature = "firecracker", target_os = "linux"),
+    all(
+        feature = "libkrun",
+        any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))
+    )
+))]
+fn require_crabd(backend: crate::cli::BackendArg, crabd: &Path) -> anyhow::Result<()> {
+    if !crabd.is_file() {
+        bail!(
+            "{} backend unavailable: static crabd {} not found (build it with \
+             scripts/build-crabd.sh, or pass --crabd / SANDCRAB_CRABD); crabagent never falls \
+             back to another backend",
+            backend.name(),
+            crabd.display()
+        );
+    }
+    Ok(())
+}
+
+/// Build a [`Sandcrab`] on the explicitly selected backend. Never falls back: a backend
+/// whose prerequisites are missing is an error naming them.
+#[cfg_attr(
+    not(any(
+        feature = "docker",
+        all(feature = "firecracker", target_os = "linux"),
+        all(
+            feature = "libkrun",
+            any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))
+        )
+    )),
+    allow(unreachable_code, unused_imports)
+)]
+pub fn build_sandcrab(cli: &Cli) -> anyhow::Result<Sandcrab> {
+    use crate::cli::BackendArg;
+
+    let env = std::env::var(DEPRECATED_INSECURE_ENV).ok();
+    if deprecated_opt_in_used(cli.allow_insecure, env.as_deref()) {
+        eprintln!("{DEPRECATED_INSECURE_WARNING}");
+    }
+    let Some(backend) = cli.backend else {
+        bail!(
+            "no backend selected: pass --backend <{}> (or set SANDCRAB_BACKEND); crabagent \
+             never picks one",
+            crate::cli::compiled_backends()
+        );
+    };
+    let state = match &cli.state_dir {
+        Some(d) => d.clone(),
+        None => sandcrab_sdk::core::default_state_root()?,
+    };
+    let mut builder = Sandcrab::builder().state_dir(&state);
+    let dirs = if cli.templates_dirs.is_empty() {
+        [PathBuf::from("templates"), state.join("templates")]
+            .into_iter()
+            .filter(|d| d.is_dir())
+            .collect()
+    } else {
+        cli.templates_dirs.clone()
+    };
+    for d in dirs {
+        builder = builder.templates_dir(d);
+    }
+    match backend {
+        #[cfg(feature = "docker")]
+        BackendArg::Docker => {
+            builder = builder.docker(sandcrab_sdk::DockerConfig {
+                crabd_path: crabd_path(cli),
+                ..sandcrab_sdk::DockerConfig::default()
+            });
+        }
+        #[cfg(all(feature = "firecracker", target_os = "linux"))]
+        BackendArg::Firecracker => {
+            // Hardware isolated; the backend checks /dev/kvm and the pinned kernel /
+            // firecracker binary itself (same config as `sandcrab --backend firecracker`).
+            let crabd = crabd_path(cli);
+            require_crabd(backend, &crabd)?;
+            builder =
+                builder.firecracker(sandcrab_sdk::FirecrackerConfig::with_home(&state, crabd));
+        }
+        #[cfg(all(
+            feature = "libkrun",
+            any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))
+        ))]
+        BackendArg::Libkrun => {
+            // Hardware isolated. Same config as `sandcrab --backend libkrun`: signed helper in
+            // <root>/bin, pinned libkrun from <root>/artifacts/libkrun/<version>/, the pinned
+            // userspace netstack for `unrestricted` (never TSI: the deprecated TSI opt-in is
+            // not offered here), host-dir workspaces shared live over virtio-fs.
+            let home = std::path::absolute(&state)
+                .with_context(|| format!("resolving {}", state.display()))?;
+            let crabd = std::path::absolute(crabd_path(cli))?;
+            require_crabd(backend, &crabd)?;
+            let mut c = sandcrab_sdk::LibkrunConfig::with_home(&home, crabd);
+            c.lib_dir = Some(sandcrab_sdk::libkrun::artifacts::default_dir(&home));
+            c.cgroup_parent = sandcrab_sdk::libkrun::config::cgroup_parent_from_env();
+            builder = builder.libkrun(c);
+        }
+    }
+    builder.build().with_context(|| {
+        format!(
+            "cannot initialise the {0} backend; crabagent never falls back to another backend \
+             (`sandcrab doctor --backend {0}` lists its prerequisites)",
+            backend.name()
+        )
+    })
+}
+
+/// The session's backend line: what the backend does and does not isolate, from its declared
+/// [`BackendCapabilities`]. Prefixed with `warning:` when the sandbox is not hardware isolated
+/// or the template's `disk_mb` is not enforced.
+#[must_use]
+pub fn backend_line(kind: &str, caps: BackendCapabilities, disk_enforced: bool) -> String {
+    let mut parts = vec![
+        if caps.hardware_isolated {
+            "hardware isolated (microVM)"
+        } else {
+            "not hardware isolated (shared host kernel)"
+        },
+        if caps.multi_tenant_safe {
+            "multi-tenant safe"
+        } else {
+            "not multi-tenant safe"
+        },
+        if caps.supports_host_dir_mounts {
+            "live host-dir mounts"
+        } else {
+            "workspaces copied in at spawn and synced back at exit (no live host-dir sharing)"
+        },
+    ];
+    if !disk_enforced {
+        parts.push("template disk_mb is not enforced");
+    }
+    let warn = if !caps.hardware_isolated || !disk_enforced {
+        "warning: "
+    } else {
+        ""
+    };
+    format!("{warn}backend `{kind}`: {}", parts.join(", "))
+}
+
+/// Does the backend enforce the template's `disk_mb`? (Docker reports it; the microVM
+/// backends size their disks from it.) Same rule as the `sandcrab` CLI.
+fn enforces_disk_limit(sc: &Sandcrab) -> bool {
+    #[cfg(feature = "docker")]
+    if let Some(d) = sc.docker_backend() {
+        return d.enforces_disk_limit();
+    }
+    let _ = sc;
+    true
+}
+
+fn default_ssh_host(dot: &DotEnv) -> Option<String> {
+    if let Some(h) = dot.lookup(SSH_HOST_ENV) {
+        return Some(h);
+    }
+    let user = std::env::var("USER").ok()?;
+    let host = std::fs::read_to_string("/etc/hostname").ok()?;
+    let host = host.trim();
+    (!host.is_empty()).then(|| format!("{user}@{host}"))
+}
+
+/// The `crabagent` command.
+pub async fn main(cli: Cli) -> anyhow::Result<u8> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let dot = DotEnv::load(cli.env_file.as_deref(), &cwd)?;
+    let Some(api_key) = dot.lookup("ANTHROPIC_API_KEY") else {
+        bail!(
+            "ANTHROPIC_API_KEY is not set: export it or put it in a .env file{}",
+            dot.path
+                .as_ref()
+                .map(|p| format!(" (looked in {})", p.display()))
+                .unwrap_or_default()
+        );
+    };
+    let mut cfg = AnthropicConfig::new(api_key, &cli.model);
+    cfg.max_tokens = cli.max_tokens;
+    cfg.effort.clone_from(&cli.effort);
+    cfg.fallback = !cli.no_fallback;
+    if let Some(url) = dot.lookup("ANTHROPIC_BASE_URL") {
+        cfg.base_url = url;
+    }
+    let llm: Arc<dyn LlmClient> = Arc::new(AnthropicClient::new(cfg)?);
+
+    let mut opts = SessionOptions::from_cli(&cli);
+    opts.ssh_host = default_ssh_host(&dot);
+    if opts.prompt.as_deref() == Some("-") {
+        let mut s = String::new();
+        std::io::stdin()
+            .read_to_string(&mut s)
+            .context("reading the task from stdin")?;
+        opts.prompt = Some(s);
+    }
+
+    let sc = Arc::new(build_sandcrab(&cli)?);
+    let intr = Interrupt::install();
+    let mut task = {
+        let sc = sc.clone();
+        let intr = intr.clone();
+        tokio::spawn(async move { run_session(&sc, llm, opts, &intr).await })
+    };
+    let joined = tokio::select! {
+        j = &mut task => j,
+        sig = intr.terminated() => {
+            // SIGTERM / SIGHUP / SIGQUIT: destroy every sandbox, then exit. Don't wait for
+            // the session task: the REPL may be blocked reading a (possibly gone) terminal.
+            eprintln!("crabagent: received signal {sig}; destroying the sandbox");
+            if let Err(e) = sc.shutdown().await {
+                eprintln!("warning: sandbox cleanup: {e}");
+            }
+            std::process::exit(128 + sig);
+        }
+    };
+    // Safety net: whatever happened above (error, panic), no sandbox outlives us.
+    if let Err(e) = sc.shutdown().await {
+        eprintln!("warning: sandbox cleanup: {e}");
+    }
+    match joined {
+        Ok(Ok(report)) => Ok(report.exit_code),
+        Ok(Err(e)) => Err(e),
+        Err(e) => bail!("crabagent crashed: {e}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deprecated_opt_in_only_triggers_a_warning() {
+        assert!(!deprecated_opt_in_used(false, None));
+        assert!(!deprecated_opt_in_used(false, Some("0")));
+        assert!(deprecated_opt_in_used(false, Some("1")));
+        assert!(deprecated_opt_in_used(true, None));
+        assert!(DEPRECATED_INSECURE_WARNING.contains("no effect"));
+    }
+
+    #[test]
+    fn backend_line_is_honest() {
+        let docker = BackendCapabilities {
+            hardware_isolated: false,
+            multi_tenant_safe: false,
+            supports_snapshots: false,
+            supports_host_dir_mounts: true,
+        };
+        let l = backend_line("docker", docker, false);
+        assert!(l.starts_with("warning: backend `docker`:"), "{l}");
+        assert!(
+            l.contains("not hardware isolated (shared host kernel)"),
+            "{l}"
+        );
+        assert!(l.contains("not multi-tenant safe"), "{l}");
+        assert!(l.contains("disk_mb is not enforced"), "{l}");
+        let l = backend_line("docker", docker, true);
+        assert!(l.starts_with("warning: ") && !l.contains("disk_mb"), "{l}");
+
+        let krun = BackendCapabilities {
+            hardware_isolated: true,
+            ..docker
+        };
+        let l = backend_line("libkrun", krun, true);
+        assert_eq!(
+            l,
+            "backend `libkrun`: hardware isolated (microVM), not multi-tenant safe, live \
+             host-dir mounts"
+        );
+        let fc = BackendCapabilities {
+            supports_host_dir_mounts: false,
+            ..krun
+        };
+        let l = backend_line("firecracker", fc, true);
+        assert!(!l.starts_with("warning"), "{l}");
+        assert!(l.contains("copied in at spawn"), "{l}");
+    }
+
+    #[test]
+    fn caches_only_in_managed_workspaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = WorkspaceClient::open(dir.path().join("state")).unwrap();
+        ws.create("site").unwrap();
+        std::fs::create_dir_all(dir.path().join("repo")).unwrap();
+        let repo = ensure_host_workspace(&ws, &dir.path().join("repo")).unwrap();
+        let mount = |name: &str, guest: &str, mode| WorkspaceMount {
+            workspace: WorkspaceRef::parse(name),
+            guest_path: PathBuf::from(guest),
+            mode,
+        };
+        let managed = [mount("site", "/workspace", MountMode::ReadWrite)];
+        assert_eq!(
+            workspace_cache_dir(&ws, &managed, Some("/workspace/")).as_deref(),
+            Some("/workspace/.cache")
+        );
+        let host = [mount(&repo, "/workspace", MountMode::ReadWrite)];
+        assert_eq!(workspace_cache_dir(&ws, &host, Some("/workspace")), None);
+        let ro = [mount("site", "/workspace", MountMode::ReadOnly)];
+        assert_eq!(workspace_cache_dir(&ws, &ro, Some("/workspace")), None);
+        assert_eq!(workspace_cache_dir(&ws, &managed, Some("/elsewhere")), None);
+        assert_eq!(workspace_cache_dir(&ws, &managed, None), None);
+    }
+
+    #[test]
+    fn mount_host_reuses_and_refuses_overlap() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = WorkspaceClient::open(dir.path().join("state")).unwrap();
+        let outer = dir.path().join("outer");
+        std::fs::create_dir_all(outer.join("inner")).unwrap();
+        std::fs::create_dir_all(dir.path().join("other")).unwrap();
+        let a = ensure_host_workspace(&ws, &outer).unwrap();
+        // Same canonical dir (through `.`): reused, not re-registered.
+        assert_eq!(ensure_host_workspace(&ws, &outer.join(".")).unwrap(), a);
+        let e = ensure_host_workspace(&ws, &outer.join("inner"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("inside workspace") && e.contains("/parent/inner"),
+            "{e}"
+        );
+        let e = ensure_host_workspace(&ws, dir.path())
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("contains workspace"), "{e}");
+        ensure_host_workspace(&ws, &dir.path().join("other")).unwrap();
+        assert_eq!(ws.list().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn dotenv_lookup_and_discovery() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        let sub = dir.path().join("a/b");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(
+            dir.path().join(".env"),
+            "CRABAGENT_TEST_ONLY_KEY=from-file\nEMPTY=\n",
+        )
+        .unwrap();
+        assert_eq!(find_dotenv(&sub), Some(dir.path().join(".env")));
+        let d = DotEnv::load(None, &sub).unwrap();
+        assert_eq!(
+            d.get("CRABAGENT_TEST_ONLY_KEY").as_deref(),
+            Some("from-file")
+        );
+        assert_eq!(
+            d.lookup("CRABAGENT_TEST_ONLY_KEY").as_deref(),
+            Some("from-file")
+        );
+        assert!(d.lookup("EMPTY").is_none());
+        // .env above the repo root is not used
+        let inner = tempfile::tempdir().unwrap();
+        std::fs::create_dir(inner.path().join(".git")).unwrap();
+        assert!(find_dotenv(inner.path()).is_none());
+    }
+
+    #[test]
+    fn dotenv_debug_redacts_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".env");
+        std::fs::write(
+            &path,
+            "ANTHROPIC_API_KEY=sk-ant-very-secret-value\nOTHER=hunter2\n",
+        )
+        .unwrap();
+        let d = DotEnv::load(Some(&path), dir.path()).unwrap();
+        let dbg = format!("{d:?}");
+        assert!(
+            dbg.contains("ANTHROPIC_API_KEY") && dbg.contains("OTHER"),
+            "{dbg}"
+        );
+        assert!(!dbg.contains("sk-ant-very-secret-value"), "{dbg}");
+        assert!(!dbg.contains("hunter2"), "{dbg}");
+        let alt = format!("{d:#?}");
+        assert!(!alt.contains("sk-ant") && !alt.contains("hunter2"), "{alt}");
+    }
+}

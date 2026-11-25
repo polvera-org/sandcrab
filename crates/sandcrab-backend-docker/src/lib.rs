@@ -1,79 +1,60 @@
-//! Docker/OCI local development and CI backend for Sandcrab.
+//! Docker/OCI backend for Sandcrab (`docker`): an officially supported backend with fast
+//! spawn / teardown, for single-tenant or trusted-host workloads.
 //!
-//! **Security note**: Containers share the host kernel. This backend explicitly reports
-//! `hardware_isolated = false` and `multi_tenant_safe = false` so callers can never
-//! accidentally treat it as a multi-tenant production isolation boundary.
+//! **Security note**: containers are hardened but share the host kernel. This backend
+//! reports `hardware_isolated = false` and `multi_tenant_safe = false`; mutually hostile
+//! multi-tenant code needs a microVM backend. It must be selected explicitly and is never
+//! a fallback for a microVM backend.
+//!
+//! Each sandbox is one hardened container (see [`spec`] for the exact hardening) running
+//! the template image with the host's **static** `crabd` bind-mounted read-only at
+//! `/opt/sandcrab/crabd`. The host talks the real Sandcrab protocol to it — the same
+//! `crabd` and wire format the microVM backends use. There is no `docker exec` anywhere.
+//!
+//! Transports ([`DockerTransport`], `$SANDCRAB_DOCKER_TRANSPORT=unix|tcp`):
+//! - `unix` (default on Linux): `crabd` listens on `/run/sandcrab/crabd.sock`, which is the
+//!   per-sandbox host directory `<state_dir>/<sandbox id>/` (0700).
+//! - `tcp` (default on macOS / Docker Desktop, where a Unix socket cannot cross the VM
+//!   boundary): `crabd` listens on a Unix socket in a per-sandbox tmpfs volume; a second,
+//!   hardened relay container (`crabd relay`) publishes it on host `127.0.0.1` (ephemeral
+//!   port, never `0.0.0.0`). The sandbox container's network is untouched, so policy
+//!   `disabled` still means network mode `none`.
+//!
+//! Either way every connection must first present a per-sandbox 256-bit token
+//! (`sandcrab_protocol::auth`): the host writes it to `<state_dir>/<id>/auth-token` (0400),
+//! `crabd` reads and deletes it, and the host keeps it only in memory. A loopback TCP port is
+//! reachable by every local user and process, so the token, not the port, is the boundary.
+//!
+//! Requirements / limitations:
+//! - Template images must be pinned on this host (`templates/build.sh <name>` or
+//!   `sandcrab template pin <name>`; see `sandcrab_core::pins`) unless
+//!   [`DockerConfig::allow_unpinned_images`] is set. The pin is local integrity, not provenance.
+//! - A local Docker daemon that can bind-mount host paths: rootful Docker on Linux, or
+//!   Docker Desktop on macOS (`tcp` transport). Rootless Docker remaps uids, so the
+//!   workspace ownership model breaks; Docker Desktop for Linux needs
+//!   `SANDCRAB_DOCKER_TRANSPORT=tcp`.
+//! - `egress_restricted` networking is refused (`PolicyUnenforceable`), never downgraded.
+//! - Template `disk_mb` is **not enforced** ([`DockerBackend::enforces_disk_limit`] is
+//!   `false`; every spawn logs a warning); the container root filesystem is writable.
+//! - A spawn future cancelled mid-create can leak a labeled container; see
+//!   [`DockerBackend::reap_orphans`].
 
-use async_trait::async_trait;
-use sandcrab_core::{
-    BackendCapabilities, BackendKind, Result, RuntimeBackend, SandboxError, SandboxHandle,
-    SandboxId, SandboxSpec,
+mod backend;
+mod config;
+mod reap;
+pub mod spec;
+
+pub use backend::{DISK_LIMIT_WARN_TARGET, DockerBackend, DockerImageVerifier};
+pub use config::{
+    CRABD_ENV, DockerConfig, DockerLimits, DockerTransport, TRANSPORT_ENV, check_static_crabd,
+    default_crabd_path, default_state_dir,
 };
+pub use reap::{Owner, ReapReport, ReapScope, ReapedContainer, boot_id, state_dir_key};
 
-/// Configuration for [`DockerDevBackend`].
-#[derive(Debug, Clone)]
-pub struct DockerDevConfig {
-    /// Explicit acknowledgement required before spawning shared-kernel dev containers.
-    pub allow_insecure_dev_backend: bool,
-    /// Optional Docker socket URI override (defaults to local platform socket).
-    pub docker_host: Option<String>,
-}
+/// Pre-rename name of [`DockerBackend`]; kept for one release.
+#[deprecated(note = "renamed to `DockerBackend`")]
+pub type DockerDevBackend = DockerBackend;
 
-impl Default for DockerDevConfig {
-    fn default() -> Self {
-        Self {
-            allow_insecure_dev_backend: true,
-            docker_host: None,
-        }
-    }
-}
-
-/// Phase 1 local development backend powered by Docker + `crabd`.
-#[derive(Debug, Clone)]
-pub struct DockerDevBackend {
-    config: DockerDevConfig,
-}
-
-impl DockerDevBackend {
-    pub fn new(config: DockerDevConfig) -> Result<Self> {
-        if !config.allow_insecure_dev_backend {
-            return Err(SandboxError::InsecureBackendRejected(
-                "DockerDevBackend requires explicit `allow_insecure_dev_backend = true`".into(),
-            ));
-        }
-        Ok(Self { config })
-    }
-
-    #[must_use]
-    pub fn config(&self) -> &DockerDevConfig {
-        &self.config
-    }
-}
-
-#[async_trait]
-impl RuntimeBackend for DockerDevBackend {
-    fn kind(&self) -> BackendKind {
-        BackendKind::DockerDev
-    }
-
-    fn capabilities(&self) -> BackendCapabilities {
-        BackendCapabilities {
-            hardware_isolated: false,
-            multi_tenant_safe: false,
-            supports_snapshots: false,
-            supports_host_dir_mounts: true,
-        }
-    }
-
-    async fn spawn(&self, _spec: &SandboxSpec) -> Result<Box<dyn SandboxHandle>> {
-        Err(SandboxError::Unimplemented(
-            "DockerDevBackend::spawn (Phase 1D: bollard container + workspace bind mounts + crabd RPC)",
-        ))
-    }
-
-    async fn destroy(&self, _id: &SandboxId) -> Result<()> {
-        Err(SandboxError::Unimplemented(
-            "DockerDevBackend::destroy (Phase 1D)",
-        ))
-    }
-}
+/// Pre-rename name of [`DockerConfig`]; kept for one release.
+#[deprecated(note = "renamed to `DockerConfig`")]
+pub type DockerDevConfig = DockerConfig;

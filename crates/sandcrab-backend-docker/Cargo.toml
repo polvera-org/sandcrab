@@ -1,6 +1,6 @@
 [package]
 name = "sandcrab-backend-docker"
-description = "Explicit local dev/CI RuntimeBackend using Docker containers with crabd (NOT for multi-tenant prod)"
+description = "Docker RuntimeBackend for Sandcrab: hardened containers running crabd (shared kernel; not for hostile multi-tenant code)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,6 +12,17 @@ authors.workspace = true
 sandcrab-core.workspace = true
 sandcrab-protocol.workspace = true
 async-trait.workspace = true
+bollard.workspace = true
+rustix.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+sandcrab-core = { workspace = true, features = ["test-util"] }
+serde_json.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

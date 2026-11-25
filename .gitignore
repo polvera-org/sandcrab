@@ -16,3 +16,10 @@
 *.swo
 .env
 .env.*
+
+# local agent worktrees and caches
+.claude/worktrees/
+__pycache__/
+
+# private infra notes (never commit)
+docs/private/

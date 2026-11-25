@@ -5,14 +5,19 @@ members = [
     "crates/sandcrab-core",
     "crates/sandcrab-guest",
     "crates/sandcrab-backend-docker",
+    "crates/sandcrab-rootfs",
+    "crates/sandcrab-backend-firecracker",
+    "crates/sandcrab-backend-libkrun",
     "crates/sandcrab-sdk",
     "crates/sandcrab-cli",
+    "crates/sandcrab-agent",
+    "crates/sandcrab-bench",
 ]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.89"
 license = "Apache-2.0"
 repository = "https://github.com/polvera-org/sandcrab"
 authors = ["Polvera Org"]
@@ -22,6 +27,9 @@ authors = ["Polvera Org"]
 sandcrab-protocol = { path = "crates/sandcrab-protocol" }
 sandcrab-core = { path = "crates/sandcrab-core" }
 sandcrab-backend-docker = { path = "crates/sandcrab-backend-docker" }
+sandcrab-rootfs = { path = "crates/sandcrab-rootfs" }
+sandcrab-backend-firecracker = { path = "crates/sandcrab-backend-firecracker" }
+sandcrab-backend-libkrun = { path = "crates/sandcrab-backend-libkrun" }
 sandcrab-sdk = { path = "crates/sandcrab-sdk" }
 
 # Async & networking
@@ -31,24 +39,57 @@ async-trait = "0.1"
 # Serialization & schemas
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-schemars = "0.8"
+schemars = { version = "0.8", features = ["uuid1"] }
 toml = "0.8"
+
+# Archives & hashing (Firecracker rootfs/artifact pipeline)
+flate2 = "1"
+sha2 = "0.10"
+tar = "0.4"
 
 # Errors, logging & primitives
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+# OS CSPRNG (per-sandbox auth tokens)
+getrandom = "0.4"
 chrono = { version = "0.4", features = ["serde"] }
 
+# Testing
+tempfile = "3"
+
+# Encoding (SDK upload/download helpers)
+base64 = "0.22"
+
+# Docker backend
+bollard = "0.21"
+rustix = { version = "1", features = ["process"] }
+
+# libkrun backend: runtime dlopen of the pinned libkrun (helper only, no link-time dependency)
+libloading = "0.8"
+# libkrun backend: host interface addresses (getifaddrs) for the userspace-netstack egress filter
+nix = { version = "0.31", default-features = false, features = ["net"] }
+
+# Agent harness (crabagent): HTTP + SSE to the Anthropic API (rustls/ring, no OpenSSL), REPL, .env
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2"] }
+rustyline = "17"
+dotenvy = "0.15"
+
 # CLI
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
+anyhow = "1"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
+
+# SHA-256 is on the spawn path when a pin's stat stamp misses (and in tests that hash their
+# own binary): unoptimized, it is ~20x slower.
+[profile.dev.package.sha2]
+opt-level = 3
 
 [profile.release]
 lto = true
