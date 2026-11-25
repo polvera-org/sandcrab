@@ -24,12 +24,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::netstack::{Ipv4Net, MAX_DENY_PREFIXES, NetstackKind};
 
+pub use sandcrab_rootfs::FileStamp;
+
 pub use sandcrab_protocol::init::{
     CONTROL_PORT, DEFAULT_TOOLS_PORT as TOOLS_PORT, ROOT_DRIVE_ID, SCRATCH_DRIVE_ID,
 };
 
 /// Version of the [`HelperConfig`] wire format. The helper refuses any other version.
-pub const HELPER_PROTO_VERSION: u32 = 1;
+/// 2: stat stamps on pinned files and disks, the pinned `passt.avx2` variant.
+pub const HELPER_PROTO_VERSION: u32 = 2;
 /// Upper bound on the config line (including the trailing newline).
 pub const MAX_HELPER_CONFIG_BYTES: usize = 64 * 1024;
 /// Longest Unix socket path, in bytes without the NUL: macOS `sun_path` is 104 bytes (Linux
@@ -126,10 +129,11 @@ type Result<T> = std::result::Result<T, HelperConfigError>;
 pub struct HelperConfig {
     /// Must equal [`HELPER_PROTO_VERSION`].
     pub version: u32,
-    /// libkrun dylib/so, hashed before `dlopen`.
+    /// libkrun dylib/so: verified (stamp, else SHA-256) through one fd, `dlopen`ed through it.
     pub libkrun: PinnedFile,
-    /// libkrunfw (the bundled guest kernel), hashed before libkrun loads it by leaf name from
-    /// its directory (`DYLD_FALLBACK_LIBRARY_PATH` / `LD_LIBRARY_PATH`).
+    /// libkrunfw (the bundled guest kernel): verified and `dlopen`ed through its fd first, so
+    /// libkrun's later leaf-name `dlopen` resolves to that loaded image (checked with
+    /// `RTLD_NOLOAD`, see `ffi.rs`).
     pub libkrunfw: PinnedFile,
     /// 1..=255 (`krun_set_vm_config` takes a `u8`; the helper also checks
     /// `krun_get_max_vcpus`).
@@ -163,12 +167,28 @@ pub struct HelperConfig {
     pub log_level: u32,
 }
 
-/// A host file pinned by SHA-256 (lowercase hex).
+/// A host file pinned by SHA-256 (lowercase hex), plus the stat stamp recorded with that
+/// digest (`sandcrab_rootfs::stamp`): the helper opens the file once, and a matching stamp
+/// spares it the hash; otherwise it hashes the fd. It then uses the fd, never the path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PinnedFile {
     pub path: PathBuf,
     pub sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stamp: Option<FileStamp>,
+}
+
+impl PinnedFile {
+    /// A pin without a stamp (the helper hashes it).
+    #[must_use]
+    pub fn new(path: impl Into<PathBuf>, sha256: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            sha256: sha256.into(),
+            stamp: None,
+        }
+    }
 }
 
 /// A raw disk image attached with `krun_add_disk`.
@@ -179,9 +199,15 @@ pub struct DiskSpec {
     pub block_id: String,
     pub path: PathBuf,
     pub read_only: bool,
-    /// Optional SHA-256 the helper checks before attaching (used for the shared rootfs).
+    /// SHA-256 of the image (the shared rootfs). With a [`Self::stamp`] the helper hashes only
+    /// when the stamp does not match; without one, on every spawn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
+    /// Stat stamp the backend verified the image with. When set, the helper opens the disk
+    /// once, requires this stamp (or, on a mismatch, the [`Self::sha256`]) and hands libkrun
+    /// that fd (`/proc/self/fd/<n>` | `/dev/fd/<n>`) instead of the path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stamp: Option<FileStamp>,
 }
 
 /// One `krun_add_virtiofs3` share.
@@ -240,8 +266,15 @@ pub enum HelperNetwork {
 #[serde(deny_unknown_fields)]
 pub struct NetstackSpec {
     pub kind: NetstackKind,
-    /// The netstack executable, hashed by the helper right before it is spawned.
+    /// The netstack executable, verified by the helper through an fd right before it is
+    /// spawned (Linux: executed through that fd).
     pub binary: PinnedFile,
+    /// passt's AVX2 build (`passt.avx2`), when installed. passt re-execs
+    /// `<readlink /proc/self/exe>.avx2` by path on AVX2 CPUs; the helper instead executes this
+    /// pinned variant itself on such CPUs (passt then does not re-exec), and refuses to start
+    /// plain passt next to an unpinned `.avx2` file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avx2: Option<PinnedFile>,
     /// Destinations denied on top of [`crate::netstack::ALWAYS_DENIED`]: the host's own
     /// addresses and on-link subnets ([`crate::netstack::host_prefixes`]).
     #[serde(default)]
@@ -394,6 +427,12 @@ impl HelperConfig {
         match (self.network, &self.netstack) {
             (HelperNetwork::Userspace, Some(ns)) => {
                 ns.binary.validate("netstack.binary")?;
+                if let Some(v) = &ns.avx2 {
+                    if ns.kind != NetstackKind::Passt {
+                        return Err(invalid("netstack.avx2", "only passt has an AVX2 variant"));
+                    }
+                    v.validate("netstack.avx2")?;
+                }
                 if ns.deny.len() > MAX_DENY_PREFIXES {
                     return Err(invalid(
                         "netstack.deny",
@@ -581,10 +620,12 @@ mod tests {
             libkrun: PinnedFile {
                 path: "/h/.sandcrab/artifacts/libkrun/1.19.8/libkrun.dylib".into(),
                 sha256: SHA_A.into(),
+                stamp: None,
             },
             libkrunfw: PinnedFile {
                 path: "/h/.sandcrab/artifacts/libkrun/1.19.8/libkrunfw.5.dylib".into(),
                 sha256: SHA_B.into(),
+                stamp: None,
             },
             vcpus: 2,
             memory_mib: 1024,
@@ -593,12 +634,14 @@ mod tests {
                 path: "/h/.sandcrab/cache/rootfs/abc/rootfs.ext4".into(),
                 read_only: true,
                 sha256: Some(SHA_A.into()),
+                stamp: None,
             },
             scratch: DiskSpec {
                 block_id: SCRATCH_DRIVE_ID.into(),
                 path: "/h/.sandcrab/run/krun/id/scratch.ext4".into(),
                 read_only: false,
                 sha256: None,
+                stamp: None,
             },
             disks: vec![],
             virtiofs: vec![
@@ -636,11 +679,13 @@ mod tests {
             binary: PinnedFile {
                 path: "/h/.sandcrab/artifacts/libkrun-net/passt/passt".into(),
                 sha256: SHA_A.into(),
+                stamp: None,
             },
             deny: vec![
                 "203.0.113.7/32".parse().unwrap(),
                 "198.51.100.0/24".parse().unwrap(),
             ],
+            avx2: None,
         });
         cfg
     }
@@ -758,12 +803,12 @@ mod tests {
     #[test]
     fn version_mismatch() {
         let mut cfg = sample();
-        cfg.version = 2;
+        cfg.version = 1;
         assert!(matches!(
             cfg.validate(),
             Err(HelperConfigError::Version {
-                got: 2,
-                expected: 1
+                got: 1,
+                expected: HELPER_PROTO_VERSION
             })
         ));
         // Checked before the full parse: a future config with new fields still reports the
@@ -931,6 +976,7 @@ mod tests {
             path: path.into(),
             read_only: false,
             sha256: None,
+            stamp: None,
         };
         let mut cfg = sample();
         cfg.disks.push(ws("ws-0", "/v/ws0.ext4"));

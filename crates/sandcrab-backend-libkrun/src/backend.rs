@@ -48,10 +48,10 @@ pub const TSI_DNS: [IpAddr; 2] = [
     IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)),
 ];
 
-/// The libkrun + libkrunfw files handed to the helper, each pinned by SHA-256, plus the
-/// optional pinned userspace netstack. The helper hashes them again before `dlopen` / spawn.
-/// Build it from the pinned artifacts (`artifacts.rs`) or, for a `lib_dir` override, with
-/// [`KrunLibs::hash_files`].
+/// The libkrun + libkrunfw files handed to the helper, each pinned by SHA-256 and a stat stamp,
+/// plus the optional pinned userspace netstack. The helper checks them again through the fd it
+/// then loads / executes (design §12.4). Build it from the pinned artifacts (`artifacts.rs`)
+/// or, for a `lib_dir` override, with [`KrunLibs::hash_files`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KrunLibs {
     pub libkrun: PinnedFile,
@@ -66,6 +66,8 @@ pub struct KrunLibs {
 pub struct NetstackBin {
     pub kind: NetstackKind,
     pub binary: PinnedFile,
+    /// passt's pinned AVX2 build (`<binary>.avx2`), executed instead on AVX2 CPUs.
+    pub avx2: Option<PinnedFile>,
 }
 
 impl KrunLibs {
@@ -73,10 +75,13 @@ impl KrunLibs {
     /// tests; prefer the release pins).
     pub fn hash_files(libkrun: &Path, libkrunfw: &Path) -> Result<Self> {
         let pin = |p: &Path| -> Result<PinnedFile> {
+            let file = std::fs::File::open(p).map_err(|e| krun_err("opening libkrun", e))?;
+            let (sha256, stamp) = sandcrab_rootfs::stamp::hash_and_stamp(&file)
+                .map_err(|e| krun_err("hashing libkrun", e))?;
             Ok(PinnedFile {
                 path: p.to_path_buf(),
-                sha256: sandcrab_rootfs::hash::sha256_file(p)
-                    .map_err(|e| krun_err("hashing libkrun", e))?,
+                sha256,
+                stamp,
             })
         };
         Ok(Self {
@@ -92,10 +97,19 @@ impl KrunLibs {
         self.libkrunfw.path.parent().unwrap_or(Path::new("/"))
     }
 
-    /// Every file exists; with `verify`, each matches its pin.
-    pub fn check(&self, verify: bool) -> Result<()> {
-        let netstack = self.netstack.as_ref().map(|n| &n.binary);
-        for f in [&self.libkrun, &self.libkrunfw].into_iter().chain(netstack) {
+    /// Every file exists; with `verify`, each matches its pin, checked through one fd (one
+    /// `fstat` when its stamp matches, a full hash otherwise), and its stamp is updated to the
+    /// one that now goes with the digest (so the helper's own check is an `fstat` too).
+    pub fn check(&mut self, verify: bool) -> Result<()> {
+        let netstack = self
+            .netstack
+            .as_mut()
+            .into_iter()
+            .flat_map(|n| std::iter::once(&mut n.binary).chain(n.avx2.as_mut()));
+        for f in [&mut self.libkrun, &mut self.libkrunfw]
+            .into_iter()
+            .chain(netstack)
+        {
             if !f.path.is_absolute() || !f.path.is_file() {
                 return Err(SandboxError::InvalidConfig(format!(
                     "libkrun library `{}` not found (install the pinned artifacts with \
@@ -104,16 +118,85 @@ impl KrunLibs {
                 )));
             }
             if verify {
-                sandcrab_rootfs::hash::verify_sha256(&f.path, &f.sha256).map_err(|e| {
-                    SandboxError::DigestMismatch {
-                        image: f.path.display().to_string(),
-                        expected: f.sha256.clone(),
-                        actual: e.to_string(),
-                    }
-                })?;
+                f.stamp = verify_pinned(f)?.stamp;
             }
         }
         Ok(())
+    }
+}
+
+/// Open `pin` once and verify it through that fd, as a [`SandboxError`].
+fn verify_pinned(pin: &PinnedFile) -> Result<sandcrab_rootfs::stamp::VerifiedFile> {
+    crate::verified::open_pinned(pin).map_err(|e| match e {
+        crate::verified::PinError::Mismatch(actual) => SandboxError::DigestMismatch {
+            image: pin.path.display().to_string(),
+            expected: pin.sha256.clone(),
+            actual,
+        },
+        crate::verified::PinError::Io(m) => krun_err("verifying a pinned file", m),
+    })
+}
+
+/// The helper binary's pin: its install record (`sandcrab libkrun install`), else whatever is
+/// there when first used (trust on first use, per process). Re-checked before every launch.
+#[derive(Debug, Default)]
+struct HelperPin(Mutex<Option<PinnedFile>>);
+
+impl HelperPin {
+    /// Open the helper once and verify it (an `fstat` on a stamp hit). The caller executes
+    /// the returned fd (Linux) or the path right after (macOS, design §12.4).
+    fn open(&self, helper: &Path) -> Result<std::fs::File> {
+        let pin = self
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let pin = match pin {
+            Some(p) => p,
+            None => match crate::verified::HelperRecord::load(helper)
+                .map_err(|e| krun_err("helper install record", e))?
+            {
+                Some(r) => r.pinned(helper),
+                None => {
+                    let file = std::fs::File::open(helper).map_err(|e| {
+                        krun_err(&format!("opening helper `{}`", helper.display()), e)
+                    })?;
+                    let (sha256, stamp) = sandcrab_rootfs::stamp::hash_and_stamp(&file)
+                        .map_err(|e| krun_err("hashing the helper", e))?;
+                    tracing::warn!(
+                        helper = %helper.display(),
+                        "libkrun helper has no install record: trusting it as found (re-run \
+                         `sandcrab libkrun install` to record it)"
+                    );
+                    let p = PinnedFile {
+                        path: helper.to_path_buf(),
+                        sha256,
+                        stamp,
+                    };
+                    *self.0.lock().unwrap_or_else(PoisonError::into_inner) = Some(p);
+                    return Ok(file);
+                }
+            },
+        };
+        let v = verify_pinned(&pin).map_err(|e| match e {
+            SandboxError::DigestMismatch {
+                image,
+                expected,
+                actual,
+            } => SandboxError::DigestMismatch {
+                image,
+                expected,
+                actual: format!(
+                    "{actual} (the libkrun helper changed after it was installed; re-run \
+                     `sandcrab libkrun install`)"
+                ),
+            },
+            other => other,
+        })?;
+        let mut cached = pin;
+        cached.stamp = v.stamp.or(cached.stamp);
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = Some(cached);
+        Ok(v.file)
     }
 }
 
@@ -130,10 +213,13 @@ pub struct LibkrunBackend {
     libs: Arc<KrunLibs>,
     host_user: UserSpec,
     rootfs_cache: RootfsCache,
+    helper_pin: Arc<HelperPin>,
 }
 
-/// (image, pin) → root disk, per process.
-type RootfsCache = Arc<Mutex<HashMap<(String, Option<String>), DiskSpec>>>;
+/// (image, pin) → built rootfs entry (dir + manifest), per process. The image itself is
+/// re-checked on every spawn ([`sandcrab_rootfs::open_image`]: one `fstat` on a stamp hit).
+type RootfsCache =
+    Arc<Mutex<HashMap<(String, Option<String>), (PathBuf, sandcrab_rootfs::RootfsManifest)>>>;
 
 impl LibkrunBackend {
     /// Validate the host and config: config invariants, an executable helper (on macOS
@@ -149,6 +235,7 @@ impl LibkrunBackend {
         check_kvm(Path::new("/dev/kvm"))?;
         #[cfg(target_os = "linux")]
         check_cgroup(config.cgroup_parent.as_deref())?;
+        let mut libs = libs;
         libs.check(config.verify_pins)?;
         let backend = Self::new_unchecked(config, libs)?;
         match backend.reap_orphans() {
@@ -174,6 +261,7 @@ impl LibkrunBackend {
                 rustix::process::getgid().as_raw(),
             ),
             rootfs_cache: Arc::default(),
+            helper_pin: Arc::default(),
         })
     }
 
@@ -205,20 +293,31 @@ impl LibkrunBackend {
         effective_user(spec.user, self.config.default_user, self.host_user)
     }
 
-    /// Read-only root disk for the spec's template (cached per process; built on a miss).
+    /// Read-only root disk for the spec's template (built once per process on a miss), verified
+    /// on every spawn: opened once, its stat stamp compared with the one recorded next to its
+    /// SHA-256 (re-hashed through the same fd only on a mismatch, then re-stamped or refused).
+    /// The helper repeats the stamp check on its own fd and hands libkrun that fd (design §12.4).
     async fn root_disk(&self, spec: &ResolvedSpec) -> Result<DiskSpec> {
         let crabd = match &self.config.rootfs {
-            RootfsSource::Image(p) => return Ok(root_disk(p.clone())),
+            RootfsSource::Image(p) => {
+                // An explicit image has no digest: pin the inode the backend saw, so the helper
+                // refuses a file swapped or modified in between.
+                let p = p.clone();
+                return tokio::task::spawn_blocking(move || image_disk(p))
+                    .await
+                    .map_err(|e| krun_err("rootfs stat task", e))?;
+            }
             RootfsSource::Template { crabd } => crabd.clone(),
         };
         let key = (spec.image.clone(), spec.image_sha256.clone());
-        if let Some(d) = self
+        let cached = self
             .rootfs_cache
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(&key)
-        {
-            return Ok(d.clone());
+            .cloned();
+        if let Some((dir, manifest)) = cached {
+            return self.verified_root(key, dir, manifest).await;
         }
         // Never build a rootfs from an image this host has not pinned (local integrity).
         if spec.image_sha256.is_none() {
@@ -259,11 +358,54 @@ impl LibkrunBackend {
             image = %spec.image, cache_hit = built.cache_hit, elapsed = ?built.elapsed,
             "rootfs ready"
         );
-        let disk = root_disk(built.image_path);
+        self.verified_root(key, built.dir, built.manifest).await
+    }
+
+    /// [`sandcrab_rootfs::open_image`] off the runtime (a stamp miss hashes the whole image),
+    /// then the root [`DiskSpec`] with the digest and the now-current stamp.
+    async fn verified_root(
+        &self,
+        key: (String, Option<String>),
+        dir: PathBuf,
+        manifest: sandcrab_rootfs::RootfsManifest,
+    ) -> Result<DiskSpec> {
+        let t0 = Instant::now();
+        let v = tokio::task::spawn_blocking(move || {
+            sandcrab_rootfs::open_image(&dir, &manifest).map(|v| (dir, v))
+        })
+        .await
+        .map_err(|e| krun_err("rootfs verify task", e))?
+        .map_err(|e| match e {
+            sandcrab_rootfs::Error::DigestMismatch {
+                what,
+                expected,
+                actual,
+            } => SandboxError::DigestMismatch {
+                image: what,
+                expected,
+                actual: format!(
+                    "{actual} (the cached rootfs changed after it was built; delete its \
+                             cache entry to rebuild it)"
+                ),
+            },
+            other => krun_err("rootfs", other),
+        })?;
+        let (dir, v) = v;
+        if let Some(e) = &v.record_error {
+            tracing::warn!(error = %e, "could not record the rootfs stat stamp (next process re-hashes)");
+        }
+        tracing::debug!(how = ?v.verified.how, elapsed = ?t0.elapsed(), "rootfs verified");
+        let disk = DiskSpec {
+            block_id: ROOT_DRIVE_ID.into(),
+            path: v.path.clone(),
+            read_only: true,
+            sha256: Some(v.manifest.rootfs_sha256.clone()),
+            stamp: v.verified.stamp,
+        };
         self.rootfs_cache
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(key, disk.clone());
+            .insert(key, (dir, v.manifest));
         Ok(disk)
     }
 
@@ -300,6 +442,7 @@ impl LibkrunBackend {
                 // The host's own addresses and on-link subnets, now (design §9).
                 deny: netstack::host_prefixes()
                     .map_err(|e| krun_err("listing host addresses (getifaddrs)", e))?,
+                avx2: ns.avx2.clone(),
             }),
             _ => None,
         };
@@ -321,10 +464,21 @@ impl LibkrunBackend {
             .to_line()
             .map_err(|e| SandboxError::InvalidConfig(format!("libkrun helper config: {e}")))?;
 
-        let deadline = Instant::now() + cfg.boot_timeout;
         let cgroup_mem = (spec.resources.memory_mb + cfg.vmm_overhead_mib) * 1024 * 1024;
+        // The helper binary: checked through one fd and, on Linux, executed through it.
+        let helper = {
+            let (pin, path) = (self.helper_pin.clone(), cfg.helper.clone());
+            tokio::task::spawn_blocking(move || pin.open(&path))
+                .await
+                .map_err(|e| krun_err("helper verify task", e))??
+        };
+        // The boot budget starts at the launch (a helper without an install record is hashed
+        // once per process above, which is not boot time).
+        let deadline = Instant::now() + cfg.boot_timeout;
+        let helper_fd = crate::verified::fd_path(&helper);
         vm.launch(&Launch {
             helper: &cfg.helper,
+            exec: cfg!(target_os = "linux").then_some(helper_fd.as_path()),
             lib_dir: self.libs.libkrunfw_dir(),
             config_line: &line,
             cgroup: cfg
@@ -333,6 +487,7 @@ impl LibkrunBackend {
                 .map(|p| (p, cgroup_mem, cfg.pids_max)),
         })
         .await?;
+        drop(helper);
         let started = t.mark_custom("helper_started");
         t.mark_at(LifecyclePhase::BackendStarted, started);
 
@@ -348,15 +503,21 @@ impl LibkrunBackend {
     }
 }
 
-fn root_disk(path: PathBuf) -> DiskSpec {
-    // Integrity of a built rootfs is checked by the rootfs cache (manifest + verify on hit);
-    // re-hashing a multi-hundred-MiB image in the helper on every spawn would dominate boot.
-    DiskSpec {
+/// Root disk for an explicit [`RootfsSource::Image`]: no digest, so the stamp the backend sees
+/// now pins it for the helper.
+fn image_disk(path: PathBuf) -> Result<DiskSpec> {
+    let file = std::fs::File::open(&path).map_err(|e| {
+        SandboxError::InvalidConfig(format!("libkrun rootfs image `{}`: {e}", path.display()))
+    })?;
+    let stamp =
+        sandcrab_rootfs::FileStamp::of_file(&file).map_err(|e| krun_err("stat rootfs image", e))?;
+    Ok(DiskSpec {
         block_id: ROOT_DRIVE_ID.into(),
         path,
         read_only: true,
         sha256: None,
-    }
+        stamp: Some(stamp),
+    })
 }
 
 /// Guest user: spec → configured default → host uid:gid.
@@ -408,6 +569,7 @@ pub(crate) fn build_helper_config(i: &HelperInputs<'_>) -> HelperConfig {
             path: i.scratch.clone(),
             read_only: false,
             sha256: None,
+            stamp: None,
         },
         disks: i.plan.disks.clone(),
         virtiofs: i.plan.shares.clone(),
@@ -622,10 +784,12 @@ image = "sandcrab/base:0.1.0"
             libkrun: PinnedFile {
                 path: "/h/.sandcrab/artifacts/libkrun/1.19.8/libkrun.1.dylib".into(),
                 sha256: SHA.into(),
+                stamp: None,
             },
             libkrunfw: PinnedFile {
                 path: "/h/.sandcrab/artifacts/libkrun/1.19.8/libkrunfw.5.dylib".into(),
                 sha256: SHA.into(),
+                stamp: None,
             },
             netstack: None,
         }
@@ -638,7 +802,9 @@ image = "sandcrab/base:0.1.0"
                 binary: PinnedFile {
                     path: "/h/.sandcrab/artifacts/libkrun-net/gvproxy-0.9.0/gvproxy".into(),
                     sha256: SHA.into(),
+                    stamp: None,
                 },
+                avx2: None,
             }),
             ..libs()
         }
@@ -801,7 +967,13 @@ image = "sandcrab/base:0.1.0"
             libs,
             vcpus: 2,
             memory_mib: 512,
-            root: root_disk("/h/.sandcrab/cache/rootfs/k/rootfs.ext4".into()),
+            root: DiskSpec {
+                block_id: ROOT_DRIVE_ID.into(),
+                path: "/h/.sandcrab/cache/rootfs/k/rootfs.ext4".into(),
+                read_only: true,
+                sha256: Some(SHA.into()),
+                stamp: None,
+            },
             scratch: run.join(SCRATCH_FILE),
             plan,
             config: cfg,
@@ -856,6 +1028,7 @@ image = "sandcrab/base:0.1.0"
             kind: NetstackKind::Gvproxy,
             binary: libs.netstack.clone().unwrap().binary,
             deny: vec!["203.0.113.9/32".parse().unwrap()],
+            avx2: None,
         });
         let h = build_helper_config(&i);
         h.validate().unwrap();
@@ -918,7 +1091,9 @@ image = "sandcrab/base:0.1.0"
             binary: PinnedFile {
                 path: ns.clone(),
                 sha256: sandcrab_rootfs::hash::sha256_file(&ns).unwrap(),
+                stamp: None,
             },
+            avx2: None,
         });
         libs.check(true).unwrap();
         std::fs::write(&ns, "evil").unwrap();

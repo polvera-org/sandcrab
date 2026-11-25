@@ -26,7 +26,12 @@ use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
-use crate::artifacts::{ArtifactError, GitPin, Origin, sha256_file};
+use sandcrab_rootfs::stamp::{self, FileStamp};
+
+use crate::artifacts::{
+    ArtifactError, GitPin, Origin, create_private_dir, create_private_dir_all, sha256_file,
+};
+use crate::helper_proto::PinnedFile;
 use crate::netstack::NetstackKind;
 
 /// Directory under `<home>/artifacts/` holding the netstack installs.
@@ -131,6 +136,29 @@ pub struct NetstackManifest {
     pub git_commit: Option<String>,
     /// Digest of the installed file.
     pub sha256: String,
+    /// Stat stamp that goes with `sha256` (`sandcrab_rootfs::stamp`). Recorded on first use
+    /// when absent (the shell installer does not write it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stamp: Option<FileStamp>,
+    /// passt's AVX2 build, installed as `<file>.avx2` from the same commit. passt re-execs
+    /// that sibling by path on AVX2 CPUs; pinning it lets the helper execute it itself through
+    /// a verified fd instead (design §12.4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avx2: Option<VariantManifest>,
+}
+
+/// A pinned build variant installed next to the main netstack file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VariantManifest {
+    pub file: String,
+    pub sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stamp: Option<FileStamp>,
+}
+
+fn is_sha256_hex(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 impl NetstackManifest {
@@ -154,13 +182,25 @@ impl NetstackManifest {
                 self.kind, self.version, self.file, pin.kind, pin.version, pin.file_name
             ));
         }
-        if !(self.sha256.len() == 64
-            && self
-                .sha256
-                .bytes()
-                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
-        {
+        if !is_sha256_hex(&self.sha256) {
             return Err(format!("sha256 `{}` is malformed", self.sha256));
+        }
+        if let Some(v) = &self.avx2 {
+            if self.kind != NetstackKind::Passt || self.origin != Origin::Source {
+                return Err(format!(
+                    "{}: only a passt source build has an AVX2 variant",
+                    pin.kind
+                ));
+            }
+            if v.file != format!("{}.avx2", self.file) {
+                return Err(format!(
+                    "AVX2 variant `{}` must be `{}.avx2`",
+                    v.file, self.file
+                ));
+            }
+            if !is_sha256_hex(&v.sha256) {
+                return Err(format!("avx2 sha256 `{}` is malformed", v.sha256));
+            }
         }
         match self.origin {
             Origin::Release => {
@@ -197,7 +237,38 @@ pub struct ResolvedNetstack {
     pub kind: NetstackKind,
     pub path: PathBuf,
     pub sha256: String,
+    /// Stat stamp of `path` that goes with `sha256`.
+    pub stamp: Option<FileStamp>,
+    /// The pinned AVX2 variant (passt), verified like the main file.
+    pub avx2: Option<PinnedFile>,
     pub manifest: NetstackManifest,
+}
+
+impl ResolvedNetstack {
+    /// As the backend's [`crate::NetstackBin`].
+    #[must_use]
+    pub fn into_bin(self) -> crate::NetstackBin {
+        crate::NetstackBin {
+            kind: self.kind,
+            binary: PinnedFile {
+                path: self.path,
+                sha256: self.sha256,
+                stamp: self.stamp,
+            },
+            avx2: self.avx2,
+        }
+    }
+}
+
+/// Open `path` once and verify it against `sha` through that fd (stamp hit or full hash).
+fn verify_file(
+    path: &Path,
+    sha: &str,
+    recorded: Option<&FileStamp>,
+) -> Result<Option<FileStamp>, ArtifactError> {
+    stamp::open_verified(path, sha, recorded)
+        .map(|v| v.stamp)
+        .map_err(|e| crate::artifacts::stamp_err(path, sha, e))
 }
 
 /// Resolve the netstack in `dir` against `pin`: `Ok(None)` when nothing is installed there.
@@ -220,7 +291,7 @@ pub fn resolve_dir(
         path: mpath.clone(),
         detail,
     };
-    let manifest: NetstackManifest =
+    let mut manifest: NetstackManifest =
         serde_json::from_slice(&raw).map_err(|e| mismatch(format!("unparseable: {e}")))?;
     manifest.check(pin).map_err(mismatch)?;
     let path = dir.join(&manifest.file);
@@ -230,18 +301,39 @@ pub fn resolve_dir(
             detail: format!("missing {}", manifest.file),
         });
     }
-    let actual = sha256_file(&path)?;
-    if actual != manifest.sha256 {
-        return Err(ArtifactError::DigestMismatch {
-            path,
-            expected: manifest.sha256,
-            actual,
-        });
+    // One fstat per file when the recorded stamps match; a full hash otherwise.
+    let stamp = verify_file(&path, &manifest.sha256, manifest.stamp.as_ref())?;
+    let avx2 = match &manifest.avx2 {
+        Some(v) => {
+            let vpath = dir.join(&v.file);
+            let vstamp = verify_file(&vpath, &v.sha256, v.stamp.as_ref())?;
+            Some(PinnedFile {
+                path: vpath,
+                sha256: v.sha256.clone(),
+                stamp: vstamp,
+            })
+        }
+        None => None,
+    };
+    let avx2_stamp = avx2.as_ref().and_then(|v| v.stamp);
+    let recorded_avx2 = manifest.avx2.as_ref().and_then(|v| v.stamp);
+    if (stamp, avx2_stamp) != (manifest.stamp, recorded_avx2) {
+        // First use of an install without stamps (the shell installer), or a benign
+        // metadata change: record the stamps that go with the verified digests.
+        manifest.stamp = stamp.or(manifest.stamp);
+        if let Some(v) = &mut manifest.avx2 {
+            v.stamp = avx2_stamp.or(v.stamp);
+        }
+        if let Err(e) = crate::artifacts::write_json(&mpath, &manifest) {
+            tracing::warn!(error = %e, "could not record netstack stat stamps (next use re-hashes)");
+        }
     }
     Ok(Some(ResolvedNetstack {
         kind: manifest.kind,
         path,
-        sha256: actual,
+        sha256: manifest.sha256.clone(),
+        stamp,
+        avx2,
         manifest,
     }))
 }
@@ -262,13 +354,7 @@ pub fn resolve_config(
     let (Some(dir), Ok(pin)) = (&config.netstack_dir, host_pin()) else {
         return Ok(None);
     };
-    Ok(resolve_dir(dir, pin)?.map(|r| crate::NetstackBin {
-        kind: r.kind,
-        binary: crate::helper_proto::PinnedFile {
-            path: r.path,
-            sha256: r.sha256,
-        },
-    }))
+    Ok(resolve_dir(dir, pin)?.map(ResolvedNetstack::into_bin))
 }
 
 /// Install `src` (a downloaded release asset, or a build of `git_commit`) for `pin` into
@@ -311,6 +397,8 @@ pub fn install_file(
         origin_sha256,
         git_commit: git_commit.map(str::to_owned),
         sha256: sha256_file(src)?,
+        stamp: None,
+        avx2: None,
     };
     manifest
         .check(pin)
@@ -318,6 +406,7 @@ pub fn install_file(
             path: dest.join(NETSTACK_MANIFEST),
             detail,
         })?;
+    let mut manifest = manifest;
 
     let parent = dest.parent().expect("versioned dir has a parent");
     let io = |what: String| {
@@ -326,7 +415,7 @@ pub fn install_file(
             source,
         }
     };
-    fs::create_dir_all(parent).map_err(io(format!("create {}", parent.display())))?;
+    create_private_dir_all(parent).map_err(io(format!("create {}", parent.display())))?;
     let leaf = dest
         .file_name()
         .expect("leaf")
@@ -335,11 +424,22 @@ pub fn install_file(
     let staging = parent.join(format!(".{leaf}.staging.{}", std::process::id()));
     let _ = fs::remove_dir_all(&staging);
     let res = (|| {
-        fs::create_dir(&staging).map_err(io(format!("create {}", staging.display())))?;
+        create_private_dir(&staging).map_err(io(format!("create {}", staging.display())))?;
         let bin = staging.join(pin.file_name);
         fs::copy(src, &bin).map_err(io(format!("copy {}", src.display())))?;
         fs::set_permissions(&bin, fs::Permissions::from_mode(0o555))
             .map_err(io(format!("chmod {}", bin.display())))?;
+        // Hash + stamp the installed copy through one fd, after its last chmod.
+        let (sha, stamp) =
+            stamp::record(&bin).map_err(|e| crate::artifacts::stamp_err(&bin, "", e))?;
+        if sha != manifest.sha256 {
+            return Err(ArtifactError::DigestMismatch {
+                path: bin.clone(),
+                expected: manifest.sha256.clone(),
+                actual: sha,
+            });
+        }
+        manifest.stamp = Some(stamp);
         let mpath = staging.join(NETSTACK_MANIFEST);
         let mut json = serde_json::to_vec_pretty(&manifest).expect("manifest serializes");
         json.push(b'\n');
@@ -380,7 +480,7 @@ pub fn install_release(home: &Path) -> Result<ResolvedNetstack, ArtifactError> {
         .join("artifacts")
         .join(NETSTACK_ARTIFACT_DIR)
         .join(format!(".download.{}", std::process::id()));
-    fs::create_dir_all(&tmp).map_err(|e| ArtifactError::Io {
+    create_private_dir_all(&tmp).map_err(|e| ArtifactError::Io {
         context: format!("create {}", tmp.display()),
         source: e,
     })?;
@@ -482,6 +582,10 @@ mod tests {
             "libkrun must be built with virtio-net"
         );
         assert!(script.contains("krun_add_net_unixstream"));
+        assert!(
+            script.contains("passt.avx2") && script.contains("\"avx2\""),
+            "the AVX2 build is installed and pinned"
+        );
     }
 
     #[test]
@@ -514,6 +618,74 @@ mod tests {
             resolve_dir(&dir, &other),
             Err(ArtifactError::ManifestMismatch { .. })
         ));
+    }
+
+    /// What `scripts/fetch-libkrun.sh` installs for passt: the binary, its `.avx2` build and
+    /// a manifest without stamps.
+    fn script_passt_install(home: &Path) -> PathBuf {
+        let pin = PASST_LINUX_X86_64;
+        let dir = default_dir(home, &pin);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("passt"), b"passt").unwrap();
+        fs::write(dir.join("passt.avx2"), b"passt-avx2").unwrap();
+        let sha = |p: &str| sha256_file(&dir.join(p)).unwrap();
+        let m = NetstackManifest {
+            schema: NETSTACK_MANIFEST_SCHEMA,
+            os: pin.os.into(),
+            arch: pin.arch.into(),
+            kind: pin.kind,
+            version: pin.version.into(),
+            file: pin.file_name.into(),
+            origin: Origin::Source,
+            origin_sha256: None,
+            git_commit: Some(pin.git.commit.into()),
+            sha256: sha("passt"),
+            stamp: None,
+            avx2: Some(VariantManifest {
+                file: "passt.avx2".into(),
+                sha256: sha("passt.avx2"),
+                stamp: None,
+            }),
+        };
+        crate::artifacts::write_json(&dir.join(NETSTACK_MANIFEST), &m).unwrap();
+        dir
+    }
+
+    #[test]
+    fn avx2_variant_is_pinned_and_stamped_on_first_use() {
+        let home = tempfile::tempdir().unwrap();
+        let pin = PASST_LINUX_X86_64;
+        let dir = script_passt_install(home.path());
+        let r = resolve_dir(&dir, &pin).unwrap().unwrap();
+        let v = r.avx2.clone().expect("pinned variant");
+        assert_eq!(v.path, dir.join("passt.avx2"));
+        assert!(r.stamp.is_some() && v.stamp.is_some());
+        let m: NetstackManifest =
+            serde_json::from_slice(&fs::read(dir.join(NETSTACK_MANIFEST)).unwrap()).unwrap();
+        assert_eq!(m.stamp, r.stamp, "recorded on first use");
+        assert_eq!(m.avx2.unwrap().stamp, v.stamp);
+        let bin = r.into_bin();
+        assert_eq!(bin.avx2, Some(v.clone()));
+        // A replaced variant (same name, same size) is refused.
+        let evil = dir.join("evil");
+        fs::write(&evil, b"evil-avx2!").unwrap();
+        fs::rename(&evil, &v.path).unwrap();
+        assert!(matches!(
+            resolve_dir(&dir, &pin),
+            Err(ArtifactError::DigestMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn avx2_variant_must_be_the_passt_sibling() {
+        let pin = PASST_LINUX_X86_64;
+        let home = tempfile::tempdir().unwrap();
+        let dir = script_passt_install(home.path());
+        let mut m: NetstackManifest =
+            serde_json::from_slice(&fs::read(dir.join(NETSTACK_MANIFEST)).unwrap()).unwrap();
+        m.check(&pin).unwrap();
+        m.avx2.as_mut().unwrap().file = "other".into();
+        assert!(m.check(&pin).unwrap_err().contains("passt.avx2"));
     }
 
     #[test]

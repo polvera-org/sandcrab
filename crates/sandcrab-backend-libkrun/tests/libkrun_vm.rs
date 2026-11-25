@@ -63,16 +63,24 @@ struct Env {
 }
 
 fn config(tmp: &Path, tsi: bool, netstack: bool) -> (LibkrunConfig, KrunLibs) {
+    config_with(tmp, tsi, netstack, |_| {})
+}
+
+/// [`config`], with `pre` adjusting the paths before the artifacts are resolved.
+fn config_with(
+    tmp: &Path,
+    tsi: bool,
+    netstack: bool,
+    pre: impl FnOnce(&mut LibkrunConfig),
+) -> (LibkrunConfig, KrunLibs) {
     let home = sandcrab_rootfs::sandcrab_home().unwrap();
     let mut cfg = LibkrunConfig::with_home(&home, crabd());
     cfg.run_dir = tmp.join("run");
     cfg.allow_tsi_unrestricted = tsi;
+    pre(&mut cfg);
     let a =
         Artifacts::resolve(&cfg).expect("pinned libkrun artifacts (`sandcrab libkrun install`)");
-    let pin = |p: sandcrab_backend_libkrun::artifacts::PinnedPath| PinnedFile {
-        path: p.path,
-        sha256: p.sha256,
-    };
+    let pin = |p: sandcrab_backend_libkrun::artifacts::PinnedPath| -> PinnedFile { p.into() };
     let netstack = netstack.then(|| {
         sandcrab_backend_libkrun::netstack_pins::resolve_config(&cfg)
             .expect("netstack install verifies")
@@ -111,6 +119,10 @@ fn env_full(tsi: bool, netstack: bool, tweak: impl FnOnce(&mut LibkrunConfig)) -
         .unwrap();
     let (mut cfg, libs) = config(tmp.path(), tsi, netstack);
     tweak(&mut cfg);
+    env_from(tmp, cfg, libs)
+}
+
+fn env_from(tmp: tempfile::TempDir, cfg: LibkrunConfig, libs: KrunLibs) -> Env {
     let backend = Arc::new(LibkrunBackend::new(cfg, libs).unwrap());
     let workspaces = WorkspaceRegistry::open(tmp.path().join("state")).unwrap();
     let project = tmp.path().join("project");
@@ -1252,6 +1264,247 @@ async fn published_ports_over_vsock_tunnels() {
             "{p:?} open after destroy"
         );
     }
+    assert!(leftovers(&env).is_empty());
+    assert!(no_helper_left());
+}
+
+// ---------------------------------------------------------------------------------------------
+// Verified fds (design §12.4): tampering after install is refused at spawn; review R8.
+
+/// `cp -a` (macOS: `cp -c` clones on APFS, so a rootfs copy costs no space).
+fn copy_tree(src: &Path, dst: &Path) {
+    let mut cmd = std::process::Command::new("cp");
+    if cfg!(target_os = "macos") {
+        cmd.arg("-c");
+    }
+    let st = cmd.arg("-a").arg(src).arg(dst).status().unwrap();
+    assert!(st.success(), "cp {} {}", src.display(), dst.display());
+}
+
+/// An env whose helper (+ its record), libraries, netstack and `base` rootfs cache entries are
+/// private copies under the test's tmp dir, so the test may tamper with them.
+fn private_env(netstack: bool) -> Env {
+    private_env_libs(netstack, |_| {})
+}
+
+fn private_env_libs(netstack: bool, tweak_libs: impl FnOnce(&mut KrunLibs)) -> Env {
+    let tmp = tempfile::Builder::new()
+        .prefix("sclk")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let t = tmp.path().to_path_buf();
+    let (cfg, _) = config(&t, false, netstack);
+    copy_tree(&Artifacts::resolve(&cfg).unwrap().dir, &t.join("lib"));
+    if let Some(ns) = &cfg.netstack_dir {
+        copy_tree(ns, &t.join("net"));
+    }
+    std::fs::create_dir_all(t.join("bin")).unwrap();
+    let helper = t.join("bin").join("sandcrab-krun");
+    copy_tree(&cfg.helper, &helper);
+    sandcrab_backend_libkrun::verified::HelperRecord::record(&helper).unwrap();
+    let dst_rootfs = t.join("cache").join("rootfs");
+    std::fs::create_dir_all(&dst_rootfs).unwrap();
+    for e in std::fs::read_dir(cfg.cache_root.join("rootfs"))
+        .unwrap()
+        .flatten()
+    {
+        let m = std::fs::read_to_string(e.path().join("manifest.json")).unwrap_or_default();
+        if m.contains("\"template\": \"base\"") {
+            copy_tree(&e.path(), &dst_rootfs.join(e.file_name()));
+        }
+    }
+    let (cfg, mut libs) = config_with(&t, false, netstack, |c| {
+        c.lib_dir = Some(t.join("lib"));
+        c.netstack_dir = Some(t.join("net"));
+        c.helper = helper.clone();
+        c.cache_root = t.join("cache");
+    });
+    tweak_libs(&mut libs);
+    env_from(tmp, cfg, libs)
+}
+
+/// The `base` rootfs image(s) under the env's private cache.
+fn private_rootfs(env: &Env) -> Vec<PathBuf> {
+    let imgs: Vec<_> = std::fs::read_dir(env.tmp.path().join("cache").join("rootfs"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.path().join("rootfs.ext4"))
+        .filter(|p| p.is_file())
+        .collect();
+    assert!(!imgs.is_empty(), "no base rootfs in the cache: spawn base once first");
+    imgs
+}
+
+fn with_owner_write(path: &Path, f: impl FnOnce()) {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(path).unwrap().permissions().mode();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode | 0o200)).unwrap();
+    f();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+}
+
+/// Overwrite one byte at `offset` in place (same inode, same size), then put the mtime back:
+/// only ctime tells.
+fn poke(path: &Path, offset: u64) {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    let mtime = std::fs::metadata(path).unwrap().modified().unwrap();
+    with_owner_write(path, || {
+        let mut f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        let mut b = [0u8; 1];
+        f.seek(SeekFrom::Start(offset)).unwrap();
+        f.read_exact(&mut b).unwrap();
+        f.seek(SeekFrom::Start(offset)).unwrap();
+        f.write_all(&[!b[0]]).unwrap();
+        f.set_modified(mtime).unwrap();
+        f.sync_all().unwrap();
+    });
+}
+
+/// Replace `path` by a modified copy under the same name (new inode, same size).
+fn swap_modified(path: &Path, offset: u64) {
+    let tmp = path.with_extension("evil");
+    copy_tree(path, &tmp);
+    poke(&tmp, offset);
+    std::fs::rename(&tmp, path).unwrap();
+}
+
+async fn spawn_base(env: &Env) -> Result<Sandbox, SandboxError> {
+    env.manager.spawn(SandboxConfig::from_template("base")).await
+}
+
+fn helper_refused_pin(e: &SandboxError) -> bool {
+    e.to_string().contains("exit code 71")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "real libkrun: signed helper, pinned libkrun, pinned sandcrab/base:0.1.0, static crabd"]
+async fn tampered_rootfs_is_refused() {
+    let env = private_env(false);
+    // First spawn: the copy's stamp misses, so it is re-hashed and re-stamped; then it boots.
+    let sb = spawn_base(&env).await.unwrap();
+    assert_eq!(bash(&sb, "true").await.exit_code, Some(0));
+    sb.destroy().await.unwrap();
+    let img = private_rootfs(&env).remove(0);
+    // A benign metadata change (chmod u+w and back): re-hashed, accepted.
+    with_owner_write(&img, || {});
+    spawn_base(&env).await.unwrap().destroy().await.unwrap();
+    // Modified in place (same inode, size and mtime): refused.
+    poke(&img, 4096 * 3);
+    let e = spawn_base(&env).await.unwrap_err();
+    assert!(matches!(e, SandboxError::DigestMismatch { .. }), "{e}");
+    // Put back, then replaced under the same name: refused.
+    poke(&img, 4096 * 3);
+    spawn_base(&env).await.unwrap().destroy().await.unwrap();
+    swap_modified(&img, 4096 * 5);
+    let e = spawn_base(&env).await.unwrap_err();
+    assert!(matches!(e, SandboxError::DigestMismatch { .. }), "{e}");
+    assert!(leftovers(&env).is_empty());
+    assert!(no_helper_left());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "real libkrun: signed helper, pinned libkrun, pinned sandcrab/base:0.1.0, static crabd"]
+async fn tampered_libraries_are_refused() {
+    // libkrun modified in place after the backend checked it: the helper refuses (71).
+    let env = private_env(false);
+    let libs = env.backend.libs().clone();
+    spawn_base(&env).await.unwrap().destroy().await.unwrap();
+    poke(&libs.libkrun.path, 4096);
+    let e = spawn_base(&env).await.unwrap_err();
+    assert!(helper_refused_pin(&e), "{e}");
+    assert!(leftovers(&env).is_empty());
+    // libkrunfw replaced under the same name.
+    let env = private_env(false);
+    let libs = env.backend.libs().clone();
+    swap_modified(&libs.libkrunfw.path, 4096);
+    let e = spawn_base(&env).await.unwrap_err();
+    assert!(helper_refused_pin(&e), "{e}");
+    assert!(leftovers(&env).is_empty());
+    assert!(no_helper_left());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "real libkrun: signed helper, pinned libkrun, pinned sandcrab/base:0.1.0, static crabd"]
+async fn replaced_helper_is_refused() {
+    let env = private_env(false);
+    let helper = env.backend.config().helper.clone();
+    let len = std::fs::metadata(&helper).unwrap().len();
+    spawn_base(&env).await.unwrap().destroy().await.unwrap();
+    // Modified in place: the backend refuses before launching it.
+    poke(&helper, len / 2);
+    let e = spawn_base(&env).await.unwrap_err();
+    assert!(matches!(e, SandboxError::DigestMismatch { .. }), "{e}");
+    // Replaced under the same name.
+    let env = private_env(false);
+    let helper = env.backend.config().helper.clone();
+    swap_modified(&helper, len / 3);
+    let e = spawn_base(&env).await.unwrap_err();
+    assert!(matches!(e, SandboxError::DigestMismatch { .. }), "{e}");
+    assert!(leftovers(&env).is_empty());
+    assert!(no_helper_left());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "real libkrun + pinned netstack: signed helper, pinned sandcrab/base:0.1.0, static crabd"]
+async fn tampered_netstack_is_refused() {
+    let unrestricted =
+        || SandboxConfig::from_template("base").network(NetworkConfig::unrestricted());
+    #[cfg(target_arch = "x86_64")]
+    let avx2 = std::arch::is_x86_feature_detected!("avx2");
+    #[cfg(not(target_arch = "x86_64"))]
+    let avx2 = false;
+    let env = private_env(true);
+    let ns = env.backend.libs().netstack.clone().unwrap();
+    let sb = env.manager.spawn(unrestricted()).await.unwrap();
+    sb.destroy().await.unwrap();
+    assert!(no_netstack_left(), "the netstack exits (else: ETXTBSY below)");
+    // The binary the helper executes on this CPU, modified in place.
+    let executed = match (&ns.avx2, avx2) {
+        (Some(v), true) => v.path.clone(),
+        _ => ns.binary.path.clone(),
+    };
+    poke(&executed, 8192);
+    let e = env.manager.spawn(unrestricted()).await.unwrap_err();
+    assert!(helper_refused_pin(&e), "{e}");
+    assert!(leftovers(&env).is_empty());
+    // passt on an AVX2 CPU without a pinned variant: the `.avx2` sibling passt would exec by
+    // path is unpinned, so the helper refuses.
+    if ns.avx2.is_some() && avx2 {
+        let env = private_env_libs(true, |l| l.netstack.as_mut().unwrap().avx2 = None);
+        let e = env.manager.spawn(unrestricted()).await.unwrap_err();
+        assert!(helper_refused_pin(&e), "{e}");
+        assert!(leftovers(&env).is_empty());
+    }
+    assert!(no_helper_left());
+}
+
+#[test]
+#[ignore = "real libkrun: signed helper, pinned libkrun, pinned sandcrab/base:0.1.0, static crabd"]
+fn vm_survives_the_thread_that_spawned_it() {
+    // Review R8: PR_SET_PDEATHSIG fires when the *thread* that forked the helper exits. Spawn
+    // from a short-lived thread, let it exit, and check that the VM still serves.
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_keep_alive(Duration::from_millis(50))
+        .build()
+        .unwrap();
+    let _guard = rt.enter();
+    let env = env();
+    let sb = std::thread::scope(|s| {
+        s.spawn(|| rt.block_on(spawn_base(&env)).unwrap())
+            .join()
+            .unwrap()
+    });
+    std::thread::sleep(Duration::from_millis(1500));
+    rt.block_on(async {
+        let r = bash(&sb, "echo alive").await;
+        assert_eq!(r.stdout.trim(), "alive", "{r:?}");
+        sb.destroy().await.unwrap();
+    });
     assert!(leftovers(&env).is_empty());
     assert!(no_helper_left());
 }

@@ -4,37 +4,45 @@
 //! 2. Start the **lifeline**: the rest of stdin moves to a private fd watched by a thread, and
 //!    fd 0 becomes `/dev/null` (libkrun takes over stdin for the guest console, which must not
 //!    swallow the pipe). EOF = the owning process is gone → SIGKILL ourselves, VM included.
-//!    On Linux `PR_SET_PDEATHSIG` is set as well.
+//!    This is the only owner-death mechanism: `PR_SET_PDEATHSIG` is deliberately not used,
+//!    because it fires when the *thread* that forked the helper exits (a retired blocking-pool
+//!    thread), not the owning process (review R8).
 //! 3. Raise the soft `RLIMIT_NOFILE` to the hard limit (see [`raise_nofile_limit`]).
-//!    Verify pins and identities: the libkrunfw leaf-name lookup can only find the pinned
-//!    file (74, see [`ffi::check_libkrunfw_lookup`]); libkrunfw + libkrun SHA-256 before
-//!    `dlopen` (71 / 74); disks exist, optional disk SHA-256s (70 / 71); workspace roots'
+//!    Verify pins and identities, each through one fd that is then used instead of the path
+//!    (design §12.4): libkrunfw + libkrun by stat stamp, else SHA-256 (71), `dlopen`ed through
+//!    that fd, the leaf-name lookup of libkrunfw bound to the loaded image (74, see
+//!    [`ffi::Krun::load`]); the root disk by stamp / SHA-256 (71), handed to libkrun as
+//!    `/proc/self/fd/<n>` (macOS `/dev/fd/<n>`); other disks exist (70); workspace roots'
 //!    `(dev, ino)` against the lease identity (72). Shares are handed to libkrun as
 //!    `/dev/fd/<n>` (Linux: `/proc/self/fd/<n>/.`) of the verified directory fd, closing the
 //!    verify → open race (§8).
 //!    Stale sockets at the vsock UDS paths (from a SIGKILLed run) are removed (70 if the
 //!    path is something else).
-//!    Network `userspace`: verify the pinned netstack's SHA-256 (71), spawn it on a
-//!    socketpair behind the egress filter threads ([`netstack`]; 76 if it cannot start).
+//!    Network `userspace`: verify the pinned netstack through an fd (71; passt: the pinned
+//!    AVX2 variant on AVX2 CPUs), spawn it (Linux: `execve` of that fd) on a socketpair behind
+//!    the egress filter threads ([`netstack`]; 76 if it cannot start).
 //! 4. Apply the [`ffi::plan`] (each `krun_*` call is logged to stderr first; 73 on failure).
 //! 5. `krun_start_enter`: never returns on success (libkrun `exit()`s with the guest's
 //!    status); returning is 75.
 //!
 //! stdout/stderr belong to the caller (the backend points them at `vmm.log`).
 
+use std::collections::HashMap;
+use std::fs::File;
 use std::io::{ErrorKind, Read};
 use std::os::fd::{AsFd, AsRawFd, IntoRawFd, OwnedFd};
 use std::os::unix::fs::MetadataExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use sandcrab_backend_libkrun::ffi::{self, FfiError, Krun, KrunCall};
 use sandcrab_backend_libkrun::helper_proto::{
-    HelperConfig, HelperNetwork, VirtioFsShare, exit_code,
+    HelperConfig, HelperNetwork, NetstackSpec, PinnedFile, VirtioFsShare, exit_code,
 };
-use sandcrab_backend_libkrun::netstack::{self, EgressPolicy};
+use sandcrab_backend_libkrun::netstack::{self, EgressPolicy, NetstackKind};
+use sandcrab_backend_libkrun::verified::{self, PinError};
 
 fn log(msg: impl std::fmt::Display) {
     eprintln!("sandcrab-krun: {msg}");
@@ -61,6 +69,7 @@ fn main() {
 /// Only returns on failure; on success `krun_start_enter` takes over the process.
 fn run() -> Fail {
     let t0 = Instant::now();
+    set_process_name();
     let cfg = match HelperConfig::read_from(std::io::stdin().lock()) {
         Ok(c) => c,
         Err(e) => return Fail::new(exit_code::CONFIG_INVALID, e),
@@ -77,8 +86,11 @@ fn run() -> Fail {
     let t_pins = Instant::now();
     let krun = match Krun::load(&cfg.libkrun, &cfg.libkrunfw) {
         Ok(k) => {
+            let how = |p: &PinnedFile| if p.stamp.is_some() { "stamp" } else { "sha256" };
             log(format_args!(
-                "libkrun + libkrunfw sha256 ok, loaded ({} ms)",
+                "libkrun ({}) + libkrunfw ({}) verified, loaded by fd ({} ms)",
+                how(&cfg.libkrun),
+                how(&cfg.libkrunfw),
                 t_pins.elapsed().as_millis()
             ));
             k
@@ -86,9 +98,11 @@ fn run() -> Fail {
         Err(e @ FfiError::ShaMismatch { .. }) => return Fail::new(exit_code::PIN_MISMATCH, e),
         Err(e) => return Fail::new(exit_code::LIBKRUN_LOAD, e),
     };
-    if let Err(f) = verify_disks(&cfg) {
-        return f;
-    }
+    // Verified disk fds by block id; kept open until start_enter.
+    let disks = match open_disks(&cfg) {
+        Ok(d) => d,
+        Err(f) => return f,
+    };
     if let Err(f) = clear_stale_sockets(&cfg) {
         return f;
     }
@@ -127,6 +141,12 @@ fn run() -> Fail {
 
     let mut shares = roots.iter();
     for mut call in ffi::plan(&cfg) {
+        if let KrunCall::AddDisk { block_id, path, .. } = &mut call
+            && let Some(file) = disks.get(block_id.as_str())
+        {
+            // The image the stamp / SHA-256 check just verified, not the path.
+            *path = verified::fd_path(file);
+        }
         if let KrunCall::AddVirtiofs { path, .. } = &mut call {
             // The share root the identity check just pinned (see `share_path`).
             let Some(root) = shares.next() else {
@@ -153,8 +173,18 @@ fn run() -> Fail {
         t0.elapsed().as_millis()
     ));
     let e = ctx.start_enter();
-    drop(roots);
+    drop((roots, disks));
     Fail::new(exit_code::START_FAILED, e)
+}
+
+/// Linux: `comm` is the basename of the executed path, which is `<n>` when the backend
+/// executes the helper through its verified fd (`/proc/self/fd/<n>`): name it back, so
+/// `ps`/`pgrep` show `sandcrab-krun` (libkrun later renames its VMM threads itself).
+fn set_process_name() {
+    #[cfg(target_os = "linux")]
+    if let Err(e) = rustix::thread::set_name(c"sandcrab-krun") {
+        log(format_args!("warning: PR_SET_NAME: {e}"));
+    }
 }
 
 /// Raise the soft `RLIMIT_NOFILE` to the hard limit, as virtiofsd does. The VMM's virtio-fs
@@ -225,13 +255,18 @@ fn nofile_target(soft: Option<u64>, hard: Option<u64>, cap: u64) -> Option<u64> 
 }
 
 /// Move the rest of stdin to a private fd watched by a thread; fd 0 becomes `/dev/null`.
+///
+/// The pipe's write end lives only in the owning process (the backend keeps it as the
+/// lifeline; it is close-on-exec, so no other child inherits it), so EOF means exactly "the
+/// owner process is gone", however it died, and whichever of its threads spawned us. That is
+/// also why there is no `PR_SET_PDEATHSIG`: on Linux it fires when the forking *thread*
+/// exits, so a helper spawned from a `spawn_blocking` / `block_in_place` thread was SIGKILLed
+/// when that pool thread retired (review R8). If the owner died before this thread starts,
+/// the first read already returns EOF.
 fn start_lifeline() -> std::io::Result<()> {
     let pipe: OwnedFd = std::io::stdin().as_fd().try_clone_to_owned()?;
     let devnull = std::fs::File::open("/dev/null")?;
     rustix::stdio::dup2_stdin(&devnull)?;
-
-    #[cfg(target_os = "linux")]
-    let parent = rustix::process::getppid();
 
     std::thread::Builder::new()
         .name("lifeline".into())
@@ -248,16 +283,6 @@ fn start_lifeline() -> std::io::Result<()> {
             }
             die("lifeline closed (owner gone)");
         })?;
-
-    #[cfg(target_os = "linux")]
-    {
-        // Belt and braces with the pipe. If the parent already died before the prctl, the
-        // signal never comes, so re-check the parent afterwards.
-        rustix::process::set_parent_process_death_signal(Some(rustix::process::Signal::KILL))?;
-        if rustix::process::getppid() != parent {
-            die("parent exited before PR_SET_PDEATHSIG");
-        }
-    }
     Ok(())
 }
 
@@ -271,8 +296,29 @@ fn die(why: &str) -> ! {
     std::process::abort();
 }
 
-fn verify_disks(cfg: &HelperConfig) -> Result<(), Fail> {
+/// Every disk must be a regular file. Disks with a stamp or a SHA-256 (the shared root) are
+/// opened once and verified through that fd ([`verified::open_disk`]); the returned fds (by
+/// block id) replace their paths in `krun_add_disk`, so libkrun opens the verified inode.
+fn open_disks(cfg: &HelperConfig) -> Result<HashMap<String, File>, Fail> {
+    let mut opened = HashMap::new();
     for d in [&cfg.root, &cfg.scratch].into_iter().chain(&cfg.disks) {
+        let t = Instant::now();
+        match verified::open_disk(d) {
+            Ok(Some(file)) => {
+                log(format_args!(
+                    "{} verified ({}, {} ms), passed as fd {}",
+                    d.block_id,
+                    if d.stamp.is_some() { "stamp" } else { "sha256" },
+                    t.elapsed().as_millis(),
+                    file.as_raw_fd()
+                ));
+                opened.insert(d.block_id.clone(), file);
+                continue;
+            }
+            Ok(None) => {}
+            Err(PinError::Mismatch(m)) => return Err(Fail::new(exit_code::PIN_MISMATCH, m)),
+            Err(PinError::Io(m)) => return Err(Fail::new(exit_code::CONFIG_INVALID, m)),
+        }
         match std::fs::metadata(&d.path) {
             Ok(m) if m.is_file() => {}
             Ok(_) => {
@@ -288,22 +334,8 @@ fn verify_disks(cfg: &HelperConfig) -> Result<(), Fail> {
                 ));
             }
         }
-        if let Some(sha) = &d.sha256 {
-            let t = Instant::now();
-            match ffi::verify_sha256(&d.path, sha) {
-                Ok(()) => log(format_args!(
-                    "{} sha256 ok ({} ms)",
-                    d.block_id,
-                    t.elapsed().as_millis()
-                )),
-                Err(e @ FfiError::ShaMismatch { .. }) => {
-                    return Err(Fail::new(exit_code::PIN_MISMATCH, e));
-                }
-                Err(e) => return Err(Fail::new(exit_code::CONFIG_INVALID, e)),
-            }
-        }
     }
-    Ok(())
+    Ok(opened)
 }
 
 /// libkrun binds the vsock → UDS listeners itself and fails with `EEXIST` on a leftover
@@ -368,19 +400,23 @@ fn start_netstack(cfg: &HelperConfig, krun: &Krun) -> Result<Option<OwnedFd>, Fa
             ),
         ));
     }
-    let bin = &spec.binary;
+    let bin = netstack_binary(spec, avx2_cpu())?;
     let t = Instant::now();
-    match ffi::verify_sha256(&bin.path, &bin.sha256) {
-        Ok(()) => log(format_args!(
-            "{} sha256 ok ({} ms)",
-            spec.kind,
-            t.elapsed().as_millis()
-        )),
-        Err(e @ FfiError::ShaMismatch { .. }) => {
-            return Err(Fail::new(exit_code::PIN_MISMATCH, e));
+    let verified = match verified::open_pinned(bin) {
+        Ok(v) => {
+            log(format_args!(
+                "{} `{}` verified ({:?}, {} ms)",
+                spec.kind,
+                bin.path.display(),
+                v.how,
+                t.elapsed().as_millis()
+            ));
+            v.file
         }
-        Err(e) => return Err(Fail::new(exit_code::NETSTACK_START, e)),
-    }
+        Err(PinError::Mismatch(m)) => return Err(Fail::new(exit_code::PIN_MISMATCH, m)),
+        Err(PinError::Io(m)) => return Err(Fail::new(exit_code::NETSTACK_START, m)),
+    };
+    let exec = exec_path(&verified, &bin.path);
     let policy = EgressPolicy::new(&spec.deny);
     let host: Vec<String> = spec.deny.iter().map(ToString::to_string).collect();
     log(format_args!(
@@ -395,12 +431,13 @@ fn start_netstack(cfg: &HelperConfig, krun: &Krun) -> Result<Option<OwnedFd>, Fa
         netstack::SMTP_PORTS
     ));
     let logger: Arc<dyn Fn(String) + Send + Sync> = Arc::new(|m: String| log(m));
-    let started = netstack::start(spec.kind, &bin.path, policy, logger).map_err(|e| {
+    let started = netstack::start(spec.kind, &exec, &bin.path, policy, logger).map_err(|e| {
         Fail::new(
             exit_code::NETSTACK_START,
             format!("spawning {} `{}`: {e}", spec.kind, bin.path.display()),
         )
     })?;
+    drop(verified);
     let mut child = started.child;
     log(format_args!("{} started (pid {})", spec.kind, child.id()));
     let (kind, stats) = (spec.kind, started.stats);
@@ -418,6 +455,55 @@ fn start_netstack(cfg: &HelperConfig, krun: &Krun) -> Result<Option<OwnedFd>, Fa
         })
         .map_err(|e| Fail::new(exit_code::NETSTACK_START, e))?;
     Ok(Some(started.guest_fd))
+}
+
+/// What to execute for a verified file: Linux `/proc/self/fd/<n>` (the kernel resolves it in
+/// the child before close-on-exec fds are closed, so the verified inode is what runs). macOS
+/// cannot `exec` an fdesc path, so it executes the path right after the check; that residual
+/// window is documented in design §12.4.
+fn exec_path(file: &File, path: &Path) -> PathBuf {
+    if cfg!(target_os = "linux") {
+        verified::fd_path(file)
+    } else {
+        path.to_path_buf()
+    }
+}
+
+/// Does passt's `__builtin_cpu_supports("avx2")` hold here (CPUID + OS-enabled AVX state)?
+fn avx2_cpu() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    return std::arch::is_x86_feature_detected!("avx2");
+    #[cfg(not(target_arch = "x86_64"))]
+    false
+}
+
+/// The netstack file to execute. On x86_64 passt re-execs `<readlink /proc/self/exe>.avx2`
+/// **by path** when the CPU has AVX2 and its own name does not end in `.avx2` (passt
+/// `arch.c`), which would run an unverified file. So on AVX2 CPUs the helper executes the
+/// pinned `passt.avx2` itself (passt then does not re-exec); without a pinned variant (an older
+/// install) it refuses to start plain passt while a `.avx2` sibling exists, and otherwise
+/// passt's re-exec finds nothing and it keeps running the verified binary.
+fn netstack_binary(spec: &NetstackSpec, avx2: bool) -> Result<&PinnedFile, Fail> {
+    if spec.kind != NetstackKind::Passt || !avx2 {
+        return Ok(&spec.binary);
+    }
+    if let Some(v) = &spec.avx2 {
+        return Ok(v);
+    }
+    let mut sibling = spec.binary.path.clone().into_os_string();
+    sibling.push(".avx2");
+    let sibling = PathBuf::from(sibling);
+    if std::fs::symlink_metadata(&sibling).is_ok() {
+        return Err(Fail::new(
+            exit_code::PIN_MISMATCH,
+            format!(
+                "`{}` exists but is not pinned: passt would execute it unverified on this AVX2 \
+                 CPU; reinstall the netstack (`sandcrab libkrun install --force`)",
+                sibling.display()
+            ),
+        ));
+    }
+    Ok(&spec.binary)
 }
 
 /// A workspace root opened `O_DIRECTORY | O_NOFOLLOW` and checked against its lease identity.
@@ -492,6 +578,49 @@ fn open_shares(shares: &[VirtioFsShare]) -> Result<Vec<ShareRoot>, Fail> {
             Ok(ShareRoot { fd })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod netstack_tests {
+    use super::*;
+
+    fn spec(dir: &Path, kind: NetstackKind, avx2: bool) -> NetstackSpec {
+        let pin = |name: &str| PinnedFile::new(dir.join(name), "0".repeat(64));
+        NetstackSpec {
+            kind,
+            binary: pin("passt"),
+            avx2: avx2.then(|| pin("passt.avx2")),
+            deny: vec![],
+        }
+    }
+
+    #[test]
+    fn avx2_cpus_run_the_pinned_variant() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = spec(tmp.path(), NetstackKind::Passt, true);
+        let bin = |avx2| netstack_binary(&s, avx2).ok().map(|p| p.path.clone());
+        assert_eq!(bin(true), Some(tmp.path().join("passt.avx2")));
+        assert_eq!(bin(false), Some(tmp.path().join("passt")));
+    }
+
+    #[test]
+    fn an_unpinned_avx2_sibling_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = spec(tmp.path(), NetstackKind::Passt, false);
+        // Nothing next to it: plain passt (its re-exec finds nothing).
+        assert!(netstack_binary(&s, true).is_ok());
+        std::fs::write(tmp.path().join("passt.avx2"), b"planted").unwrap();
+        let Err(Fail(code, msg)) = netstack_binary(&s, true) else {
+            panic!("an unpinned passt.avx2 must be refused");
+        };
+        assert_eq!(code, exit_code::PIN_MISMATCH);
+        assert!(msg.contains("not pinned"), "{msg}");
+        // No AVX2: passt never looks for it.
+        assert!(netstack_binary(&s, false).is_ok());
+        // gvproxy has no such re-exec.
+        let g = spec(tmp.path(), NetstackKind::Gvproxy, false);
+        assert!(netstack_binary(&g, true).is_ok());
+    }
 }
 
 #[cfg(test)]
