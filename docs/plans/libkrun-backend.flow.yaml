@@ -325,7 +325,7 @@ steps:
     title: "Re-review backlog top 3: R18 wire check_private_dir for state root/bin/artifacts, N2 bind stat stamps to digests, N3 clear quarantine via fd + at install + fix hints"
     depends_on: [lk-rereview]
     artifacts: [crates/sandcrab-backend-libkrun/, crates/sandcrab-rootfs/, crates/sandcrab-cli/src/libkrun.rs]
-    status: doing
+    status: done
 
   - id: lk-docs
     phase: document
