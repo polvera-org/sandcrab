@@ -401,10 +401,21 @@ fn harness() -> ExitCode {
         );
         return ExitCode::SUCCESS;
     }
+    // Firecracker is Linux-only. These two depend on Linux host behaviour (the debugfs dump
+    // the fake guest packs, and VMM-death detection closing the port listeners) and do not
+    // hold on a macOS dev box; everything else runs everywhere.
+    let linux_only = [
+        "spawn_tools_workspaces_sync_back_destroy",
+        "published_ports_forward_over_vsock",
+    ];
     let mut failed = 0;
     let mut ran = 0;
     for (name, f) in tests {
         if !filter.is_empty() && !filter.iter().any(|p| name.contains(p.as_str())) {
+            continue;
+        }
+        if !cfg!(target_os = "linux") && linux_only.contains(name) {
+            println!("test {name} ... skipped (Linux host only)");
             continue;
         }
         ran += 1;
@@ -501,7 +512,12 @@ impl Env {
 }
 
 fn env_with(tweak: impl FnOnce(&mut FirecrackerConfig, &Path)) -> Env {
-    let tmp = tempfile::tempdir().unwrap();
+    // Under `/tmp`, not `$TMPDIR`: `<run>/<uuid>/api.sock` must fit `sun_path` (107 bytes),
+    // and a long TMPDIR (macOS, CI runners) would push it past that.
+    let tmp = tempfile::Builder::new()
+        .prefix("scfc")
+        .tempdir_in("/tmp")
+        .unwrap();
     let home = tmp.path();
     let rootfs = home.join("rootfs.ext4");
     fs::write(&rootfs, b"not really ext4").unwrap();
