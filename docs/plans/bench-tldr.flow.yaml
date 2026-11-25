@@ -62,7 +62,7 @@ steps:
     title: "Review fixes: R1 takeaway 03 claim + check_claims over all measured microVMs, R2 name host in agent-turn range, R3 label the separate libkrun run, R9/R10 preflight probe-samples floor + transient spawn retry"
     depends_on: [tldr-review]
     artifacts: [scripts/bench-tldr-data.py, docs/site/benchmarks.html, crates/sandcrab-bench/]
-    status: doing
+    status: done
 
   - id: tldr-docs
     phase: document
@@ -70,4 +70,4 @@ steps:
     title: "docs/bench/README.md: TL;DR page generation, preflight, tier validity; AGENTS.md bench tiers note; CHANGELOG"
     depends_on: [tldr-fixes, tldr-live]
     artifacts: [docs/bench/README.md, CHANGELOG.md]
-    status: todo
+    status: doing
