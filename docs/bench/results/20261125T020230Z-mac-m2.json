@@ -1,0 +1,1002 @@
+{
+  "schema_version": "1",
+  "run_id": "571e030e-6a4a-4e06-a87f-d46f5ffb2bb1",
+  "started_at": "2026-11-25T02:02:30.844427+00:00",
+  "finished_at": "2026-11-25T02:03:03.298472+00:00",
+  "git": {
+    "commit": "18aa046ff7833d334a0f455bb1379189e0d8488f",
+    "dirty": false,
+    "branch": "step/lk-bench-mac"
+  },
+  "seed": 1795572150898743,
+  "host": {
+    "hostname": "mac-m2",
+    "kind": "bare-metal",
+    "virt": "none",
+    "kind_overridden": false,
+    "hypervisor": null,
+    "cpu_model": "Apple M2",
+    "sockets": 1,
+    "cores": 8,
+    "threads": 8,
+    "smt": false,
+    "kernel": "Darwin 25.2.0 (macOS 26.2)",
+    "governor": "n/a (macOS)",
+    "turbo": "unknown",
+    "mem_total_bytes": 17179869184,
+    "swap_bytes": 0,
+    "thp": "n/a (macOS)",
+    "ksm": {
+      "run": -1,
+      "pages_sharing": -1
+    },
+    "kvm_available": false,
+    "nested_virt": false,
+    "storage": {
+      "device": "/dev/disk3s5",
+      "type": "ssd (internal)",
+      "fs": "APFS",
+      "reflink": true,
+      "probed_path": "/System/Volumes/Data"
+    },
+    "docker": {
+      "engine": "29.1.3",
+      "containerd": "1c4457e00facac03ce1d75f7b6777a7a851e5c41",
+      "runc": "v1.3.4-0-gd6d73eb8",
+      "cgroup": "v2",
+      "storage_driver": "overlayfs"
+    },
+    "firecracker": {
+      "version": "",
+      "jailer": false,
+      "guest_kernel": "",
+      "guest_kernel_sha256": ""
+    },
+    "crabd": {
+      "path": "target/aarch64-unknown-linux-musl/release/crabd",
+      "sha256": "sha256:c03838c14ddf13aba89252d2a147afacc1b12623af5ad6f329d940908b2005b9",
+      "version": ""
+    }
+  },
+  "noise": {
+    "load_start": [
+      1.22,
+      1.25,
+      1.33
+    ],
+    "load_end": [
+      1.53,
+      1.32,
+      1.35
+    ],
+    "other_guests": [],
+    "declared": "density-only rerun right after the full run (whose density budget clamped to 0 under desktop memory pressure); same developer laptop and desktop session (WindowServer, terminal, browser, coding-agent CLI sessions, Docker Desktop VM idle); no other benchmarks or builds",
+    "top_cpu": [
+      "412 33.6 1.0 WindowServer",
+      "4117 9.2 0.8 com.docker.backend",
+      "518 5.5 0.2 syspolicyd",
+      "683 5.0 0.2 identityservicesd",
+      "76756 4.5 0.1 sandcrab-bench",
+      "339 1.7 0.3 logd",
+      "1031 1.5 1.9 iTerm2",
+      "586 1.3 0.2 com.apple.DriverKit-AppleBCMWLAN",
+      "3432 1.3 3.4 claude",
+      "381 1.1 0.1 apsd"
+    ],
+    "top_cpu_end": [
+      "412 33.9 1.0 WindowServer",
+      "343 5.1 0.1 fseventsd",
+      "76756 4.6 0.1 sandcrab-bench",
+      "1031 2.1 1.8 iTerm2",
+      "509 1.1 0.2 airportd",
+      "586 0.7 0.2 com.apple.DriverKit-AppleBCMWLAN",
+      "4117 0.7 0.9 com.docker.backend",
+      "3365 0.6 3.9 claude",
+      "339 0.6 0.3 logd",
+      "405 0.4 0.0 notifyd"
+    ],
+    "swap_used_start": 0,
+    "noisy": true,
+    "max_load": 0.5
+  },
+  "harness": {
+    "noop_overhead_ns": 0.0,
+    "sampler_cpu_pct": null
+  },
+  "templates": [
+    {
+      "name": "base",
+      "image": "sandcrab/base:0.1.0",
+      "oci_digest": "",
+      "pinned_digest": "sha256:a4aed41dc0a9e74457cb563d7800d0d2c002ddd97281ce105fedd1e9dc348114",
+      "rootfs_sha256": "",
+      "vcpu": 1,
+      "memory_mb": 512
+    },
+    {
+      "name": "ts-dev",
+      "image": "sandcrab/ts-dev:0.1.0",
+      "oci_digest": "",
+      "pinned_digest": "sha256:86fff0aba9268cecbbbfabbf4e98ce0332ef9fd1e65d6dbc5ef40929ff515cb7",
+      "rootfs_sha256": "",
+      "vcpu": 2,
+      "memory_mb": 1536
+    }
+  ],
+  "backends": [
+    {
+      "backend": "libkrun",
+      "status": "available",
+      "reason": null,
+      "todo": false,
+      "capabilities": {
+        "hardware_isolated": true,
+        "multi_tenant_safe": false,
+        "supports_snapshots": false,
+        "supports_host_dir_mounts": true
+      }
+    }
+  ],
+  "cells": [
+    {
+      "backend": "libkrun",
+      "capabilities": null,
+      "template": "base",
+      "cache": "cold-uncached",
+      "workspace": "W0",
+      "scenario": "lifecycle",
+      "status": "not_measured",
+      "reason": "cold-uncached needs the template image / rootfs removed from the host before each rep (docker rmi + rebuild, or a fresh FC rootfs cache); destructive on a shared host, so not automated in V1",
+      "todo": true,
+      "warmup": 0,
+      "n": 0,
+      "failures": [],
+      "unreliable": false,
+      "metrics": {},
+      "phases": {}
+    },
+    {
+      "backend": "libkrun",
+      "capabilities": null,
+      "template": "ts-dev",
+      "cache": "cold-uncached",
+      "workspace": "W0",
+      "scenario": "lifecycle",
+      "status": "not_measured",
+      "reason": "cold-uncached needs the template image / rootfs removed from the host before each rep (docker rmi + rebuild, or a fresh FC rootfs cache); destructive on a shared host, so not automated in V1",
+      "todo": true,
+      "warmup": 0,
+      "n": 0,
+      "failures": [],
+      "unreliable": false,
+      "metrics": {},
+      "phases": {}
+    }
+  ],
+  "density": [
+    {
+      "backend": "libkrun",
+      "template": "base",
+      "variant": "idle",
+      "rep": 0,
+      "budget_bytes": 4229890048,
+      "cap": 16,
+      "max_n": 16,
+      "stop_reason": "cap",
+      "error": null,
+      "steps": [
+        {
+          "i": 0,
+          "spawn_ready_ns": 3095926375,
+          "host_mem_available": 6924681216,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 1,
+          "spawn_ready_ns": 154374208,
+          "host_mem_available": 6861946880,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 2,
+          "spawn_ready_ns": 152539000,
+          "host_mem_available": 6795935744,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 3,
+          "spawn_ready_ns": 154175125,
+          "host_mem_available": 6733185024,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 4,
+          "spawn_ready_ns": 155075292,
+          "host_mem_available": 6668451840,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 5,
+          "spawn_ready_ns": 162276667,
+          "host_mem_available": 6598901760,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 6,
+          "spawn_ready_ns": 161009250,
+          "host_mem_available": 6538264576,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 7,
+          "spawn_ready_ns": 160589250,
+          "host_mem_available": 6472531968,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 8,
+          "spawn_ready_ns": 147072791,
+          "host_mem_available": 6410993664,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 9,
+          "spawn_ready_ns": 160706542,
+          "host_mem_available": 6346047488,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 10,
+          "spawn_ready_ns": 156094625,
+          "host_mem_available": 6282264576,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 11,
+          "spawn_ready_ns": 146691375,
+          "host_mem_available": 6218235904,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 12,
+          "spawn_ready_ns": 162451875,
+          "host_mem_available": 6155190272,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 13,
+          "spawn_ready_ns": 152553458,
+          "host_mem_available": 6090244096,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 14,
+          "spawn_ready_ns": 159888500,
+          "host_mem_available": 6026018816,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 15,
+          "spawn_ready_ns": 160569458,
+          "host_mem_available": 5962104832,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        }
+      ]
+    },
+    {
+      "backend": "libkrun",
+      "template": "base",
+      "variant": "idle",
+      "rep": 1,
+      "budget_bytes": 2694561792,
+      "cap": 16,
+      "max_n": 16,
+      "stop_reason": "cap",
+      "error": null,
+      "steps": [
+        {
+          "i": 0,
+          "spawn_ready_ns": 155785708,
+          "host_mem_available": 6927630336,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 1,
+          "spawn_ready_ns": 151434792,
+          "host_mem_available": 6862454784,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 2,
+          "spawn_ready_ns": 158644625,
+          "host_mem_available": 6796296192,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 3,
+          "spawn_ready_ns": 153342125,
+          "host_mem_available": 6734151680,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 4,
+          "spawn_ready_ns": 151854208,
+          "host_mem_available": 6670237696,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 5,
+          "spawn_ready_ns": 159254917,
+          "host_mem_available": 6605340672,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 6,
+          "spawn_ready_ns": 161873792,
+          "host_mem_available": 6543687680,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 7,
+          "spawn_ready_ns": 160104625,
+          "host_mem_available": 6478905344,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 8,
+          "spawn_ready_ns": 154555166,
+          "host_mem_available": 6413828096,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 9,
+          "spawn_ready_ns": 150637625,
+          "host_mem_available": 6350995456,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 10,
+          "spawn_ready_ns": 157357667,
+          "host_mem_available": 6287048704,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 11,
+          "spawn_ready_ns": 159824875,
+          "host_mem_available": 6222413824,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 12,
+          "spawn_ready_ns": 152276542,
+          "host_mem_available": 6158761984,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 13,
+          "spawn_ready_ns": 149886833,
+          "host_mem_available": 6096945152,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 14,
+          "spawn_ready_ns": 158491041,
+          "host_mem_available": 6033276928,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 15,
+          "spawn_ready_ns": 173210958,
+          "host_mem_available": 5965266944,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        }
+      ]
+    },
+    {
+      "backend": "libkrun",
+      "template": "base",
+      "variant": "idle",
+      "rep": 2,
+      "budget_bytes": 2696560640,
+      "cap": 16,
+      "max_n": 16,
+      "stop_reason": "cap",
+      "error": null,
+      "steps": [
+        {
+          "i": 0,
+          "spawn_ready_ns": 169171500,
+          "host_mem_available": 6928334848,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 1,
+          "spawn_ready_ns": 150483042,
+          "host_mem_available": 6865502208,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 2,
+          "spawn_ready_ns": 152049250,
+          "host_mem_available": 6798704640,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 3,
+          "spawn_ready_ns": 158035417,
+          "host_mem_available": 6736691200,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 4,
+          "spawn_ready_ns": 146754792,
+          "host_mem_available": 6672646144,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 5,
+          "spawn_ready_ns": 161882334,
+          "host_mem_available": 6609207296,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 6,
+          "spawn_ready_ns": 149587208,
+          "host_mem_available": 6544359424,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 7,
+          "spawn_ready_ns": 155300417,
+          "host_mem_available": 6481543168,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 8,
+          "spawn_ready_ns": 145430208,
+          "host_mem_available": 6417580032,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 9,
+          "spawn_ready_ns": 161220375,
+          "host_mem_available": 6352732160,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 10,
+          "spawn_ready_ns": 152736083,
+          "host_mem_available": 6285721600,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 11,
+          "spawn_ready_ns": 152422917,
+          "host_mem_available": 6222725120,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 12,
+          "spawn_ready_ns": 150467375,
+          "host_mem_available": 6159155200,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 13,
+          "spawn_ready_ns": 154193666,
+          "host_mem_available": 6093602816,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 14,
+          "spawn_ready_ns": 147100208,
+          "host_mem_available": 6030557184,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 15,
+          "spawn_ready_ns": 150893750,
+          "host_mem_available": 5966479360,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        }
+      ]
+    },
+    {
+      "backend": "libkrun",
+      "template": "base",
+      "variant": "touched",
+      "rep": 0,
+      "budget_bytes": 2694086656,
+      "cap": 16,
+      "max_n": 16,
+      "stop_reason": "cap",
+      "error": null,
+      "steps": [
+        {
+          "i": 0,
+          "spawn_ready_ns": 155466041,
+          "host_mem_available": 6853033984,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 1,
+          "spawn_ready_ns": 151559833,
+          "host_mem_available": 6715424768,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 2,
+          "spawn_ready_ns": 150784917,
+          "host_mem_available": 6578225152,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 3,
+          "spawn_ready_ns": 151953916,
+          "host_mem_available": 6440206336,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 4,
+          "spawn_ready_ns": 154031583,
+          "host_mem_available": 6301073408,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 5,
+          "spawn_ready_ns": 149055041,
+          "host_mem_available": 6164381696,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 6,
+          "spawn_ready_ns": 164798500,
+          "host_mem_available": 6029754368,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 7,
+          "spawn_ready_ns": 162248500,
+          "host_mem_available": 5891948544,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 8,
+          "spawn_ready_ns": 152393167,
+          "host_mem_available": 5754093568,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 9,
+          "spawn_ready_ns": 156359208,
+          "host_mem_available": 5620416512,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 10,
+          "spawn_ready_ns": 159846583,
+          "host_mem_available": 5483528192,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 11,
+          "spawn_ready_ns": 153061666,
+          "host_mem_available": 5345345536,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 12,
+          "spawn_ready_ns": 153727750,
+          "host_mem_available": 5208211456,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 13,
+          "spawn_ready_ns": 153905250,
+          "host_mem_available": 5070241792,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 14,
+          "spawn_ready_ns": 163779709,
+          "host_mem_available": 4933419008,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 15,
+          "spawn_ready_ns": 153959500,
+          "host_mem_available": 4795940864,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        }
+      ]
+    },
+    {
+      "backend": "libkrun",
+      "template": "base",
+      "variant": "touched",
+      "rep": 1,
+      "budget_bytes": 2706096128,
+      "cap": 16,
+      "max_n": 16,
+      "stop_reason": "cap",
+      "error": null,
+      "steps": [
+        {
+          "i": 0,
+          "spawn_ready_ns": 158040167,
+          "host_mem_available": 6862700544,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 1,
+          "spawn_ready_ns": 150694542,
+          "host_mem_available": 6725533696,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 2,
+          "spawn_ready_ns": 144764583,
+          "host_mem_available": 6587891712,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 3,
+          "spawn_ready_ns": 168076959,
+          "host_mem_available": 6451675136,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 4,
+          "spawn_ready_ns": 150015541,
+          "host_mem_available": 6313656320,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 5,
+          "spawn_ready_ns": 158939333,
+          "host_mem_available": 6179749888,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 6,
+          "spawn_ready_ns": 160490917,
+          "host_mem_available": 6042353664,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 7,
+          "spawn_ready_ns": 149075375,
+          "host_mem_available": 5904449536,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 8,
+          "spawn_ready_ns": 160752458,
+          "host_mem_available": 5764087808,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 9,
+          "spawn_ready_ns": 150837291,
+          "host_mem_available": 5626937344,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 10,
+          "spawn_ready_ns": 162434500,
+          "host_mem_available": 5489147904,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 11,
+          "spawn_ready_ns": 152785209,
+          "host_mem_available": 5349818368,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 12,
+          "spawn_ready_ns": 152938542,
+          "host_mem_available": 5212585984,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 13,
+          "spawn_ready_ns": 159094916,
+          "host_mem_available": 5074829312,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 14,
+          "spawn_ready_ns": 159725458,
+          "host_mem_available": 4938072064,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 15,
+          "spawn_ready_ns": 152054917,
+          "host_mem_available": 4802052096,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        }
+      ]
+    },
+    {
+      "backend": "libkrun",
+      "template": "base",
+      "variant": "touched",
+      "rep": 2,
+      "budget_bytes": 2707505152,
+      "cap": 16,
+      "max_n": 16,
+      "stop_reason": "cap",
+      "error": null,
+      "steps": [
+        {
+          "i": 0,
+          "spawn_ready_ns": 145000959,
+          "host_mem_available": 6865977344,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 1,
+          "spawn_ready_ns": 146388833,
+          "host_mem_available": 6727663616,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 2,
+          "spawn_ready_ns": 147591917,
+          "host_mem_available": 6587695104,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 3,
+          "spawn_ready_ns": 151691583,
+          "host_mem_available": 6451462144,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 4,
+          "spawn_ready_ns": 157835667,
+          "host_mem_available": 6314459136,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 5,
+          "spawn_ready_ns": 162070541,
+          "host_mem_available": 6176112640,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 6,
+          "spawn_ready_ns": 157799791,
+          "host_mem_available": 6041337856,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 7,
+          "spawn_ready_ns": 149410916,
+          "host_mem_available": 5902172160,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 8,
+          "spawn_ready_ns": 160568959,
+          "host_mem_available": 5750636544,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 9,
+          "spawn_ready_ns": 147741917,
+          "host_mem_available": 5628264448,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 10,
+          "spawn_ready_ns": 160887833,
+          "host_mem_available": 5489852416,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 11,
+          "spawn_ready_ns": 166681625,
+          "host_mem_available": 5353291776,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 12,
+          "spawn_ready_ns": 160759833,
+          "host_mem_available": 5215207424,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 13,
+          "spawn_ready_ns": 159710208,
+          "host_mem_available": 5076074496,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 14,
+          "spawn_ready_ns": 155923542,
+          "host_mem_available": 4937809920,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        },
+        {
+          "i": 15,
+          "spawn_ready_ns": 157891083,
+          "host_mem_available": 4801265664,
+          "host_pss_total": null,
+          "cgroup_mem_total": null
+        }
+      ]
+    }
+  ],
+  "drift_check": null,
+  "shared_overhead": {},
+  "valid": false,
+  "invalid_reasons": [
+    "host busy: 1-min load 1.22 > 0.5 at start"
+  ],
+  "notes": [
+    "density capped at 16 sandboxes (spec: 500) to keep this host safe",
+    "network policy: `disabled` on every backend (egress_restricted is unenforceable in V1)",
+    "docker: bind-mount cost is inside spawn_ready (compare W1/W2 vs W0); ws_attach is the post-ready list_dir verification",
+    "libkrun: workspaces are live virtio-fs shares (no attach / sync-back cost); without a cgroup leaf (always on macOS) memory is the helper's RSS (mem.helper_rss_*), which counts shared pages fully: not comparable with the Linux PSS columns; idle CPU is the helper process's CPU time (cpu.helper_idle_60s)",
+    "docker: mem.guest_available reads the host /proc/meminfo (no lxcfs), so it is not a per-sandbox number"
+  ],
+  "config": {
+    "argv": [
+      "./target/release/sandcrab-bench",
+      "run",
+      "--backends",
+      "libkrun",
+      "--templates",
+      "base,ts-dev",
+      "--scenarios",
+      "density",
+      "--runs",
+      "30",
+      "--warmups",
+      "5",
+      "--density-budget",
+      "75%",
+      "--density-cap",
+      "16",
+      "--host-label",
+      "mac-m2",
+      "--noise-declared",
+      "density-only rerun right after the full run (whose density budget clamped to 0 under desktop memory pressure); same developer laptop and desktop session (WindowServer, terminal, browser, coding-agent CLI sessions, Docker Desktop VM idle); no other benchmarks or builds",
+      "--work-dir",
+      "<scratch>/work",
+      "--out",
+      "<scratch>/out/"
+    ],
+    "backends": [
+      "libkrun"
+    ],
+    "templates": [
+      "base",
+      "ts-dev"
+    ],
+    "scenarios": [
+      "density"
+    ],
+    "workspaces": [
+      "W0",
+      "W1",
+      "W2"
+    ],
+    "caches": [
+      "warm",
+      "cold"
+    ],
+    "runs": 30,
+    "warmups": 5,
+    "calls_per_sandbox": 30,
+    "call_warmups": 5,
+    "resource_runs": 30,
+    "idle_window_s": 60,
+    "settle_s": 5,
+    "density_budget": "75%",
+    "density_cap": 16,
+    "density_reps": 3,
+    "touch_mib": 64,
+    "quick": false,
+    "allow_small_n": false,
+    "network": "disabled"
+  }
+}

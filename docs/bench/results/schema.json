@@ -540,8 +540,7 @@
     "HarnessOverhead": {
       "type": "object",
       "required": [
-        "noop_overhead_ns",
-        "sampler_cpu_pct"
+        "noop_overhead_ns"
       ],
       "properties": {
         "noop_overhead_ns": {
@@ -550,8 +549,11 @@
           "format": "double"
         },
         "sampler_cpu_pct": {
-          "description": "CPU used by the 10 Hz cgroup sampler, % of one core.",
-          "type": "number",
+          "description": "CPU used by the 10 Hz cgroup sampler, % of one core. `None` (JSON `null`) where it cannot be measured: no cgroups and no per-thread CPU clock in procfs (macOS).",
+          "type": [
+            "number",
+            "null"
+          ],
           "format": "double"
         }
       }

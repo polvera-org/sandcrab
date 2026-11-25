@@ -49,8 +49,12 @@ pub fn render(r: &RunResult) -> String {
     }
     let _ = writeln!(
         s,
-        "harness: noop {:.0} ns, sampler {:.3}% CPU",
-        r.harness.noop_overhead_ns, r.harness.sampler_cpu_pct
+        "harness: noop {:.0} ns, sampler {}",
+        r.harness.noop_overhead_ns,
+        r.harness.sampler_cpu_pct.map_or_else(
+            || "n/a (no cgroup sampler)".into(),
+            |p| format!("{p:.3}% CPU")
+        )
     );
     let _ = writeln!(
         s,
