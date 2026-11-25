@@ -7,22 +7,112 @@ use sandcrab_sdk::{MountMode, NetworkPolicy, WorkspaceMount};
 
 use crate::llm::anthropic::{DEFAULT_MAX_TOKENS, DEFAULT_MODEL};
 
-/// Runtime backends compiled into this binary.
+/// Runtime backends this binary knows about. Only compiled ones parse successfully (same
+/// gating as the `sandcrab` CLI).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendArg {
     /// Docker: hardened containers on the shared host kernel (not hardware isolated).
     #[cfg(feature = "docker")]
     Docker,
+    /// Firecracker microVMs: hardware isolated, needs /dev/kvm.
+    #[cfg(all(feature = "firecracker", target_os = "linux"))]
+    Firecracker,
+    /// libkrun microVMs: hardware isolated (Hypervisor.framework / KVM).
+    #[cfg(all(
+        feature = "libkrun",
+        any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))
+    ))]
+    Libkrun,
+}
+
+impl BackendArg {
+    /// The `--backend` value.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            #[cfg(feature = "docker")]
+            Self::Docker => "docker",
+            #[cfg(all(feature = "firecracker", target_os = "linux"))]
+            Self::Firecracker => "firecracker",
+            #[cfg(all(
+                feature = "libkrun",
+                any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))
+            ))]
+            Self::Libkrun => "libkrun",
+        }
+    }
+}
+
+/// Is the firecracker backend compiled into this binary?
+pub const FIRECRACKER_COMPILED: bool = cfg!(all(feature = "firecracker", target_os = "linux"));
+
+/// Is the libkrun backend compiled into this binary?
+pub const LIBKRUN_COMPILED: bool = cfg!(all(
+    feature = "libkrun",
+    any(
+        target_os = "linux",
+        all(target_os = "macos", target_arch = "aarch64")
+    )
+));
+
+/// Backends compiled into this binary (for messages).
+#[must_use]
+pub fn compiled_backends() -> String {
+    let names: Vec<&str> = [
+        (cfg!(feature = "docker"), "docker"),
+        (FIRECRACKER_COMPILED, "firecracker"),
+        (LIBKRUN_COMPILED, "libkrun"),
+    ]
+    .into_iter()
+    .filter_map(|(on, n)| on.then_some(n))
+    .collect();
+    if names.is_empty() {
+        "none".into()
+    } else {
+        names.join(", ")
+    }
 }
 
 pub fn parse_backend(s: &str) -> Result<BackendArg, String> {
     match s {
         #[cfg(feature = "docker")]
         "docker" | "docker-dev" => Ok(BackendArg::Docker),
-        "firecracker" | "cloud-hypervisor" | "libkrun" => Err(format!(
-            "backend `{s}` is not available in crabagent yet (available: docker)"
+        #[cfg(not(feature = "docker"))]
+        "docker" | "docker-dev" => Err(format!(
+            "backend `{s}` is not compiled into this build (cargo feature `docker`; \
+             available: {})",
+            compiled_backends()
         )),
-        other => Err(format!("unknown backend `{other}` (available: docker)")),
+        #[cfg(all(feature = "firecracker", target_os = "linux"))]
+        "firecracker" | "fc" => Ok(BackendArg::Firecracker),
+        #[cfg(not(all(feature = "firecracker", target_os = "linux")))]
+        "firecracker" | "fc" => Err(format!(
+            "backend `{s}` is not compiled into this build (Linux only, cargo feature \
+             `firecracker`; available: {})",
+            compiled_backends()
+        )),
+        #[cfg(all(
+            feature = "libkrun",
+            any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))
+        ))]
+        "libkrun" | "krun" => Ok(BackendArg::Libkrun),
+        #[cfg(not(all(
+            feature = "libkrun",
+            any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))
+        )))]
+        "libkrun" | "krun" => Err(format!(
+            "backend `{s}` is not compiled into this build (macOS aarch64 and Linux only, \
+             cargo feature `libkrun`; available: {})",
+            compiled_backends()
+        )),
+        "cloud-hypervisor" => Err(format!(
+            "backend `{s}` is not available in crabagent yet (available: {})",
+            compiled_backends()
+        )),
+        other => Err(format!(
+            "unknown backend `{other}` (available: {})",
+            compiled_backends()
+        )),
     }
 }
 
@@ -115,6 +205,9 @@ pub fn host_workspace_name(dir: &Path) -> String {
     after_help = "Example (landing page):\n  crabagent --workspace landing --template ts-dev \
         --mount-host docs/site:/kit:ro --network unrestricted --port 5173 \
         --backend docker\n\n\
+        Hardware-isolated microVM (libkrun on Apple Silicon / Linux; `sandcrab libkrun install` \
+        first):\n  crabagent --template base --mount-host .:/workspace:rw --network disabled \
+        --backend libkrun\n\n\
         ANTHROPIC_API_KEY is read from the environment or a .env file (cwd up to the repo root)."
 )]
 pub struct Cli {
@@ -153,7 +246,8 @@ pub struct Cli {
     #[arg(long = "env", short = 'e', value_parser = parse_env)]
     pub env: Vec<(String, String)>,
 
-    /// Runtime backend (explicit; no fallback). Available: docker.
+    /// Runtime backend (explicit; no fallback): docker | libkrun (macOS Apple Silicon, Linux)
+    /// | firecracker (Linux). Only backends compiled into this build parse.
     #[arg(long, env = "SANDCRAB_BACKEND", value_parser = parse_backend)]
     pub backend: Option<BackendArg>,
 
@@ -240,6 +334,49 @@ mod tests {
         for bad in ["a", "a:b", ":/b", "a:/b:rx", "a:/b:ro:x"] {
             assert!(parse_mount_host(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn backends_parse_only_when_compiled() {
+        #[cfg(feature = "docker")]
+        assert_eq!(parse_backend("docker").unwrap(), BackendArg::Docker);
+        if FIRECRACKER_COMPILED {
+            #[cfg(all(feature = "firecracker", target_os = "linux"))]
+            {
+                assert_eq!(
+                    parse_backend("firecracker").unwrap(),
+                    BackendArg::Firecracker
+                );
+                assert_eq!(parse_backend("fc").unwrap(), BackendArg::Firecracker);
+            }
+            assert!(compiled_backends().contains("firecracker"));
+        } else {
+            let e = parse_backend("firecracker").unwrap_err();
+            assert!(e.contains("not compiled into this build"), "{e}");
+            assert!(!compiled_backends().contains("firecracker"));
+        }
+        if LIBKRUN_COMPILED {
+            #[cfg(all(
+                feature = "libkrun",
+                any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))
+            ))]
+            {
+                assert_eq!(parse_backend("libkrun").unwrap(), BackendArg::Libkrun);
+                assert_eq!(parse_backend("krun").unwrap(), BackendArg::Libkrun);
+            }
+            assert!(compiled_backends().contains("libkrun"));
+        } else {
+            let e = parse_backend("libkrun").unwrap_err();
+            assert!(e.contains("macOS aarch64 and Linux only"), "{e}");
+            assert!(!compiled_backends().contains("libkrun"));
+        }
+        let e = parse_backend("cloud-hypervisor").unwrap_err();
+        assert!(e.contains("not available"), "{e}");
+        assert!(
+            parse_backend("qemu")
+                .unwrap_err()
+                .contains("unknown backend")
+        );
     }
 
     #[test]

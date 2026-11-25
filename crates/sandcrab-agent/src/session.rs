@@ -8,13 +8,13 @@ use std::sync::Arc;
 
 use anyhow::{Context, bail};
 use sandcrab_sdk::{
-    MountMode, Sandbox, SandboxConfig, SandboxError, Sandcrab, WorkspaceBacking, WorkspaceClient,
-    WorkspaceMount, WorkspaceRef,
+    BackendCapabilities, MountMode, Sandbox, SandboxConfig, SandboxError, Sandcrab,
+    WorkspaceBacking, WorkspaceClient, WorkspaceMount, WorkspaceRef,
 };
 use serde_json::json;
 
 use crate::agent::{Agent, Interrupt, TurnOutcome};
-use crate::cli::{BackendArg, Cli, HostMount, host_workspace_name, truthy};
+use crate::cli::{Cli, HostMount, host_workspace_name, truthy};
 use crate::llm::LlmClient;
 use crate::llm::anthropic::{AnthropicClient, AnthropicConfig};
 use crate::prompt::{MountInfo, PromptContext, system_prompt};
@@ -333,18 +333,11 @@ pub async fn run_session(
             .map(|t| t.manifest.network.default_policy.to_string())
             .unwrap_or_else(|_| "template default".into()),
     };
-    #[cfg(feature = "docker")]
-    let disk_unenforced = sc
-        .docker_backend()
-        .is_some_and(|d| !d.enforces_disk_limit());
-    #[cfg(not(feature = "docker"))]
-    let disk_unenforced = false;
-    if disk_unenforced {
-        ui.info(&format!(
-            "warning: backend `{}`: template disk_mb is not enforced",
-            sc.backend_kind()
-        ));
-    }
+    ui.info(&backend_line(
+        &sc.backend_kind().to_string(),
+        sc.backend_capabilities(),
+        enforces_disk_limit(sc),
+    ));
     ui.info(&format!("spawning `{}` sandbox…", opts.template));
     let sandbox = sc
         .spawn(config)
@@ -661,15 +654,66 @@ async fn repl(
     Ok(())
 }
 
-/// Build a [`Sandcrab`] on the explicitly selected backend.
+/// `--crabd`, else `$SANDCRAB_CRABD`, else `<target dir>/<arch>-unknown-linux-musl/release/crabd`
+/// (target dir: `$CARGO_TARGET_DIR`, else `target/`). Same resolution as the `sandcrab` CLI.
+#[must_use]
+pub fn crabd_path(cli: &Cli) -> PathBuf {
+    cli.crabd.clone().unwrap_or_else(|| {
+        std::env::var_os("SANDCRAB_CRABD")
+            .filter(|v| !v.is_empty())
+            .map_or_else(
+                || sandcrab_sdk::core::crabd_build_path(Path::new("")),
+                PathBuf::from,
+            )
+    })
+}
+
+/// microVM backends inject `crabd` into the template rootfs: fail fast, with the fix.
+#[cfg(any(
+    all(feature = "firecracker", target_os = "linux"),
+    all(
+        feature = "libkrun",
+        any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))
+    )
+))]
+fn require_crabd(backend: crate::cli::BackendArg, crabd: &Path) -> anyhow::Result<()> {
+    if !crabd.is_file() {
+        bail!(
+            "{} backend unavailable: static crabd {} not found (build it with \
+             scripts/build-crabd.sh, or pass --crabd / SANDCRAB_CRABD); crabagent never falls \
+             back to another backend",
+            backend.name(),
+            crabd.display()
+        );
+    }
+    Ok(())
+}
+
+/// Build a [`Sandcrab`] on the explicitly selected backend. Never falls back: a backend
+/// whose prerequisites are missing is an error naming them.
+#[cfg_attr(
+    not(any(
+        feature = "docker",
+        all(feature = "firecracker", target_os = "linux"),
+        all(
+            feature = "libkrun",
+            any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))
+        )
+    )),
+    allow(unreachable_code, unused_imports)
+)]
 pub fn build_sandcrab(cli: &Cli) -> anyhow::Result<Sandcrab> {
+    use crate::cli::BackendArg;
+
     let env = std::env::var(DEPRECATED_INSECURE_ENV).ok();
     if deprecated_opt_in_used(cli.allow_insecure, env.as_deref()) {
         eprintln!("{DEPRECATED_INSECURE_WARNING}");
     }
     let Some(backend) = cli.backend else {
         bail!(
-            "no backend selected: pass --backend docker (or set SANDCRAB_BACKEND); crabagent never picks one"
+            "no backend selected: pass --backend <{}> (or set SANDCRAB_BACKEND); crabagent \
+             never picks one",
+            crate::cli::compiled_backends()
         );
     };
     let state = match &cli.state_dir {
@@ -692,15 +736,89 @@ pub fn build_sandcrab(cli: &Cli) -> anyhow::Result<Sandcrab> {
         #[cfg(feature = "docker")]
         BackendArg::Docker => {
             builder = builder.docker(sandcrab_sdk::DockerConfig {
-                crabd_path: cli
-                    .crabd
-                    .clone()
-                    .unwrap_or_else(sandcrab_sdk::docker::default_crabd_path),
+                crabd_path: crabd_path(cli),
                 ..sandcrab_sdk::DockerConfig::default()
             });
         }
+        #[cfg(all(feature = "firecracker", target_os = "linux"))]
+        BackendArg::Firecracker => {
+            // Hardware isolated; the backend checks /dev/kvm and the pinned kernel /
+            // firecracker binary itself (same config as `sandcrab --backend firecracker`).
+            let crabd = crabd_path(cli);
+            require_crabd(backend, &crabd)?;
+            builder =
+                builder.firecracker(sandcrab_sdk::FirecrackerConfig::with_home(&state, crabd));
+        }
+        #[cfg(all(
+            feature = "libkrun",
+            any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))
+        ))]
+        BackendArg::Libkrun => {
+            // Hardware isolated. Same config as `sandcrab --backend libkrun`: signed helper in
+            // <root>/bin, pinned libkrun from <root>/artifacts/libkrun/<version>/, the pinned
+            // userspace netstack for `unrestricted` (never TSI: the deprecated TSI opt-in is
+            // not offered here), host-dir workspaces shared live over virtio-fs.
+            let home = std::path::absolute(&state)
+                .with_context(|| format!("resolving {}", state.display()))?;
+            let crabd = std::path::absolute(crabd_path(cli))?;
+            require_crabd(backend, &crabd)?;
+            let mut c = sandcrab_sdk::LibkrunConfig::with_home(&home, crabd);
+            c.lib_dir = Some(sandcrab_sdk::libkrun::artifacts::default_dir(&home));
+            c.cgroup_parent = sandcrab_sdk::libkrun::config::cgroup_parent_from_env();
+            builder = builder.libkrun(c);
+        }
     }
-    builder.build().context("cannot initialise the backend")
+    builder.build().with_context(|| {
+        format!(
+            "cannot initialise the {0} backend; crabagent never falls back to another backend \
+             (`sandcrab doctor --backend {0}` lists its prerequisites)",
+            backend.name()
+        )
+    })
+}
+
+/// The session's backend line: what the backend does and does not isolate, from its declared
+/// [`BackendCapabilities`]. Prefixed with `warning:` when the sandbox is not hardware isolated
+/// or the template's `disk_mb` is not enforced.
+#[must_use]
+pub fn backend_line(kind: &str, caps: BackendCapabilities, disk_enforced: bool) -> String {
+    let mut parts = vec![
+        if caps.hardware_isolated {
+            "hardware isolated (microVM)"
+        } else {
+            "not hardware isolated (shared host kernel)"
+        },
+        if caps.multi_tenant_safe {
+            "multi-tenant safe"
+        } else {
+            "not multi-tenant safe"
+        },
+        if caps.supports_host_dir_mounts {
+            "live host-dir mounts"
+        } else {
+            "workspaces copied in at spawn and synced back at exit (no live host-dir sharing)"
+        },
+    ];
+    if !disk_enforced {
+        parts.push("template disk_mb is not enforced");
+    }
+    let warn = if !caps.hardware_isolated || !disk_enforced {
+        "warning: "
+    } else {
+        ""
+    };
+    format!("{warn}backend `{kind}`: {}", parts.join(", "))
+}
+
+/// Does the backend enforce the template's `disk_mb`? (Docker reports it; the microVM
+/// backends size their disks from it.) Same rule as the `sandcrab` CLI.
+fn enforces_disk_limit(sc: &Sandcrab) -> bool {
+    #[cfg(feature = "docker")]
+    if let Some(d) = sc.docker_backend() {
+        return d.enforces_disk_limit();
+    }
+    let _ = sc;
+    true
 }
 
 fn default_ssh_host(dot: &DotEnv) -> Option<String> {
@@ -786,6 +904,44 @@ mod tests {
         assert!(deprecated_opt_in_used(false, Some("1")));
         assert!(deprecated_opt_in_used(true, None));
         assert!(DEPRECATED_INSECURE_WARNING.contains("no effect"));
+    }
+
+    #[test]
+    fn backend_line_is_honest() {
+        let docker = BackendCapabilities {
+            hardware_isolated: false,
+            multi_tenant_safe: false,
+            supports_snapshots: false,
+            supports_host_dir_mounts: true,
+        };
+        let l = backend_line("docker", docker, false);
+        assert!(l.starts_with("warning: backend `docker`:"), "{l}");
+        assert!(
+            l.contains("not hardware isolated (shared host kernel)"),
+            "{l}"
+        );
+        assert!(l.contains("not multi-tenant safe"), "{l}");
+        assert!(l.contains("disk_mb is not enforced"), "{l}");
+        let l = backend_line("docker", docker, true);
+        assert!(l.starts_with("warning: ") && !l.contains("disk_mb"), "{l}");
+
+        let krun = BackendCapabilities {
+            hardware_isolated: true,
+            ..docker
+        };
+        let l = backend_line("libkrun", krun, true);
+        assert_eq!(
+            l,
+            "backend `libkrun`: hardware isolated (microVM), not multi-tenant safe, live \
+             host-dir mounts"
+        );
+        let fc = BackendCapabilities {
+            supports_host_dir_mounts: false,
+            ..krun
+        };
+        let l = backend_line("firecracker", fc, true);
+        assert!(!l.starts_with("warning"), "{l}");
+        assert!(l.contains("copied in at spawn"), "{l}");
     }
 
     #[test]

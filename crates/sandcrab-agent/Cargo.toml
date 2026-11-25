@@ -16,9 +16,16 @@ name = "crabagent"
 path = "src/main.rs"
 
 [features]
-default = ["docker"]
+default = ["docker", "firecracker", "libkrun"]
 # Docker backend (`--backend docker`).
 docker = ["sandcrab-sdk/docker"]
+# Firecracker microVM backend (`--backend firecracker`). On by default; it only compiles in on
+# Linux targets (a no-op elsewhere), exactly like the `sandcrab` CLI.
+firecracker = ["sandcrab-sdk/firecracker"]
+# libkrun microVM backend (`--backend libkrun`). On by default; it only compiles in on macOS
+# aarch64 and Linux (a no-op elsewhere): Cargo default features cannot be target-specific, so
+# the SDK dependency is target-gated and the code is `cfg`-gated on the same targets.
+libkrun = ["sandcrab-sdk/libkrun"]
 
 [dependencies]
 sandcrab-sdk = { workspace = true, default-features = false }
