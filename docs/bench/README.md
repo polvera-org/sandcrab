@@ -131,7 +131,8 @@ The report renders every number from the results JSON, embedded by `scripts/benc
 3. Run `python3 scripts/bench-report-data.py` and open the page (e.g. `python3 -m http.server`
    in `docs/site`). Check it in light and dark.
 
-The page groups runs by `host.hostname` (use `--host-label`, never a real hostname), derives the
+The page groups runs by `host.hostname` (use `--host-label`, never a real hostname; it replaces the hostname in the
+file name and the JSON), derives the
 tier (Smoke/Standard/Full) from the recorded config and the arch from the crabd target, and
 computes its caveats (HDD storage, Docker's seccomp asymmetry, RSS vs PSS, validity, tier mix
 on one host, busy hosts, density reruns, the density cap) from the data. Host-specific prose the

@@ -124,7 +124,8 @@ struct RunArgs {
     /// Output directory for `<UTC>-<host>.json`.
     #[arg(long, default_value = "docs/bench/results")]
     out: PathBuf,
-    /// Host label for the file name (default: hostname).
+    /// Host label for the file name and `host.hostname` in the JSON (default: the real
+    /// hostname). Use it for anything committed to a public repo.
     #[arg(long)]
     host_label: Option<String>,
     /// Override the detected host kind (bare-metal | vm | vm-nested).

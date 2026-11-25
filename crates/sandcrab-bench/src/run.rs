@@ -1521,6 +1521,9 @@ pub async fn run(plan: &Plan) -> anyhow::Result<(RunResult, PathBuf)> {
         &plan.crabd,
         &crate::backend::fc_paths(&host_opts),
     );
+    // `--host-label` replaces the real hostname everywhere (file name and JSON), so results
+    // can be committed to a public repo as-is.
+    host::apply_label(&mut host_info, plan.host_label.as_deref());
     let mut noise = host::noise_start(&plan.noise_declared, plan.max_load);
     eprintln!("{}", host::render(&host_info, &noise));
 
@@ -1831,10 +1834,7 @@ pub async fn run(plan: &Plan) -> anyhow::Result<(RunResult, PathBuf)> {
     }
 
     let finished = chrono::Utc::now();
-    let host_label = plan
-        .host_label
-        .clone()
-        .unwrap_or_else(|| host_info.hostname.clone());
+    let host_label = host_info.hostname.clone();
     let result = RunResult {
         schema_version: SCHEMA_VERSION.into(),
         run_id: uuid::Uuid::new_v4().to_string(),
