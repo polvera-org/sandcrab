@@ -26,9 +26,8 @@ On Docker, crabd and every tool process run under Docker's default seccomp profi
 ## Hardening sysctls (implemented)
 
 `crabd init` writes these before any sandbox code runs (`crabd serve` only starts at `init.configure`). The list is
-`sandcrab_protocol::init::HARDENING_SYSCTLS`. Each value is read back. A sysctl the kernel lacks is skipped and logged,
-and one it refuses is logged as a warning: neither stops the boot. `/proc/sys` is made read-only right after, so a
-sandbox user with uid 0 cannot write them back. Several of these handlers have no capability check (for example
+`sandcrab_protocol::init::HARDENING_SYSCTLS`. Each value is read back. A sysctl the kernel lacks is skipped and logged.
+`/proc/sys` is made read-only right after, so a sandbox user with uid 0 cannot write them back. Several of these handlers have no capability check (for example
 `perf_event_paranoid`, `io_uring_disabled`, `unprivileged_userfaultfd`), so without the read-only mount, root's owner
 permission bits would be enough to undo them.
 
@@ -48,6 +47,22 @@ permission bits would be enough to undo them.
 
 The kernel columns are what the e2e suite read back on an x86_64 KVM host. Kernels built for another arch can differ;
 `crabd init` logs what it could not set (`sysctls not supported by this kernel`, `sysctl not hardened`).
+
+### Failure policy: fail closed
+
+Guest hardening **fails closed**. `crabd init` keeps booting so that the host gets a clear error instead of a boot
+timeout, but `init.configure` refuses (before it mounts a workspace or starts `crabd serve`) with
+`guest hardening failed, refusing to start the sandbox: <steps>`, and the spawn fails with that message. It refuses
+when:
+
+- a hardening sysctl exists but none of its values sticks (`sysctl not hardened`);
+- a read-only remount fails: `/proc/sys` or another of Docker's `ReadonlyPaths`, or `/sys`;
+- the cgroupfs seal after `crabd serve` is spawned fails (`crabd serve` is killed before the host ever connects);
+- there is no pids cap at all, or only the `RLIMIT_NPROC` fallback and the sandbox user is uid 0 (the kernel never
+  applies `RLIMIT_NPROC` to uid 0).
+
+Only a sysctl the kernel does not have (`ENOENT`) stays a log line: the guest kernel is pinned, and a missing key means
+the feature it guards is missing too. A `ReadonlyPaths` entry that does not exist is skipped for the same reason.
 
 `/sys` is read-only only after PID 1 is done with it: block devices are scanned and the pids cgroup is set up first.
 The cgroup v2 mount under it is a separate mount, sealed separately.

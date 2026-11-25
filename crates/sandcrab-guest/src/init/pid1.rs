@@ -94,9 +94,14 @@ async fn boot() -> io::Result<()> {
         warn!(error = %e, "could not disable core dumps");
     }
     let pids_cap = pids_cap();
-    harden_kernel();
+    let hardening = harden_kernel();
+    if !hardening.is_empty() {
+        // Keep booting so the host gets this as a clear `init.configure` error instead of a
+        // silent boot timeout; no sandbox code ever starts (see `hardening_refusal`).
+        error!(failed = ?hardening, "guest hardening failed; init.configure will refuse");
+    }
 
-    let ops = Arc::new(Pid1Ops::new(devices, pids_cap));
+    let ops = Arc::new(Pid1Ops::new(devices, pids_cap, hardening));
     let mut sigchld = signal(SignalKind::child())?;
     let mut sigint = signal(SignalKind::interrupt())?;
     let listener = vsock::bind(CONTROL_PORT)?;
@@ -168,16 +173,24 @@ fn pids_cap() -> PidsCap {
 /// Kernel-interface hardening, before any sandbox code can run (`crabd serve` only starts at
 /// `init.configure`): the [`sysctl::HARDENING_SYSCTLS`], then Docker's read-only `/proc`
 /// paths (so a uid-0 sandbox user cannot write the sysctls back through the owner bits) and
-/// a read-only `/sys`. Best effort: each failure is logged and the boot continues, and the
-/// e2e suite asserts the result per backend.
-fn harden_kernel() {
+/// a read-only `/sys`.
+///
+/// **Fails closed** (`docs/design/guest-seccomp.md`): returns every step that failed, and
+/// `init.configure` then refuses to start the sandbox. A sysctl the kernel does not have
+/// (`ENOENT`, [`sysctl::Outcome::Missing`]) is not a failure: the guest kernel is pinned, and
+/// a missing key means the feature it guards is missing too.
+fn harden_kernel() -> Vec<String> {
+    let mut failed = Vec::new();
     let mut set = Vec::new();
     let mut missing = Vec::new();
     for (s, outcome) in sysctl::apply_all(Path::new(sysctl::PROC_SYS), sysctl::HARDENING_SYSCTLS) {
         match outcome {
             sysctl::Outcome::Set(v) => set.push(format!("{}={v}", s.key)),
             sysctl::Outcome::Missing => missing.push(s.key),
-            sysctl::Outcome::Failed(e) => warn!(key = s.key, error = %e, "sysctl not hardened"),
+            sysctl::Outcome::Failed(e) => {
+                error!(key = s.key, error = %e, "sysctl not hardened");
+                failed.push(format!("sysctl {}: {e}", s.key));
+            }
         }
     }
     info!(?set, "hardening sysctls");
@@ -186,12 +199,36 @@ fn harden_kernel() {
     }
     for p in PROC_READONLY_PATHS {
         if let Err(e) = sys::seal_readonly_path(Path::new(p)) {
-            warn!(error = %e, "stays writable");
+            error!(error = %e, "stays writable");
+            failed.push(format!("read-only {p}: {e}"));
         }
     }
     if let Err(e) = sys::seal_sysfs() {
-        warn!(error = %e, "/sys stays writable");
+        error!(error = %e, "/sys stays writable");
+        failed.push(format!("read-only /sys: {e}"));
     }
+    failed
+}
+
+/// Why `init.configure` must refuse to start sandbox code, if it must: any failed hardening
+/// step, no fork-bomb cap at all, or a uid-0 sandbox user with only the `RLIMIT_NPROC`
+/// fallback (the kernel never applies it to uid 0).
+fn hardening_refusal(failed: &[String], pids_cap: &PidsCap, uid: u32) -> Option<String> {
+    let mut why = failed.to_vec();
+    match pids_cap {
+        PidsCap::Cgroup(_) => {}
+        PidsCap::Rlimit if uid == 0 => {
+            why.push("no pids cgroup, and RLIMIT_NPROC does not apply to uid 0".into());
+        }
+        PidsCap::Rlimit => {}
+        PidsCap::Unlimited => why.push("no pids cap (neither cgroup nor RLIMIT_NPROC)".into()),
+    }
+    (!why.is_empty()).then(|| {
+        format!(
+            "guest hardening failed, refusing to start the sandbox: {}",
+            why.join("; ")
+        )
+    })
 }
 
 fn resolve(devices: &[BlockDevice], drive_id: &str, label: &str) -> Option<PathBuf> {
@@ -221,15 +258,18 @@ struct Configured {
 struct Pid1Ops {
     devices: Vec<BlockDevice>,
     pids_cap: PidsCap,
+    /// Hardening steps that failed at boot ([`harden_kernel`]).
+    hardening_failed: Vec<String>,
     state: tokio::sync::Mutex<Option<Configured>>,
     serve_pid: AtomicU32,
 }
 
 impl Pid1Ops {
-    fn new(devices: Vec<BlockDevice>, pids_cap: PidsCap) -> Self {
+    fn new(devices: Vec<BlockDevice>, pids_cap: PidsCap, hardening_failed: Vec<String>) -> Self {
         Self {
             devices,
             pids_cap,
+            hardening_failed,
             state: tokio::sync::Mutex::new(None),
             serve_pid: AtomicU32::new(0),
         }
@@ -246,6 +286,11 @@ impl Pid1Ops {
         let v = config::validate_config(cfg)?;
         let c = &v.config;
         info!(sandbox = %c.sandbox_id, mounts = v.mounts.len(), "init.configure");
+        // Fail closed before touching anything: no workspace is mounted, no sandbox code runs.
+        if let Some(why) = hardening_refusal(&self.hardening_failed, &self.pids_cap, c.user.uid) {
+            error!(uid = c.user.uid, "{why}");
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, why));
+        }
         if let Some(ms) = c.host_time_unix_ms {
             sys::set_clock(ms).unwrap_or_else(|e| warn!(error = %e, "clock"));
         }
@@ -320,7 +365,16 @@ impl Pid1Ops {
         if cgroup.is_some()
             && let Err(e) = sys::seal_cgroupfs()
         {
-            warn!(error = %e, "cgroupfs stays writable");
+            // Fail closed: a writable cgroupfs lets the sandbox raise `pids.max` or leave the
+            // cgroup. `crabd serve` has not been handed a connection yet (the host only
+            // connects after `init.configure` succeeds), so kill it before it is used.
+            let mut child = child;
+            let _ = child.kill();
+            let why = format!(
+                "guest hardening failed, refusing to start the sandbox: read-only cgroupfs: {e}"
+            );
+            error!("{why}");
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, why));
         }
         // The `Child` is dropped without `wait`: the reaper owns all exit statuses.
         let pid = child.id();
@@ -387,5 +441,34 @@ impl InitOps for Pid1Ops {
 
     fn shutdown(self: Arc<Self>, grace: Duration) -> BoxFuture<()> {
         Box::pin(async move { self.do_shutdown(grace).await })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hardening_fails_closed() {
+        let cg = PidsCap::Cgroup(PathBuf::from("/sys/fs/cgroup/sandbox"));
+        // All good, any uid.
+        for uid in [0, 1000] {
+            assert_eq!(hardening_refusal(&[], &cg, uid), None);
+        }
+        // A failed mandatory step refuses for every uid, and names the step.
+        let failed = vec!["read-only /proc/sys: EPERM".to_owned()];
+        for uid in [0, 1000] {
+            let why = hardening_refusal(&failed, &cg, uid).unwrap();
+            assert!(
+                why.contains("refusing") && why.contains("/proc/sys"),
+                "{why}"
+            );
+        }
+        // The RLIMIT_NPROC fallback is enough for a non-root user, never for uid 0.
+        assert_eq!(hardening_refusal(&[], &PidsCap::Rlimit, 1000), None);
+        let why = hardening_refusal(&[], &PidsCap::Rlimit, 0).unwrap();
+        assert!(why.contains("uid 0"), "{why}");
+        // No cap at all refuses everyone.
+        assert!(hardening_refusal(&[], &PidsCap::Unlimited, 1000).is_some());
     }
 }
