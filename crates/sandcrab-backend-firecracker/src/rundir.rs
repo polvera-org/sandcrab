@@ -166,7 +166,11 @@ pub struct CgroupLeaf {
 }
 
 impl CgroupLeaf {
-    /// `mkdir <parent>/sandcrab-<id>` and set `memory.max` / `pids.max`.
+    /// `mkdir <parent>/sandcrab-<id>` and set `memory.max`, `memory.swap.max = 0` and
+    /// `pids.max`. Without the swap cap, memory above `memory.max` would be swapped out
+    /// instead of capped (the effective limit would be RAM + swap). A kernel without swap
+    /// accounting has no `memory.swap.max`, and then nothing can be swapped past the cap
+    /// either, so a missing file is skipped.
     pub fn create(parent: &Path, id: SandboxId, memory_max: u64, pids_max: u32) -> Result<Self> {
         let path = parent.join(format!("sandcrab-{id}"));
         fs::create_dir(&path).map_err(|e| {
@@ -178,6 +182,7 @@ impl CgroupLeaf {
         let leaf = Self { path };
         let res = leaf
             .write("memory.max", &memory_max.to_string())
+            .and_then(|()| leaf.write_if_present("memory.swap.max", "0"))
             .and_then(|()| leaf.write("pids.max", &pids_max.to_string()));
         if let Err(e) = res {
             leaf.remove();
@@ -193,6 +198,22 @@ impl CgroupLeaf {
     fn write(&self, file: &str, value: &str) -> Result<()> {
         let p = self.path.join(file);
         fs::write(&p, value).map_err(|e| io_at(&p, e))
+    }
+
+    /// Like [`Self::write`], but an interface file the kernel does not provide (`ENOENT`,
+    /// e.g. `memory.swap.max` without swap accounting) is skipped. Opened without `O_CREAT`:
+    /// cgroupfs never creates files.
+    fn write_if_present(&self, file: &str, value: &str) -> Result<()> {
+        use std::io::Write as _;
+        let p = self.path.join(file);
+        match fs::OpenOptions::new().write(true).truncate(true).open(&p) {
+            Ok(mut f) => f.write_all(value.as_bytes()).map_err(|e| io_at(&p, e)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                tracing::debug!(file = %p.display(), "cgroup interface file absent; skipped");
+                Ok(())
+            }
+            Err(e) => Err(io_at(&p, e)),
+        }
     }
 
     /// Best-effort `rmdir` (the leaf must be empty: call after the VMM was reaped).
@@ -261,6 +282,21 @@ mod tests {
         assert!(!img.exists());
         assert_eq!(fs::read_to_string(&moved[0]).unwrap(), "img");
         assert!(moved[0].with_extension("json").is_file());
+    }
+
+    #[test]
+    fn swap_is_capped_when_the_kernel_accounts_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        // No swap accounting (fake fs: no `memory.swap.max`): skipped, not created.
+        let leaf = CgroupLeaf::create(tmp.path(), SandboxId::new(), 1 << 30, 64).unwrap();
+        assert!(!leaf.path.join("memory.swap.max").exists());
+        // With the interface file present it is set to 0.
+        fs::write(leaf.path.join("memory.swap.max"), "max").unwrap();
+        leaf.write_if_present("memory.swap.max", "0").unwrap();
+        assert_eq!(
+            fs::read_to_string(leaf.path.join("memory.swap.max")).unwrap(),
+            "0"
+        );
     }
 
     #[test]

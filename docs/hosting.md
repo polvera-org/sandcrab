@@ -360,7 +360,7 @@ SHA-256 checked by the same command.
 Without a cgroup, the guest RAM bounds the guest, but the helper's own VMM overhead
 (virtio-fs and vsock threads, device buffers) is not capped. The backend warns once per
 process, and `doctor` reports `lk:cgroup`. To cap it, give each helper a cgroup v2 leaf
-(`memory.max` = guest RAM + 128 MiB, `pids.max` = 64) under a parent delegated to `<user>`:
+(`memory.max` = guest RAM + 128 MiB, `memory.swap.max` = 0, `pids.max` = 64) under a parent delegated to `<user>`:
 
 ```ini
 # ~/.config/systemd/user/sandcrab-vms.service

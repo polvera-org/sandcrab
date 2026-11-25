@@ -422,7 +422,7 @@ Port 0, duplicates and more than 64 ports are `InvalidConfig` before anything st
   `InvalidConfig`. HVF maps guest RAM lazily. Host RSS grows towards `memory_mb` plus about 100 MB of VMM overhead **[spike: ~105 MB idle]**.
   There is no balloon in Phase A (`krun_set_balloon_free_page_reporting_mode` is a later lever).
 - **Disk:** `disk_mb` sizes the scratch image. `/tmp` and the overlay upper live there.
-- **Host-side caps:** **Linux** puts the helper in a cgroup v2 leaf (`memory.max = mem + 128 MiB`, `pids.max = 64`), reusing the FC
+- **Host-side caps:** **Linux** puts the helper in a cgroup v2 leaf (`memory.max = mem + 128 MiB`, `memory.swap.max = 0`, `pids.max = 64`), reusing the FC
   `CgroupLeaf` (moved to core or `sandcrab-rootfs`… see the DAG: copied first, deduplicated later). **macOS has no cgroups.** The guest RAM
   bounds the guest, and VMM overhead is unbounded. This is documented and surfaced by `doctor`.
 - **Guest limits:** PIDs, files and so on inside the VM are the guest's business. The VM is the boundary. We do not use `krun_set_rlimits`.
