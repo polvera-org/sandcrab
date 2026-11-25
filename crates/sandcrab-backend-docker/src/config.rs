@@ -11,6 +11,81 @@ use sandcrab_core::{Result, SandboxError, default_state_root};
 /// Environment variable overriding the default host path of the static `crabd` binary.
 pub const CRABD_ENV: &str = "SANDCRAB_CRABD";
 
+/// Environment variable overriding the host ↔ `crabd` transport: `unix` or `tcp`.
+pub const TRANSPORT_ENV: &str = "SANDCRAB_DOCKER_TRANSPORT";
+
+/// How the host reaches `crabd` in a Docker sandbox. Both are authenticated with a
+/// per-sandbox token ([`sandcrab_core::AuthConnector`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DockerTransport {
+    /// `crabd` listens on a Unix socket in a bind-mounted per-sandbox host directory.
+    /// Needs the daemon's kernel to be the host's (Linux, rootful Docker).
+    Unix,
+    /// `crabd` listens on a Unix socket in a small per-sandbox tmpfs volume; a hardened relay
+    /// container (`crabd relay`) forwards a TCP port Docker publishes on `127.0.0.1` only.
+    /// For Docker Desktop (macOS), where Unix sockets cannot cross the VM boundary. The
+    /// sandbox container's own network policy is unchanged (`disabled` stays `none`).
+    Tcp,
+}
+
+impl DockerTransport {
+    /// `tcp` on macOS (Docker Desktop), `unix` elsewhere.
+    #[must_use]
+    pub fn host_default() -> Self {
+        if cfg!(target_os = "macos") {
+            Self::Tcp
+        } else {
+            Self::Unix
+        }
+    }
+
+    /// `$SANDCRAB_DOCKER_TRANSPORT`, if set and non-empty.
+    pub fn from_env() -> Result<Option<Self>> {
+        match std::env::var(TRANSPORT_ENV) {
+            Ok(v) if !v.trim().is_empty() => v.parse().map(Some),
+            _ => Ok(None),
+        }
+    }
+
+    /// The env override, else [`Self::host_default`]; an invalid env value falls back to the
+    /// host default here ([`crate::DockerBackend::new`] reports it as an error).
+    #[must_use]
+    pub fn resolve() -> Self {
+        Self::from_env()
+            .ok()
+            .flatten()
+            .unwrap_or_else(Self::host_default)
+    }
+
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unix => "unix",
+            Self::Tcp => "tcp",
+        }
+    }
+}
+
+impl std::fmt::Display for DockerTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for DockerTransport {
+    type Err = SandboxError;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "unix" => Ok(Self::Unix),
+            "tcp" => Ok(Self::Tcp),
+            other => Err(SandboxError::InvalidConfig(format!(
+                "${TRANSPORT_ENV}=`{other}`: expected `unix` or `tcp`"
+            ))),
+        }
+    }
+}
+
 /// Per-container limits that are not part of a template's `[resources]`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DockerLimits {
@@ -52,6 +127,9 @@ pub struct DockerConfig {
     /// to `false`**: spawning an unpinned template fails with an `UnpinnedImage` error (pin
     /// with `templates/build.sh <name>` or adopt with `sandcrab template pin <name>`).
     pub allow_unpinned_images: bool,
+    /// Host ↔ `crabd` transport. Default: [`DockerTransport::resolve`] (`$SANDCRAB_DOCKER_TRANSPORT`,
+    /// else `tcp` on macOS and `unix` elsewhere).
+    pub transport: DockerTransport,
 }
 
 impl Default for DockerConfig {
@@ -62,6 +140,7 @@ impl Default for DockerConfig {
             state_dir: default_state_dir(),
             limits: DockerLimits::default(),
             allow_unpinned_images: false,
+            transport: DockerTransport::resolve(),
         }
     }
 }
@@ -220,6 +299,27 @@ mod tests {
             legacy, c,
             "deprecated constructor is a no-op alias of default()"
         );
+    }
+
+    #[test]
+    fn transport_parsing_and_host_default() {
+        assert_eq!(
+            "unix".parse::<DockerTransport>().unwrap(),
+            DockerTransport::Unix
+        );
+        assert_eq!(
+            " TCP ".parse::<DockerTransport>().unwrap(),
+            DockerTransport::Tcp
+        );
+        let err = "vsock".parse::<DockerTransport>().unwrap_err().to_string();
+        assert!(err.contains(TRANSPORT_ENV), "{err}");
+        let want = if cfg!(target_os = "macos") {
+            DockerTransport::Tcp
+        } else {
+            DockerTransport::Unix
+        };
+        assert_eq!(DockerTransport::host_default(), want);
+        assert_eq!(DockerTransport::Tcp.to_string(), "tcp");
     }
 
     #[test]

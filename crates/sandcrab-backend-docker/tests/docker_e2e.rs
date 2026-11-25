@@ -19,8 +19,8 @@ use std::time::{Duration, Instant};
 
 use bollard::Docker;
 use bollard::query_parameters::ListContainersOptionsBuilder;
-use sandcrab_backend_docker::spec::container_name;
-use sandcrab_backend_docker::{CRABD_ENV, DockerBackend, DockerConfig, ReapScope};
+use sandcrab_backend_docker::spec::{container_name, relay_name, sock_volume_name};
+use sandcrab_backend_docker::{CRABD_ENV, DockerBackend, DockerConfig, DockerTransport, ReapScope};
 use sandcrab_core::{
     LifecycleTimings, ManagerConfig, MountMode, NetworkConfig, ResolvedSpec, RuntimeBackend,
     Sandbox, SandboxConfig, SandboxError, SandboxId, SandboxManager, TemplateRegistry,
@@ -155,6 +155,139 @@ async fn assert_gone(env: &Env, id: SandboxId) {
         !env.state_dir().join(id.to_string()).exists(),
         "socket dir left behind"
     );
+    assert!(
+        !container_exists(&relay_name(id)).await,
+        "relay left behind"
+    );
+    assert!(
+        !matches!(docker().inspect_volume(&sock_volume_name(id)).await, Ok(_)),
+        "socket volume left behind"
+    );
+}
+
+/// Raw stream to this sandbox's crabd endpoint, bypassing the authenticating connector.
+async fn raw_crabd_stream(env: &Env, id: SandboxId) -> Box<dyn sandcrab_core::AsyncStream> {
+    match env.backend.transport() {
+        DockerTransport::Unix => Box::new(
+            tokio::net::UnixStream::connect(
+                env.state_dir().join(id.to_string()).join("crabd.sock"),
+            )
+            .await
+            .unwrap(),
+        ),
+        DockerTransport::Tcp => {
+            let info = docker()
+                .inspect_container(&relay_name(id), None)
+                .await
+                .unwrap();
+            let bindings = info.network_settings.unwrap().ports.unwrap()["7070/tcp"]
+                .clone()
+                .unwrap();
+            assert!(
+                bindings
+                    .iter()
+                    .all(|b| b.host_ip.as_deref() == Some("127.0.0.1")),
+                "relay published beyond loopback: {bindings:?}"
+            );
+            let port: u16 = bindings[0].host_port.as_deref().unwrap().parse().unwrap();
+            Box::new(
+                tokio::net::TcpStream::connect(("127.0.0.1", port))
+                    .await
+                    .unwrap(),
+            )
+        }
+    }
+}
+
+/// Security: on the real endpoint (Unix socket, or the relay's published loopback port),
+/// a connection with no token or a wrong token is refused and closed, and no tool call or
+/// tunnel runs. The token never reaches `docker inspect` and the token file is consumed.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Docker, sandcrab/base:0.1.0 and a static crabd"]
+async fn unauthenticated_connections_are_refused_and_run_nothing() {
+    use sandcrab_protocol::{AUTH_TOKEN_BYTES, AuthToken, RpcResponse, codes, encode_frame};
+
+    let _serial = SERIAL.lock().await;
+    let env = env();
+    let sb = env
+        .manager
+        .spawn(SandboxConfig::from_template("base").mount(
+            "project",
+            "/workspace",
+            MountMode::ReadWrite,
+        ))
+        .await
+        .unwrap();
+    let id = sb.id();
+    assert!(
+        !env.state_dir()
+            .join(id.to_string())
+            .join("auth-token")
+            .exists(),
+        "crabd must consume the token file"
+    );
+    for name in [container_name(id), relay_name(id)] {
+        let Ok(info) = docker().inspect_container(&name, None).await else {
+            continue; // no relay with the Unix transport
+        };
+        // Env, command and labels (the image id is a legitimate 64-hex string elsewhere).
+        let config = info.config.unwrap();
+        let dump = format!("{:?} {:?} {:?}", config.env, config.cmd, config.labels);
+        let hexrun = dump
+            .split(|c: char| !c.is_ascii_hexdigit())
+            .any(|w| w.len() >= 64);
+        assert!(
+            !hexrun,
+            "{name}: something token-shaped in the container config"
+        );
+    }
+
+    let touch = |n: u32| {
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "bash",
+            "params": { "command": format!("touch /workspace/pwned-{n}") }
+        })
+    };
+    let wrong = AuthToken::from_bytes(&[0x42; AUTH_TOKEN_BYTES]);
+    for case in 0..3u32 {
+        let mut s = raw_crabd_stream(&env, id).await;
+        let mut out = Vec::new();
+        match case {
+            0 => out.extend(encode_frame(&touch(case)).unwrap()),
+            1 => {
+                out.extend(encode_frame(&wrong.to_request(0)).unwrap());
+                out.extend(encode_frame(&touch(case)).unwrap());
+            }
+            _ => out.extend(
+                encode_frame(&serde_json::json!({
+                    "jsonrpc": "2.0", "id": 1, "method": "tunnel.open", "params": {"port": 22}
+                }))
+                .unwrap(),
+            ),
+        }
+        s.write_all(&out).await.unwrap();
+        let mut hdr = [0u8; 4];
+        tokio::time::timeout(Duration::from_secs(10), s.read_exact(&mut hdr))
+            .await
+            .unwrap()
+            .unwrap();
+        let mut body = vec![0u8; u32::from_be_bytes(hdr) as usize];
+        s.read_exact(&mut body).await.unwrap();
+        let resp: RpcResponse = serde_json::from_slice(&body).unwrap();
+        assert!(
+            matches!(&resp.payload, sandcrab_protocol::ResponsePayload::Error(e) if e.code == codes::UNAUTHORIZED),
+            "case {case}: {resp:?}"
+        );
+        let mut rest = Vec::new();
+        let _ = tokio::time::timeout(Duration::from_secs(10), s.read_to_end(&mut rest)).await;
+        assert!(rest.is_empty(), "case {case}: served after refusal");
+    }
+    // The authenticated path still works, and none of the refused calls ran.
+    let r = bash(&sb, "ls /workspace | grep -c pwned || true").await;
+    assert_eq!(r.stdout.trim(), "0", "an unauthenticated call ran");
+    assert!(!env.project.join("pwned-0").exists());
+    sb.destroy().await.unwrap();
+    assert_gone(&env, id).await;
 }
 
 fn host_ids() -> (u32, u32) {
@@ -247,9 +380,25 @@ async fn base_lifecycle_tools_mounts_and_hardening() {
     let r = bash(&sb, "pgrep -c -x sleep || true").await;
     assert_eq!(r.stdout.trim(), "0", "sleepers survived the timeout");
 
-    // network `disabled` → only loopback, no egress.
-    let r = bash(&sb, "ls /sys/class/net").await;
+    // network `disabled` → network mode `none` (also with the TCP transport's relay), only
+    // loopback is up (Docker Desktop's kernel adds down, unaddressed tunnel fallback devices
+    // such as `sit0` to every namespace), no routes, no egress.
+    let info = docker()
+        .inspect_container(&container_name(id), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        info.host_config.unwrap().network_mode.as_deref(),
+        Some("none")
+    );
+    let r = bash(
+        &sb,
+        "for i in /sys/class/net/*; do [ -f $i/flags ] && [ $(( $(cat $i/flags) & 1 )) = 1 ] && basename $i; done; true",
+    )
+    .await;
     assert_eq!(r.stdout.split_whitespace().collect::<Vec<_>>(), ["lo"]);
+    let r = bash(&sb, "tail -n +2 /proc/net/route").await;
+    assert_eq!(r.stdout, "", "no IPv4 routes");
     let r = bash(&sb, "curl -sS -m 3 http://1.1.1.1/ >/dev/null").await;
     assert_ne!(r.exit_code, Some(0), "curl succeeded without a network");
 

@@ -1,5 +1,6 @@
-//! Orphan reaping: remove Sandcrab-managed containers (and socket dirs) whose sandbox is
-//! no longer tracked — e.g. after a crash or a cancelled spawn. Used by `doctor --fix`.
+//! Orphan reaping: remove Sandcrab-managed containers (sandbox and TCP-transport relay),
+//! socket volumes and socket dirs whose sandbox is no longer tracked — e.g. after a crash
+//! or a cancelled spawn. Used by `doctor --fix`.
 //!
 //! Only containers carrying **both** `sandcrab.managed=true` and
 //! `sandcrab.backend=docker` (or the pre-rename `docker-dev`) are considered; unlabeled
@@ -15,13 +16,15 @@ use std::fs;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
-use bollard::query_parameters::ListContainersOptionsBuilder;
+use bollard::query_parameters::{
+    ListContainersOptionsBuilder, ListVolumesOptionsBuilder, RemoveVolumeOptions,
+};
 use sandcrab_core::{Result, SandboxId};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::DockerBackend;
-use crate::backend::{backend_err, teardown};
+use crate::backend::{SandboxObjects, backend_err, status_code, teardown};
 use crate::spec::{
     BACKEND_LABEL_VALUE, LABEL_BACKEND, LABEL_MANAGED, LABEL_OWNER_BOOT_ID, LABEL_OWNER_PID,
     LABEL_OWNER_UID, LABEL_SANDBOX_ID, LABEL_STATE_DIR, LEGACY_BACKEND_LABEL_VALUE,
@@ -156,6 +159,9 @@ pub struct ReapReport {
     pub containers: Vec<ReapedContainer>,
     /// Stale per-sandbox socket directories removed from `state_dir`.
     pub socket_dirs: Vec<std::path::PathBuf>,
+    /// Orphaned TCP-transport socket volumes removed without a container (e.g. a spawn
+    /// cancelled between volume and container creation).
+    pub volumes: Vec<String>,
     /// Untracked managed containers left alone because [`ReapScope::Owned`] did not
     /// prove them orphaned (other live process, other user / state dir, no owner labels).
     pub kept: usize,
@@ -208,6 +214,7 @@ impl DockerBackend {
 
         let mut report = ReapReport::default();
         let mut live = HashSet::new();
+        let mut reaped = HashSet::new();
         for c in containers {
             let labels = c.labels.unwrap_or_default();
             // Belt and braces on top of the daemon-side filter.
@@ -232,15 +239,33 @@ impl DockerBackend {
                 }
                 continue;
             }
+            // The whole sandbox at once: container, relay and socket volume (whichever
+            // exist); its sibling container later in the list is then already gone.
+            if let Some(id) = sandbox_id
+                && !reaped.insert(id)
+            {
+                continue;
+            }
             let dir = sandbox_id.map(|id| self.socket_dir(id));
-            teardown(
-                &self.docker,
-                &container_id,
-                dir.as_deref(),
-                Duration::ZERO,
-                None,
-            )
-            .await?;
+            let objects = match sandbox_id {
+                Some(id) => {
+                    let mut o = SandboxObjects::all(id);
+                    if c.names.iter().flatten().all(|n| {
+                        let n = n.trim_start_matches('/');
+                        n != o.container && Some(n) != o.relay.as_deref()
+                    }) {
+                        // Renamed out of band: remove it by id (the named ones may not exist).
+                        o.container.clone_from(&container_id);
+                    }
+                    o
+                }
+                None => SandboxObjects {
+                    container: container_id.clone(),
+                    relay: None,
+                    volume: None,
+                },
+            };
+            teardown(&self.docker, &objects, dir.as_deref(), Duration::ZERO, None).await?;
             report.containers.push(ReapedContainer {
                 container_id,
                 name: c
@@ -250,6 +275,9 @@ impl DockerBackend {
                 sandbox_id,
             });
         }
+
+        self.reap_volumes(tracked, &live, &me, scope, &mut report)
+            .await?;
 
         let entries = match fs::read_dir(&self.config.state_dir) {
             Ok(e) => e,
@@ -287,6 +315,57 @@ impl DockerBackend {
             }
         }
         Ok(report)
+    }
+
+    /// Remove managed socket volumes left without any container.
+    async fn reap_volumes(
+        &self,
+        tracked: &HashSet<SandboxId>,
+        live: &HashSet<SandboxId>,
+        me: &Owner,
+        scope: ReapScope,
+        report: &mut ReapReport,
+    ) -> Result<()> {
+        let filters = HashMap::from([(
+            "label",
+            vec![format!("{LABEL_MANAGED}=true"), LABEL_BACKEND.to_owned()],
+        )]);
+        let volumes = self
+            .docker
+            .list_volumes(Some(
+                ListVolumesOptionsBuilder::new().filters(&filters).build(),
+            ))
+            .await
+            .map_err(|e| backend_err("list volumes", e))?
+            .volumes
+            .unwrap_or_default();
+        for v in volumes {
+            if !is_managed(&v.labels) {
+                continue;
+            }
+            let sandbox_id = v
+                .labels
+                .get(LABEL_SANDBOX_ID)
+                .and_then(|s| Uuid::parse_str(s).ok())
+                .map(SandboxId);
+            if sandbox_id.is_some_and(|id| tracked.contains(&id) || live.contains(&id)) {
+                continue;
+            }
+            if !is_orphan(&v.labels, me, scope, pid_alive) {
+                continue;
+            }
+            match self
+                .docker
+                .remove_volume(&v.name, None::<RemoveVolumeOptions>)
+                .await
+            {
+                Ok(()) => report.volumes.push(v.name),
+                // Gone already, or still in use by a container we were not allowed to reap.
+                Err(e) if matches!(status_code(&e), Some(404 | 409)) => {}
+                Err(e) => return Err(backend_err(&format!("remove volume `{}`", v.name), e)),
+            }
+        }
+        Ok(())
     }
 }
 
