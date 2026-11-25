@@ -121,7 +121,10 @@ backend therefore uses its **`tcp` transport** by default:
   ([protocol: `auth`](protocol.md#authentication-auth)). Without the token, nothing runs.
   The token goes to `crabd` as a 0400 file in the per-sandbox run dir, never in env or
   labels, so it is not in `docker inspect`. `crabd` deletes the file after reading it.
-  The `unix` transport uses the same token.
+  The `unix` transport uses the same token. When the sandbox runs as another uid than the
+  host process, the run dir has to be 0777 and the token 0444; what keeps other host users
+  out is the Docker `state_dir` (default `~/.sandcrab/run`), so the backend requires it to be
+  a real directory (not a symlink) owned by this user, and tightens a looser one to 0700.
 
 **`disabled` networking is unchanged.** The sandbox container keeps network mode `none`
 (only loopback; no routes, no egress). Only the relay has a network interface, and it has no

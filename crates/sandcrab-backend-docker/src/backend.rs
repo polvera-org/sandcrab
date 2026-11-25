@@ -5,7 +5,7 @@
 use std::fs;
 use std::io::{self, Write as _};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -217,6 +217,7 @@ impl DockerBackend {
                 .create(state)
                 .map_err(|e| io_at(state, e))?;
         }
+        secure_state_dir(state, self.host_user.uid)?;
         fs::DirBuilder::new()
             .mode(0o700)
             .create(&dir)
@@ -225,7 +226,7 @@ impl DockerBackend {
         let mode = if same_uid { 0o700 } else { 0o777 };
         fs::set_permissions(&dir, fs::Permissions::from_mode(mode)).map_err(|e| io_at(&dir, e))?;
         // 0400 for the host uid (= container uid). A different container uid needs 0444;
-        // the 0700 `state_dir` above still keeps other host users out.
+        // the 0700 `state_dir` (checked by `secure_state_dir`) still keeps other host users out.
         write_token(
             &dir.join(TOKEN_NAME),
             token,
@@ -407,6 +408,40 @@ pub(crate) fn loopback_port(map: &PortMap, guest: u16) -> Option<u16> {
 }
 
 /// Write the token with `O_CREAT | O_EXCL` and the final `mode` (never briefly wider).
+/// `state_dir` is the only thing keeping other host users away from a sandbox's socket dir
+/// (0777 when the container runs as another uid) and token (0444 then). So it must be a real
+/// directory (not a symlink) owned by this user, and private: a pre-existing, looser one is
+/// tightened to 0700, and one owned by someone else is refused.
+fn secure_state_dir(state: &Path, uid: u32) -> Result<()> {
+    let md = fs::symlink_metadata(state).map_err(|e| io_at(state, e))?;
+    let refuse = |why: &str| {
+        Err(SandboxError::InvalidConfig(format!(
+            "DockerConfig::state_dir `{}` {why}; it holds the sandboxes' auth tokens and \
+             sockets, so it must be a private (0700) directory owned by this user",
+            state.display()
+        )))
+    };
+    if md.file_type().is_symlink() {
+        return refuse("is a symlink");
+    }
+    if !md.is_dir() {
+        return refuse("is not a directory");
+    }
+    if md.uid() != uid {
+        return refuse(&format!("is owned by uid {}, not {uid}", md.uid()));
+    }
+    if md.permissions().mode() & 0o077 != 0 {
+        tracing::warn!(
+            state_dir = %state.display(),
+            mode = format!("{:o}", md.permissions().mode() & 0o777),
+            "state_dir is accessible to other users; tightening it to 0700"
+        );
+        fs::set_permissions(state, fs::Permissions::from_mode(0o700))
+            .map_err(|e| io_at(state, e))?;
+    }
+    Ok(())
+}
+
 fn write_token(path: &Path, token: &AuthToken, mode: u32) -> Result<()> {
     let mut f = fs::OpenOptions::new()
         .write(true)
@@ -794,6 +829,27 @@ mod tests {
         assert_eq!(fs::read_to_string(&p).unwrap(), t.expose());
         // Never overwrites (or follows) an existing file.
         assert!(write_token(&p, &t, 0o400).is_err());
+    }
+
+    #[test]
+    fn state_dir_is_private_and_owned() {
+        let tmp = tempfile::tempdir().unwrap();
+        let uid = rustix::process::getuid().as_raw();
+        let state = tmp.path().join("run");
+        fs::create_dir(&state).unwrap();
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o775)).unwrap();
+        secure_state_dir(&state, uid).unwrap();
+        assert_eq!(
+            fs::metadata(&state).unwrap().permissions().mode() & 0o777,
+            0o700,
+            "a loose state_dir is tightened"
+        );
+        let e = secure_state_dir(&state, uid + 1).unwrap_err();
+        assert!(e.to_string().contains("owned by uid"), "{e}");
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&state, &link).unwrap();
+        let e = secure_state_dir(&link, uid).unwrap_err();
+        assert!(e.to_string().contains("symlink"), "{e}");
     }
 
     #[test]
