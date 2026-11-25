@@ -1,0 +1,49 @@
+---
+slug: ci-actions
+name: "CI: Rust builds for macOS + Linux"
+---
+
+import { ExecutionFlowchart, TodoList, PhaseTimeline } from "ministack/components";
+
+# CI: Rust builds for macOS + Linux — execution plan
+
+Two GitHub Actions workflows for sandcrab, modelled on tentacle-app's release matrix: **CI** on every PR and
+push to `main` (fmt, clippy, tests, static `crabd`), and **Release** on `v*` tags that ships prebuilt tarballs for
+macOS arm64, Linux x86_64 and Linux arm64 as a draft GitHub release. Windows is deferred; Windows users get WSL
+instructions. GitHub-hosted runners only: free for public repos, so no self-hosted runners.
+
+<PhaseTimeline src="./ci-actions.flow.yaml" />
+
+## Flow
+
+Steps side by side run in parallel. Arrows are real dependencies.
+
+<ExecutionFlowchart src="./ci-actions.flow.yaml" />
+
+## Work
+
+<TodoList src="./ci-actions.flow.yaml" />
+
+## Decisions
+
+- **Hand-rolled matrix, not cargo-dist.** tentacle uses cargo-dist 0.30.2, but sandcrab ships more than one CLI:
+  a static musl `crabd` per arch and an entitlement-signed `sandcrab-krun` helper on macOS. A small
+  `scripts/package-release.sh` (runnable locally) is easier to reason about than dist config overrides.
+- **Release archive per platform:** `sandcrab`, `crabagent`, `sandcrab-krun` (macOS + Linux), `crabd` (musl, same
+  arch) and `SHA256SUMS`. Linux binaries are glibc (`ubuntu-24.04` baseline).
+- **Native arm64 runners** (`ubuntu-24.04-arm`, `macos-latest`) instead of cross-compiling — no QEMU, real tests.
+- **Hosted runners only** (decided): no self-hosted, so fork PRs never reach our machines.
+- **Budget:** cheap by default — docs-only changes skip CI, superseded runs are cancelled, Docker e2e is nightly /
+  manual instead of per-PR, Firecracker e2e uses hosted `/dev/kvm`, libkrun e2e stays a local run on the Mac.
+
+## Risks & open questions
+
+- **Public repo = GitHub-hosted standard runners are free (confirmed).** That covers Linux x64, `ubuntu-24.04-arm`
+  and macOS arm64. The 75% is spent elsewhere (private repos or larger runners; see org Billing → Usage by repo),
+  so sandcrab CI costs $0 on hosted runners. The $0.002/min fee on self-hosted runners was postponed indefinitely.
+  The cheapest fallbacks are Blacksmith (3k free min/mo, KVM on x64), WarpBuild and Ubicloud. BuildJet shut down
+  in March 2026.
+- **KVM:** hosted x64 Linux exposes `/dev/kvm` (undocumented), so Firecracker e2e can run there. Hosted macOS has
+  no nested virtualization, and we run no self-hosted runners, so libkrun e2e stays a local run on the Mac.
+- **macOS signing:** ad-hoc only (decided). Developer ID signing and notarization (R10) come with the official launch.
+- **No push from agents:** the first real GitHub run happens when you push the branch.
