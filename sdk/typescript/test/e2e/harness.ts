@@ -1,10 +1,17 @@
-// Shared setup of the end-to-end tests: a real `sandcrab server` on Docker, started as a child
-// process with a private socket and state directory, and driven only through the public SDK.
+// Shared setup of the end-to-end tests: a real `sandcrab server`, started as a child process
+// with a private socket and state directory, and driven only through the public SDK.
 //
-// Needs: `SANDCRAB_BIN` (the `sandcrab` binary), Docker, and the pinned `ts-dev` template
-// (`templates/build.sh ts-dev`). Passed through to the server: `SANDCRAB_TEMPLATE_PINS` (default
-// `~/.sandcrab/template-pins`, as a private `SANDCRAB_HOME` would otherwise hide the host's pins)
-// and `SANDCRAB_CRABD` (the static `crabd` to inject). Without `SANDCRAB_BIN` every test skips.
+// The backend comes from `SANDCRAB_E2E_BACKEND`: `docker` (the default) or `libkrun`.
+//
+// Needs: `SANDCRAB_BIN` (the `sandcrab` binary) and the pinned `ts-dev` template
+// (`templates/build.sh ts-dev`). Docker: a Docker daemon; each server gets a private
+// `SANDCRAB_HOME`. libkrun: `SANDCRAB_E2E_HOME`, a prepared `SANDCRAB_HOME` that holds the
+// libkrun libraries and the helper (`sandcrab libkrun install`); every libkrun server uses it
+// as its state directory (short path: its run directory holds Unix sockets) and the rootfs
+// cache fills there.
+// Passed through to the server: `SANDCRAB_TEMPLATE_PINS` (default `~/.sandcrab/template-pins`,
+// as a private `SANDCRAB_HOME` would otherwise hide the host's pins) and `SANDCRAB_CRABD` (the
+// static `crabd`). Without `SANDCRAB_BIN` every test skips.
 //
 // Hygiene: the server runs with `--lifeline-stdin`, so it stops when this test process dies,
 // however it dies; every server is also killed when its test file ends. Every wait has a deadline.
@@ -21,8 +28,32 @@ import { connect } from "../../src/index.ts";
 import type { Sandbox, SandcrabClient } from "../../src/index.ts";
 
 export const BIN = process.env.SANDCRAB_BIN ?? "";
+export type Backend = "docker" | "libkrun";
+export const BACKEND: Backend = (process.env.SANDCRAB_E2E_BACKEND ?? "docker") as Backend;
+if (BACKEND !== "docker" && BACKEND !== "libkrun") throw new Error(`SANDCRAB_E2E_BACKEND must be docker or libkrun, not ${String(BACKEND)}`);
+const SHARED_HOME = process.env.SANDCRAB_E2E_HOME ?? "";
 /** `{ skip }` for `describe`/`test`: the reason the e2e cannot run here, or false. */
-export const SKIP: string | false = BIN === "" ? "SANDCRAB_BIN is not set: no sandcrab binary to test against" : false;
+export const SKIP: string | false =
+  BIN === ""
+    ? "SANDCRAB_BIN is not set: no sandcrab binary to test against"
+    : BACKEND === "libkrun" && SHARED_HOME === ""
+      ? "SANDCRAB_E2E_HOME is not set: libkrun needs a prepared SANDCRAB_HOME (libraries, helper)"
+      : false;
+
+/** `{ skip }` for a case that cannot apply to `backend`, with the reason. */
+export function skipOn(backend: Backend, reason: string): string | false {
+  return SKIP || (BACKEND === backend ? `not on ${backend}: ${reason}` : false);
+}
+
+/** Bounded polling: resolves once `cond()` is true, rejects after `ms` naming `what`. */
+export async function until(cond: () => boolean | Promise<boolean>, ms: number, what: string): Promise<void> {
+  const end = Date.now() + ms;
+  for (;;) {
+    if (await cond()) return;
+    if (Date.now() > end) throw new Error(`${what}: not reached within ${ms} ms`);
+    await sleep(50);
+  }
+}
 
 export const TEMPLATE = "ts-dev";
 export const PATH_ENV = "/usr/local/bin:/usr/bin:/bin";
@@ -72,8 +103,18 @@ export interface ServerOptions {
   dir?: string;
 }
 
+/**
+ * The server's state directory for a server in `dir`. libkrun keeps its helper, libraries and
+ * rootfs cache under the state root, so every libkrun server uses the prepared home (one at a
+ * time, like the files); Docker servers get a private one.
+ */
+export function stateDirOf(dir: string): string {
+  return BACKEND === "libkrun" ? SHARED_HOME : path.join(dir, "state");
+}
+
 export class TestServer {
   readonly dir: string;
+  readonly stateDir: string;
   readonly socketPath: string;
   readonly logPath: string;
   readonly #child: ChildProcess;
@@ -81,6 +122,7 @@ export class TestServer {
 
   private constructor(dir: string, child: ChildProcess) {
     this.dir = dir;
+    this.stateDir = stateDirOf(dir);
     this.socketPath = path.join(dir, "sock", "server.sock");
     this.logPath = path.join(dir, "server.log");
     this.#child = child;
@@ -96,13 +138,13 @@ export class TestServer {
     // Short paths: the Docker backend puts sockets under the state directory (108-byte limit).
     const dir = o.dir ?? mkdtempSync(path.join(tmpdir(), "scts-"));
     mkdirSync(path.join(dir, "home"), { recursive: true });
-    const args = ["--backend=docker", "--state-dir", path.join(dir, "state"), "--templates-dir", path.join(REPO, "templates"), "server", "--socket", path.join(dir, "sock", "server.sock"), "--lifeline-stdin"];
+    const args = [`--backend=${BACKEND}`, "--state-dir", stateDirOf(dir), "--templates-dir", path.join(REPO, "templates"), "server", "--socket", path.join(dir, "sock", "server.sock"), "--lifeline-stdin"];
     for (const r of o.mountRoots ?? []) args.push("--mount-root", r);
     for (const u of o.allowUids ?? []) args.push("--allow-uid", String(u));
     const env: Record<string, string> = {
       PATH: process.env.PATH ?? "/usr/bin:/bin",
       HOME: process.env.HOME ?? homedir(),
-      SANDCRAB_HOME: path.join(dir, "home"),
+      SANDCRAB_HOME: BACKEND === "libkrun" ? SHARED_HOME : path.join(dir, "home"),
       SANDCRAB_TEMPLATE_PINS: process.env.SANDCRAB_TEMPLATE_PINS ?? path.join(homedir(), ".sandcrab", "template-pins"),
     };
     if (process.env.SANDCRAB_CRABD) env.SANDCRAB_CRABD = process.env.SANDCRAB_CRABD;
@@ -158,7 +200,7 @@ export class TestServer {
 }
 
 /**
- * Processes in the sandbox other than its init (`docker-init` and `crabd serve`), the probe and
+ * Processes in the sandbox other than its init (`docker-init` or `crabd init`, and `crabd serve`), the probe and
  * the probe's own supervisor, as `pid cmdline`.
  */
 export async function leftovers(sandbox: Sandbox): Promise<string[]> {

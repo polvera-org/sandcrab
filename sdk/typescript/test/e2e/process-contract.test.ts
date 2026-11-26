@@ -1,4 +1,4 @@
-// The process contract of a spawned process, against a real server on Docker (design §10.4,
+// The process contract of a spawned process, against a real server (design §10.4,
 // §15 `ts-contract`). One server and one `ts-dev` sandbox for the file; after every case no
 // program may be left running in the sandbox.
 
@@ -6,11 +6,11 @@ import assert from "node:assert/strict";
 import { after, afterEach, before, describe, test } from "node:test";
 
 import type { Sandbox, SandcrabClient } from "../../src/index.ts";
-import { collect, deadline, leftovers, mixedText, NODE, PATH_ENV, pidAlive, SKIP, TEMPLATE, TestServer } from "./harness.ts";
+import { BACKEND, collect, deadline, leftovers, mixedText, NODE, PATH_ENV, pidAlive, SKIP, TEMPLATE, TestServer } from "./harness.ts";
 
 const ENV = { PATH: PATH_ENV };
 
-describe("process contract (spawn) on a real server", { skip: SKIP, timeout: 300_000 }, () => {
+describe(`process contract (spawn) on a real server (${BACKEND})`, { skip: SKIP, timeout: 300_000 }, () => {
   let server: TestServer;
   let client: SandcrabClient;
   let sb: Sandbox;

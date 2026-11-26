@@ -1,4 +1,4 @@
-// The bounded `exec` against a real server on Docker (design §10.4, §13, §15 `ts-contract`):
+// The bounded `exec` against a real server (design §10.4, §13, §15 `ts-contract`):
 // timeout vs abort, the output cap, live output, input and output streams, warm exec numbers.
 
 import assert from "node:assert/strict";
@@ -6,11 +6,11 @@ import { Readable, Writable } from "node:stream";
 import { after, afterEach, before, describe, test } from "node:test";
 
 import type { Sandbox, SandcrabClient } from "../../src/index.ts";
-import { leftovers, mixedText, NODE, PATH_ENV, pct, SKIP, TEMPLATE, TestServer } from "./harness.ts";
+import { BACKEND, leftovers, mixedText, NODE, PATH_ENV, pct, SKIP, TEMPLATE, TestServer } from "./harness.ts";
 
 const ENV = { PATH: PATH_ENV };
 
-describe("exec contract on a real server", { skip: SKIP, timeout: 600_000 }, () => {
+describe(`exec contract on a real server (${BACKEND})`, { skip: SKIP, timeout: 600_000 }, () => {
   let server: TestServer;
   let client: SandcrabClient;
   let sb: Sandbox;
