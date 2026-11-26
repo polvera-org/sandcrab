@@ -53,14 +53,30 @@ pub(crate) fn prepare_dir(
         })?
         .to_path_buf();
     if !dir.exists() {
+        let mode = if gid.is_some() { 0o710 } else { 0o700 };
+        let err =
+            |what: &str, e: std::io::Error| ServerError::io(format!("{what} {}", dir.display()), e);
         std::fs::DirBuilder::new()
-            .mode(if gid.is_some() { 0o710 } else { 0o700 })
+            .mode(mode)
             .create(&dir)
-            .map_err(|e| ServerError::io(format!("creating {}", dir.display()), e))?;
+            .map_err(|e| err("creating", e))?;
+        // Through its handle, never a symlink. The mode again, since a strict umask (a root
+        // service runs with 0077) strips the group's search bit the members need.
+        let fd = rustix::fs::open(
+            &dir,
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::DIRECTORY
+                | rustix::fs::OFlags::NOFOLLOW
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )
+        .map_err(|e| err("opening", e.into()))?;
         if let Some(gid) = gid {
-            std::os::unix::fs::chown(&dir, None, Some(gid))
-                .map_err(|e| ServerError::io(format!("chown {}", dir.display()), e))?;
+            rustix::fs::fchown(&fd, None, Some(rustix::process::Gid::from_raw(gid)))
+                .map_err(|e| err("chown", e.into()))?;
         }
+        rustix::fs::fchmod(&fd, rustix::fs::Mode::from_raw_mode(mode))
+            .map_err(|e| err("chmod", e.into()))?;
     }
     sandcrab_sdk::core::private_dir::check_foreign_dir(
         &dir,
@@ -273,6 +289,14 @@ mod tests {
         let dir = prepare_dir(&sock, uid(), None).unwrap();
         let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o700);
+        // With the socket's group: `0710`, group given through the handle.
+        let gid = std::fs::metadata(tmp.path()).unwrap().gid();
+        let dir = prepare_dir(&tmp.path().join("grp/server.sock"), uid(), Some(gid)).unwrap();
+        let meta = std::fs::metadata(&dir).unwrap();
+        assert_eq!(
+            (meta.permissions().mode() & 0o777, meta.gid()),
+            (0o710, gid)
+        );
 
         let open = tmp.path().join("open");
         std::fs::create_dir(&open).unwrap();
