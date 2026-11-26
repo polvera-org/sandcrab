@@ -57,7 +57,7 @@ steps:
     title: "sandcrab-protocol 0.3 (crabd side): process.open with argv, exact env, cwd, rlimits, stderr tail / merge / stream, caps, timeout; the record format (stdin, stdin EOF, stdout, stderr, exit); cancel; forward.listen / incoming / accept; init.configure options (exec /tmp, pids, nofile, forward ports); hello features; 0.2 refused cleanly; schema snapshots"
     depends_on: [design-rev]
     artifacts: [crates/sandcrab-protocol/src, docs/protocol.md]
-    status: doing
+    status: done
 
   - id: api-types
     phase: implement
@@ -65,7 +65,7 @@ steps:
     title: "Server API types and their exported JSON Schema in sandcrab-protocol (`api` module): server.hello with version and features, sandbox create / get / list / destroy / destroy by label, process spawn and cancel, forward attach, capabilities, self-test; error codes"
     depends_on: [protocol-03]
     artifacts: [crates/sandcrab-protocol/src/api.rs]
-    status: todo
+    status: doing
 
   - id: guest-supervisor
     phase: implement
@@ -73,7 +73,7 @@ steps:
     title: "crabd: one `supervise` child per process as a subreaper (no capability, no unsafe), spec handed over out of band, exact env and argv, records on the connection, tree kill (ask, grace, force) that gets a grandchild which ignores TERM or left the group; first on Docker and libkrun as a spike, then the real thing"
     depends_on: [protocol-03]
     artifacts: [crates/sandcrab-guest/src/supervise.rs, crates/sandcrab-guest/src/proctree.rs, crates/sandcrab-guest/src/server.rs]
-    status: todo
+    status: doing
 
   - id: guest-caps
     phase: implement
@@ -97,7 +97,7 @@ steps:
     title: "crabd init (microVM): exec-capable /tmp and its size, pids and nofile limits, forward ports through init.configure"
     depends_on: [protocol-03]
     artifacts: [crates/sandcrab-guest/src/init]
-    status: todo
+    status: doing
 
   - id: core-config
     phase: implement
@@ -105,7 +105,7 @@ steps:
     title: "sandcrab-core: forwards, exec /tmp, pids / nofile on SandboxConfig; ad-hoc host-dir mounts (ro / rw) at the client's own path under allowed roots, opened beneath a held root fd, no symlinks, no nesting inside one sandbox; labels in the manager, list by label and creation time, destroy by label with a confirmed-empty answer; Firecracker refuses forwards and ad-hoc mounts explicitly; fix the struct literals in every backend crate and the bench"
     depends_on: [protocol-03]
     artifacts: [crates/sandcrab-core/src, crates/sandcrab-backend-firecracker/src]
-    status: todo
+    status: doing
 
   - id: core-streams
     phase: implement
