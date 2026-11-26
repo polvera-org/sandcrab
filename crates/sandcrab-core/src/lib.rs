@@ -41,6 +41,7 @@ pub use client::{
 };
 pub use error::{Result, SandboxError};
 pub use forward::{ForwardAcceptor, ForwardConfig, ForwardTarget};
+pub use fsx::ScratchDir;
 pub use hostmount::{HostMount, MAX_SANDBOX_MOUNTS, MountPolicy, MountRoot};
 pub use manager::{
     DestroyByLabel, ManagerConfig, Sandbox, SandboxFilter, SandboxInfo, SandboxManager,

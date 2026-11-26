@@ -14,6 +14,8 @@ pub const DEFAULT_MAX_SANDBOXES: u32 = 64;
 pub const DEFAULT_TTL_SECS: u64 = sandcrab_sdk::core::DEFAULT_TTL_SECS;
 /// Longest TTL a client may ask for.
 pub const DEFAULT_MAX_TTL_SECS: u64 = 24 * 60 * 60;
+/// Default `max_disk_mb`: 32 GiB.
+pub const DEFAULT_MAX_DISK_MB: u64 = 32 * 1024;
 /// Default socket mode.
 pub const DEFAULT_SOCKET_MODE: u32 = 0o600;
 
@@ -96,6 +98,9 @@ pub struct LimitsConfig {
     pub default_ttl_secs: u64,
     /// Longest TTL a client may ask for (`null`, no TTL, stays allowed).
     pub max_ttl_secs: u64,
+    /// Largest `resources.disk_mb` a client may ask for (the scratch drive on libkrun and
+    /// Firecracker; a sparse file, so a large one fills the host disk only as it is used).
+    pub max_disk_mb: u64,
 }
 
 impl Default for LimitsConfig {
@@ -104,6 +109,7 @@ impl Default for LimitsConfig {
             max_sandboxes: DEFAULT_MAX_SANDBOXES,
             default_ttl_secs: DEFAULT_TTL_SECS,
             max_ttl_secs: DEFAULT_MAX_TTL_SECS,
+            max_disk_mb: DEFAULT_MAX_DISK_MB,
         }
     }
 }
@@ -132,6 +138,12 @@ pub struct ServerConfig {
     /// May a client ask for uid or gid 0 in a sandbox (also as the default user of a root
     /// peer).
     pub allow_root_user: bool,
+    /// Inclusive `[first, last]` uid ranges a client may name as its sandbox's uid besides
+    /// its own. Default: none, so a sandbox runs as its client's uid. A file a sandbox makes
+    /// setuid in a read-write mount is a setuid file of that uid on the host.
+    pub allow_sandbox_uids: Vec<[u32; 2]>,
+    /// The same for the sandbox's gid besides the client's own gid.
+    pub allow_sandbox_gids: Vec<[u32; 2]>,
     /// Templates whose self-test runs once at start, in the background. Default: none. A
     /// failure does not stop the server; `server.capabilities` then says why isolation is
     /// not proven.
@@ -153,6 +165,8 @@ impl Default for ServerConfig {
             templates_dirs: Vec::new(),
             default_template: None,
             allow_root_user: false,
+            allow_sandbox_uids: Vec::new(),
+            allow_sandbox_gids: Vec::new(),
             selftest_on_start: Vec::new(),
             limits: LimitsConfig::default(),
             mount_roots: Vec::new(),
@@ -221,7 +235,11 @@ impl ServerConfig {
             ));
         }
         let l = &self.limits;
-        if l.max_sandboxes == 0 || l.default_ttl_secs == 0 || l.max_ttl_secs == 0 {
+        if l.max_sandboxes == 0
+            || l.default_ttl_secs == 0
+            || l.max_ttl_secs == 0
+            || l.max_disk_mb == 0
+        {
             return Err(ServerError::Config(
                 "`limits` values must be positive".into(),
             ));
@@ -231,6 +249,16 @@ impl ServerConfig {
                 "`limits.default_ttl_secs` ({}) is above `limits.max_ttl_secs` ({})",
                 l.default_ttl_secs, l.max_ttl_secs
             )));
+        }
+        for (key, ranges) in [
+            ("allow_sandbox_uids", &self.allow_sandbox_uids),
+            ("allow_sandbox_gids", &self.allow_sandbox_gids),
+        ] {
+            if let Some([a, b]) = ranges.iter().find(|[a, b]| a > b) {
+                return Err(ServerError::Config(format!(
+                    "`{key}` range [{a}, {b}] is reversed (write [first, last])"
+                )));
+            }
         }
         for r in &self.mount_roots {
             if !r.path.is_absolute() {
@@ -290,11 +318,14 @@ state_dir = "/var/lib/sandcrab"
 templates_dirs = ["/etc/sandcrab/templates"]
 default_template = "base"
 allow_root_user = false
+allow_sandbox_uids = [[60000, 62999]]
+allow_sandbox_gids = [[60000, 62999], [70000, 70000]]
 selftest_on_start = ["base"]
 
 [limits]
 max_sandboxes = 128
 default_ttl_secs = 600
+max_disk_mb = 8192
 
 [[mount_roots]]
 path = "/srv/app-data"
@@ -312,10 +343,13 @@ mode = "ro"
         assert_eq!(c.allowed_uids(0), [1500]);
         assert_eq!(c.limits.max_sandboxes, 128);
         assert_eq!(c.limits.default_ttl_secs, 600);
+        assert_eq!(c.limits.max_disk_mb, 8192);
         assert_eq!(c.limits.max_ttl_secs, DEFAULT_MAX_TTL_SECS);
         assert_eq!(c.mount_roots[1].mode, MountMode::ReadOnly);
         assert_eq!(c.default_template.as_deref(), Some("base"));
         assert_eq!(c.selftest_on_start, ["base"]);
+        assert_eq!(c.allow_sandbox_uids, [[60000, 62999]]);
+        assert_eq!(c.allow_sandbox_gids[1], [70000, 70000]);
     }
 
     #[test]
@@ -355,10 +389,12 @@ mode = "ro"
         for extra in [
             "allow_uids = []",
             "[limits]\nmax_sandboxes = 0",
+            "[limits]\nmax_disk_mb = 0",
             "[limits]\ndefault_ttl_secs = 100000",
             "[[mount_roots]]\npath = \"rel\"",
             "default_template = \"\"",
             "selftest_on_start = [\"\"]",
+            "allow_sandbox_uids = [[2, 1]]",
         ] {
             let c = ServerConfig::from_toml(&format!("{ok}{extra}")).unwrap();
             assert!(c.validate().is_err(), "{extra}");

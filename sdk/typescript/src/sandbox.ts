@@ -1,7 +1,7 @@
 import { realpath } from "node:fs/promises";
 import path from "node:path";
 
-import { AbortedError, InvalidSpecError } from "./errors.ts";
+import { AbortedError, InvalidSpecError, SandcrabError } from "./errors.ts";
 import { exec } from "./exec.ts";
 import type { ExecOptions, ExecOutput } from "./exec.ts";
 import { validateForwards } from "./forwards.ts";
@@ -133,6 +133,10 @@ async function prepareCreate(spec: SandboxSpec): Promise<{ params: SandboxCreate
 
 export async function createSandbox(client: ClientImpl, spec: SandboxSpec, signal?: AbortSignal): Promise<Sandbox> {
   const { params, mounts } = await prepareCreate(spec);
+  for (const [feature, used] of [["mounts", mounts.length > 0], ["forwards", (spec.forwards?.length ?? 0) > 0]] as const) {
+    const missing = used ? client._missingFeature(feature) : null;
+    if (missing !== null) throw new SandcrabError("UNSUPPORTED_FEATURE", missing);
+  }
   if (signal?.aborted) throw new AbortedError();
   let sandbox: SandboxImpl | undefined;
   let aborted = false;

@@ -540,9 +540,12 @@ pub fn create_scratch(path: &Path, size_mib: u64) -> Result<Duration> {
             "scratch drive of {size_mib} MiB is too small (min 8)"
         )));
     }
+    let bytes = size_mib.checked_mul(MIB).ok_or_else(|| {
+        Error::Unsupported(format!("scratch drive of {size_mib} MiB is too large"))
+    })?;
     {
         let f = File::create(path).at(path)?;
-        f.set_len(size_mib * MIB).at(path)?;
+        f.set_len(bytes).at(path)?;
     }
     let res = mkfs::run(
         Command::new("mke2fs")
@@ -825,5 +828,16 @@ mod tests {
             meta.blocks()
         );
         assert!(create_scratch(&p, 1).is_err());
+    }
+
+    #[test]
+    fn scratch_size_overflow_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("scratch.ext4");
+        assert!(matches!(
+            create_scratch(&p, u64::MAX),
+            Err(Error::Unsupported(_))
+        ));
+        assert!(!p.exists(), "nothing made");
     }
 }

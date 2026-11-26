@@ -38,7 +38,7 @@ use std::time::{Duration, Instant};
 
 use sandcrab_core::{
     BackendKind, MountMode, NetworkConfig, NetworkPolicy, Result, SandboxConfig, SandboxError,
-    UserSpec,
+    ScratchDir, UserSpec,
 };
 use sandcrab_protocol::Overflow;
 use sandcrab_protocol::api::SelftestStatus::{Fail, Inconclusive, Pass};
@@ -266,10 +266,19 @@ pub fn status_name(s: SelftestStatus) -> &'static str {
 /// `<root>/sandcrab-selftest-<id>/{ro/canary, rw/, canary-outside}`; `ro` and `rw` are
 /// mounted, `canary-outside` sits beside them and must not be visible. Removed on drop, so a
 /// run that is dropped half-way leaves nothing behind.
+///
+/// The root is writable by others (a mount root) and the server may run as root, so it is
+/// made and touched only through descriptors ([`ScratchDir`]): a swap at its name never
+/// redirects a write or a chown.
 struct Scratch {
-    dir: PathBuf,
+    dir: ScratchDir,
     canary: String,
 }
+
+/// Bytes read back from the rw mount (the nonce the probe wrote).
+const RW_READ_LIMIT: u64 = 4096;
+/// The file the `fs-outside-mounts` probe writes in the rw mount.
+const RW_PROBE_FILE: &str = "probe-rw";
 
 impl Scratch {
     fn create(sandcrab: &Sandcrab, config: &SelftestConfig) -> Result<Self> {
@@ -293,51 +302,39 @@ impl Scratch {
                 })?,
         };
         let id = Uuid::new_v4().simple().to_string();
-        let dir = root.join(format!("sandcrab-selftest-{}", &id[..12]));
-        let canary = format!("canary-{id}");
-        let s = Self { dir, canary };
-        let made = (|| {
-            std::fs::create_dir(&s.dir)?;
-            std::fs::create_dir(s.ro())?;
-            std::fs::create_dir(s.rw())?;
-            std::fs::write(s.ro().join("canary"), &s.canary)?;
-            std::fs::write(s.outside(), &s.canary)?;
-            // The sandbox user must be able to write through the rw mount.
-            if let Some(u) = config.user {
-                use std::os::unix::fs::MetadataExt;
-                let rw = s.rw();
-                let meta = std::fs::metadata(&rw)?;
-                if meta.uid() != u.uid || meta.gid() != u.gid {
-                    std::os::unix::fs::chown(&rw, Some(u.uid), Some(u.gid))?;
-                }
-            }
-            Ok(())
-        })();
-        // On an error `s` drops here and removes what was made.
-        made.map_err(|e| io_at(&s.dir, e))?;
+        let dir = ScratchDir::create(&root, &format!("sandcrab-selftest-{}", &id[..12]))?;
+        let s = Self {
+            dir,
+            canary: format!("canary-{id}"),
+        };
+        // On an error `s` drops and removes what was made.
+        s.dir.mkdir("ro")?;
+        s.dir.mkdir("rw")?;
+        s.dir.write_new("ro/canary", s.canary.as_bytes())?;
+        s.dir.write_new("canary-outside", s.canary.as_bytes())?;
+        // The sandbox user must be able to write through the rw mount.
+        if let Some(u) = config.user {
+            s.dir.chown_dir("rw", u.uid, u.gid)?;
+        }
         Ok(s)
     }
 
     fn ro(&self) -> PathBuf {
-        self.dir.join("ro")
+        self.dir.path().join("ro")
     }
 
     fn rw(&self) -> PathBuf {
-        self.dir.join("rw")
+        self.dir.path().join("rw")
     }
 
     fn outside(&self) -> PathBuf {
-        self.dir.join("canary-outside")
+        self.dir.path().join("canary-outside")
     }
-}
 
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        if let Err(e) = std::fs::remove_dir_all(&self.dir)
-            && e.kind() != io::ErrorKind::NotFound
-        {
-            tracing::warn!(dir = %self.dir.display(), error = %e, "self-test: cannot remove scratch");
-        }
+    /// What the probe wrote to `rw/<name>`, read through the held handle (never a symlink).
+    fn read_rw(&self, name: &str) -> Option<String> {
+        let bytes = self.dir.read(&format!("rw/{name}"), RW_READ_LIMIT).ok()?;
+        String::from_utf8(bytes).ok()
     }
 }
 
@@ -516,7 +513,7 @@ async fn probe_all(
     // Mounts.
     facts.canary.clone_from(&scratch.canary);
     facts.rw_nonce = nonce();
-    let rw_file = scratch.rw().join("probe-rw");
+    let rw_file = scratch.rw().join(RW_PROBE_FILE);
     let mut args: Vec<String> = vec!["fs-outside-mounts".into()];
     for p in hidden {
         args.extend(["--absent".into(), p.display().to_string()]);
@@ -532,7 +529,7 @@ async fn probe_all(
     ]);
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     runs.push(("fs-outside-mounts", probe(a, probe_spec(a, &args)).await));
-    facts.rw_on_host = std::fs::read_to_string(&rw_file).ok();
+    facts.rw_on_host = scratch.read_rw(RW_PROBE_FILE);
 
     // The other sandbox.
     let other_nonce = nonce();

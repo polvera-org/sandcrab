@@ -51,4 +51,4 @@ harness run in parallel.
 - **Python 3.15 / Node 26 availability** in `uv` / official images. If a pinned version is missing, fall back to the latest stable and record it in the template.
 - **Egress allowlist is not enforced** in DockerDev (the proxy comes in Phase 3). Unrestricted networking is required for `npm install` in the harness.
 - **VPS hardening applied**: ufw (SSH only), fail2ban, root login key-only, Docker publishes to 127.0.0.1 only.
-  `nicolas` password login is still enabled; disabling it is recommended once you've confirmed your own key login. The `docker` group is root-equivalent (accepted for a dev box).
+  The dev user's password login is still enabled; disabling it is recommended once you've confirmed your own key login. The `docker` group is root-equivalent (accepted for a dev box).

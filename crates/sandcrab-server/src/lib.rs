@@ -46,8 +46,15 @@ pub use config::{BackendName, LimitsConfig, MountRootConfig, ServerConfig};
 pub use lifecycle::{lifeline, stdin_lifeline};
 pub use peer::Peer;
 
-/// Connections of all kinds open at once.
+/// Connections of all kinds open at once, at most (less when the fd limit is low, see
+/// [`fd_caps`]).
 pub const MAX_CONNECTIONS: u32 = 1024;
+/// Forwarded connections relayed at once, all sandboxes together, at most (less when the fd
+/// limit is low). Each holds two descriptors (the attach socket and the guest connection);
+/// one past the cap is refused, so the guest closes the program's connection.
+pub const MAX_FORWARDED_CONNECTIONS: u32 = 4096;
+/// The soft `RLIMIT_NOFILE` the server asks for at start (up to the hard limit).
+pub const WANT_NOFILE: u64 = 65_536;
 /// Requests in flight per control connection; beyond that the server stops reading it.
 pub const MAX_REQUESTS_IN_FLIGHT: u32 = 64;
 /// Processes per sandbox (the guest's `--max-processes`).
@@ -59,6 +66,56 @@ pub const MAX_PIDS: u64 = 8192;
 pub const MAX_NOFILE: u64 = 1_048_576;
 /// A connection that sends no first frame within this is closed.
 pub const FIRST_FRAME_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Raise the soft `RLIMIT_NOFILE` towards the hard limit (at most [`WANT_NOFILE`]) and
+/// return the soft limit in force.
+pub fn raise_nofile() -> u64 {
+    use rustix::process::{Resource, getrlimit, setrlimit};
+    let cur = getrlimit(Resource::Nofile);
+    let soft = cur.current.unwrap_or(WANT_NOFILE);
+    let want = cur.maximum.map_or(WANT_NOFILE, |h| h.min(WANT_NOFILE));
+    // macOS refuses more than `kern.maxfilesperproc`; 10240 (`OPEN_MAX`) is always allowed.
+    for want in [want, want.min(10_240)] {
+        if want <= soft {
+            break;
+        }
+        let mut raised = cur;
+        raised.current = Some(want);
+        match setrlimit(Resource::Nofile, raised) {
+            Ok(()) => return want,
+            Err(e) => tracing::warn!(error = %e, soft, want, "cannot raise RLIMIT_NOFILE"),
+        }
+    }
+    soft
+}
+
+/// `(max_connections, max_forwarded)` for a soft fd limit of `nofile`: connections (two
+/// fds each at most: the client and the guest) take up to half the limit, forwarded
+/// connections (two each) a quarter, the rest is for the backend, sandboxes and logs. So
+/// the caps refuse with `LIMIT_EXCEEDED` before `accept` or a dial meets `EMFILE`.
+#[must_use]
+pub fn fd_caps(nofile: u64) -> (u32, u32) {
+    let part = |div: u64, max: u32| u32::try_from(nofile / div).unwrap_or(max).clamp(1, max);
+    (part(4, MAX_CONNECTIONS), part(8, MAX_FORWARDED_CONNECTIONS))
+}
+
+/// Mounts one sandbox of this backend can take: the core cap, lower where the backend has
+/// less room (libkrun on x86_64 boots at most four directory mounts).
+fn max_mounts(sandcrab: &Sandcrab) -> u32 {
+    #[allow(unused_mut)]
+    let mut max = sandcrab_sdk::core::MAX_SANDBOX_MOUNTS;
+    #[cfg(all(
+        feature = "libkrun",
+        any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))
+    ))]
+    if sandcrab.backend_kind() == sandcrab_sdk::core::BackendKind::Libkrun
+        && let Some(room) = sandcrab_sdk::libkrun::workspace::device_room()
+    {
+        max = max.min(room);
+    }
+    let _ = sandcrab;
+    u32::try_from(max).unwrap_or(u32::MAX)
+}
 
 /// Why the server could not start or stop cleanly.
 #[derive(Debug, thiserror::Error)]
@@ -163,12 +220,13 @@ pub(crate) struct Shared {
 impl Shared {
     pub(crate) fn new(sandcrab: Sandcrab, config: ServerConfig, allow_uids: Vec<u32>) -> Self {
         let backend = sandcrab.backend_kind().to_string();
+        let (max_connections, max_forwarded) = fd_caps(raise_nofile());
         let limits = ServerLimits {
-            max_connections: MAX_CONNECTIONS,
+            max_connections,
             max_requests_in_flight: MAX_REQUESTS_IN_FLIGHT,
             max_sandboxes: config.limits.max_sandboxes,
             max_processes_per_sandbox: MAX_PROCESSES_PER_SANDBOX,
-            max_mounts: u32::try_from(sandcrab_sdk::core::MAX_SANDBOX_MOUNTS).unwrap_or(16),
+            max_mounts: max_mounts(&sandcrab),
             max_vcpu: MAX_VCPU,
             max_memory_mb: MAX_MEMORY_MB,
             max_pids: MAX_PIDS,
@@ -185,7 +243,7 @@ impl Shared {
             owners: Mutex::default(),
             creating: Mutex::new(0),
             shutting_down: AtomicBool::new(false),
-            hub: Arc::default(),
+            hub: Arc::new(forwards::Hub::new(max_forwarded)),
             processes: process::Processes::default(),
             selftests: selftest::Selftests::default(),
             expiries: watch::Expiries::default(),
@@ -259,5 +317,72 @@ impl Drop for SlotGuard<'_> {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         *c = c.saturating_sub(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fd_caps_fit_the_fd_limit() {
+        assert_eq!(
+            fd_caps(65_536),
+            (MAX_CONNECTIONS, MAX_FORWARDED_CONNECTIONS)
+        );
+        assert_eq!(fd_caps(1024), (256, 128));
+        assert_eq!(fd_caps(0), (1, 1));
+        for n in [256, 1024, 4096, 20_000] {
+            let (c, f) = fd_caps(n);
+            // Two descriptors each at most, with a quarter left for everything else.
+            assert!(2 * u64::from(c) + 2 * u64::from(f) <= n * 3 / 4, "{n}");
+        }
+    }
+
+    fn sandcrab_of(kind: sandcrab_sdk::core::BackendKind, tmp: &Path) -> Sandcrab {
+        std::fs::create_dir_all(tmp.join("templates")).unwrap();
+        let mut backend = sandcrab_sdk::core::testing::FakeBackend::shared_kernel();
+        backend.kind = kind;
+        Sandcrab::builder()
+            .backend(backend)
+            .state_dir(tmp.join("state"))
+            .templates_dir(tmp.join("templates"))
+            .build()
+            .unwrap()
+    }
+
+    /// `max_mounts` is the backend's real room: libkrun on x86_64 boots four directory
+    /// mounts, not the core's sixteen.
+    #[test]
+    fn max_mounts_is_the_backends_room() {
+        use sandcrab_sdk::core::BackendKind;
+        let tmp = tempfile::tempdir().unwrap();
+        let docker = max_mounts(&sandcrab_of(BackendKind::Docker, tmp.path()));
+        assert_eq!(docker as usize, sandcrab_sdk::core::MAX_SANDBOX_MOUNTS);
+        let krun = max_mounts(&sandcrab_of(BackendKind::Libkrun, tmp.path()));
+        let libkrun_built = cfg!(all(
+            feature = "libkrun",
+            any(
+                target_os = "linux",
+                all(target_os = "macos", target_arch = "aarch64")
+            )
+        ));
+        let want = if libkrun_built && cfg!(target_arch = "x86_64") {
+            4
+        } else {
+            docker
+        };
+        assert_eq!(krun, want);
+    }
+
+    #[test]
+    fn raise_nofile_reaches_the_hard_limit() {
+        let soft = raise_nofile();
+        let cur = rustix::process::getrlimit(rustix::process::Resource::Nofile);
+        assert_eq!(cur.current, Some(soft));
+        #[cfg(target_os = "linux")]
+        if let Some(hard) = cur.maximum {
+            assert!(soft >= hard.min(WANT_NOFILE), "soft {soft}, hard {hard}");
+        }
     }
 }

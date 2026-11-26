@@ -44,6 +44,13 @@ Docker backend. **Add every read-write mount root to `ReadWritePaths=`**: with
 `ProtectSystem=strict` the server cannot write there otherwise, and the self-test makes its
 scratch directory in one.
 
+The server raises its soft `RLIMIT_NOFILE` to the hard limit (at most 65536; the unit sets
+`LimitNOFILE=65536`) and sizes its caps from it, so a busy server refuses with
+`LIMIT_EXCEEDED` instead of running out of descriptors: connections of all kinds (at most 1024,
+a quarter of the limit, the `max_connections` in `server.hello`) and forwarded connections
+across all sandboxes (at most 4096, an eighth of the limit; one past the cap is refused, so the
+program in the sandbox sees its connection closed).
+
 ### Config keys
 
 `sandcrab server --config FILE` reads TOML; flags override the file. Unknown keys are refused.
@@ -60,15 +67,29 @@ scratch directory in one.
 | `default_template` | none | Used when a create names no template |
 | `selftest_on_start` | none | Templates whose self-test runs once at start, in the background |
 | `allow_root_user` | `false` | May a client ask for uid or gid 0 in a sandbox |
+| `allow_sandbox_uids` | none | Inclusive `[first, last]` uid ranges a client may name as its sandbox's uid besides its own, e.g. `[[60000, 62999]]` |
+| `allow_sandbox_gids` | none | The same for the sandbox's gid besides the client's own gid |
 | `[limits] max_sandboxes` | `64` | Sandboxes alive at once, all clients together. Raise it for many concurrent runs |
 | `[limits] default_ttl_secs` | `1800` | TTL of a sandbox created without one |
 | `[limits] max_ttl_secs` | `86400` | Longest TTL a client may ask for |
+| `[limits] max_disk_mb` | `32768` | Largest `resources.disk_mb` a client may ask for (the scratch drive on libkrun and Firecracker; Docker does not enforce `disk_mb`) |
 | `[[mount_roots]] path`, `mode` | none | Host directories clients may mount (`rw`: ro and rw; `ro`: ro only). No roots: every mount is refused |
 
 `sandcrab doctor --server-config FILE` (run it as the server's user, with the same
 `SANDCRAB_HOME`) checks that the file parses, the socket directory would pass the start check,
 the allow list, that every mount root exists and lies outside the state directory, the backend
 preflight, and that the templates the config names are present and pinned.
+
+### The sandbox user
+
+A sandbox runs as its client's uid and gid (the peer credentials of the connection). A
+`sandbox.create` that names another `user` is refused with `POLICY_UNENFORCEABLE` unless the
+uid lies in an `allow_sandbox_uids` range and the gid is the client's own or lies in an
+`allow_sandbox_gids` range; uid or gid 0 always needs `allow_root_user`. The reason: a sandbox
+can leave a setuid or setgid file in a read-write mount, and the host honours it as that user
+(Docker cannot mount a bind mount `nosuid`). Allow only ranges of throwaway users that own
+nothing and are in no privileged group, and keep the mount roots on a filesystem mounted
+`nosuid` where you can. A root client may name any user.
 
 ### A client in a container
 
@@ -105,6 +126,15 @@ sandcrab --backend libkrun server --socket "$DIR/server.sock" --lifeline-stdin
 `--lifeline-stdin` stops the server when its stdin reaches end-of-file. The client holds the
 pipe open, so a client that dies takes its server and its sandboxes with it. Client, server and
 the libkrun helper run as one user, so the default allow list (the server's own uid) is right.
+
+## Processes that outlive their supervisor
+
+Each process runs under its own supervisor in the sandbox, which kills the whole tree on exit,
+timeout or cancel and reports `tree_clean`. The program runs as the same user as its
+supervisor, so it can kill it. Then nothing is left to stop the tree: the client gets `lost`
+(or an exit) with `tree_clean: false`, and whatever the program started keeps running in the
+sandbox until the sandbox is destroyed. **A client must destroy a sandbox whose process
+reported `tree_clean: false`** before it runs anything else there.
 
 ## Self-test
 

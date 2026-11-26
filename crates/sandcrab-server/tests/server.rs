@@ -172,7 +172,12 @@ async fn the_configured_backend_must_be_the_one_built() {
 
 #[tokio::test]
 async fn every_sandbox_call() {
-    let h = Harness::new(|c, _| c.limits.max_ttl_secs = 7200).await;
+    let h = Harness::new(|c, _| {
+        c.limits.max_ttl_secs = 7200;
+        c.allow_sandbox_uids = vec![[1234, 1234]];
+        c.allow_sandbox_gids = vec![[1200, 1299]];
+    })
+    .await;
     let mut c = h.client().await;
 
     let a = c
@@ -350,6 +355,16 @@ async fn create_refusals_and_the_sandbox_limit() {
         (json!({"template": "base", "user": "0:0"}), -32105),
         (json!({"template": "base", "user": "1000:0"}), -32105),
         (json!({"template": "base", "user": "alice"}), -32602),
+        // Another uid or gid than the client's own needs an allowance in the config.
+        (json!({"template": "base", "user": "1234:1234"}), -32105),
+        (
+            json!({"template": "base", "user": format!("{}:1234", me())}),
+            -32105,
+        ),
+        (
+            json!({"template": "base", "user": format!("1234:{}", my_gid())}),
+            -32105,
+        ),
         (json!({"template": "base", "ttl_secs": 0}), -32602),
         (json!({"template": "base", "ttl_secs": 90000}), -32104),
         (
@@ -366,6 +381,14 @@ async fn create_refusals_and_the_sandbox_limit() {
         ),
         (
             json!({"template": "base", "resources": {"nofile": 2000000}}),
+            -32104,
+        ),
+        (
+            json!({"template": "base", "resources": {"disk_mb": 32769}}),
+            -32104,
+        ),
+        (
+            json!({"template": "base", "resources": {"disk_mb": u64::MAX}}),
             -32104,
         ),
         // No mount roots configured: every mount is refused.

@@ -32,7 +32,10 @@ use tokio::sync::{Semaphore, mpsc};
 
 use crate::listener::failure;
 use crate::wire::{frame, read_frame, write_frame};
-use crate::{MAX_MEMORY_MB, MAX_NOFILE, MAX_PIDS, MAX_REQUESTS_IN_FLIGHT, MAX_VCPU, Peer, Shared};
+use crate::{
+    MAX_MEMORY_MB, MAX_NOFILE, MAX_PIDS, MAX_REQUESTS_IN_FLIGHT, MAX_VCPU, Peer, ServerConfig,
+    Shared,
+};
 
 /// Features this server serves now ([`api::features`]). Process connections are part of API
 /// 1.0 and need no feature.
@@ -461,6 +464,7 @@ pub(crate) fn sandbox_config(
             ),
         }));
     }
+    check_other_user(cfg, peer, user)?;
     c.user = Some(user);
     let r = p.resources;
     let over = |v: Option<u64>, max: u64| v.is_some_and(|v| v > max);
@@ -476,6 +480,9 @@ pub(crate) fn sandbox_config(
     if over(r.nofile, MAX_NOFILE) {
         return Err(limit("nofile", MAX_NOFILE));
     }
+    if over(r.disk_mb, cfg.limits.max_disk_mb) {
+        return Err(limit("disk_mb", cfg.limits.max_disk_mb));
+    }
     c.resources = ResourceOverrides {
         vcpu: r.vcpu,
         memory_mb: r.memory_mb,
@@ -487,6 +494,32 @@ pub(crate) fn sandbox_config(
     c.tmp_exec = p.tmp_exec;
     c.tmp_size_mb = p.tmp_size_mb;
     Ok(c)
+}
+
+/// A sandbox runs as its client's own uid and gid. Another (non-zero) uid or gid needs an
+/// `allow_sandbox_uids` / `allow_sandbox_gids` range: a sandbox can leave setuid and setgid
+/// files in a read-write mount, which the host honours as that user. A root client is
+/// root on the host already and may name any user (0 still needs `allow_root_user`).
+fn check_other_user(cfg: &ServerConfig, peer: Peer, user: UserSpec) -> Result<(), ApiError> {
+    if peer.uid == 0 {
+        return Ok(());
+    }
+    let within = |ranges: &[[u32; 2]], v: u32| ranges.iter().any(|[a, b]| (*a..=*b).contains(&v));
+    let refuse = |what: &str, v: u32, own: u32, key: &str| {
+        Err(ApiError::PolicyUnenforceable(DetailData {
+            detail: format!(
+                "sandbox user {user}: {what} {v} is not the client's own ({own}); a sandbox runs \
+                 as its client's uid and gid unless the server config allows others in `{key}`"
+            ),
+        }))
+    };
+    if user.uid != 0 && user.uid != peer.uid && !within(&cfg.allow_sandbox_uids, user.uid) {
+        return refuse("uid", user.uid, peer.uid, "allow_sandbox_uids");
+    }
+    if user.gid != 0 && user.gid != peer.gid && !within(&cfg.allow_sandbox_gids, user.gid) {
+        return refuse("gid", user.gid, peer.gid, "allow_sandbox_gids");
+    }
+    Ok(())
 }
 
 async fn create(

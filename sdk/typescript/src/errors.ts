@@ -9,8 +9,10 @@ const GUEST_CODES: Record<number, string> = {
   [-32603]: "INTERNAL_ERROR",
   [-32001]: "EXECUTION_FAILED",
   [-32002]: "TIMED_OUT",
+  [-32003]: "PATH_NOT_ALLOWED",
   [-32004]: "NOT_FOUND",
   [-32006]: "TOO_LARGE",
+  [-32007]: "UNIMPLEMENTED",
   [-32010]: "SPAWN_FAILED",
   [-32011]: "LIMIT_EXCEEDED",
   [-32012]: "CANCELLED",
@@ -37,7 +39,7 @@ export function errorName(code: number): string {
 /** Base of every error this package throws or rejects with. */
 export class SandcrabError extends Error {
   override name = "SandcrabError";
-  /** `"SANDBOX_NOT_FOUND"`, `"MOUNT_NOT_ALLOWED"`, `"INVALID_SPEC"`, `"NOT_CONNECTED"`, ... */
+  /** `"SANDBOX_NOT_FOUND"`, `"MOUNT_NOT_ALLOWED"`, `"INVALID_SPEC"`, `"NOT_CONNECTED"`, `"UNSUPPORTED_FEATURE"` (the server lacks a feature the call needs), ... */
   readonly code: string;
   constructor(code: string, message: string, options?: ErrorOptions) {
     super(message, options);

@@ -93,6 +93,24 @@ Review backlog, in priority order ([reviews/libkrun-backend-review.md](reviews/l
 11. Docs only: R13 (DNS via the host resolver), R15 (uplink snapshot), R17 (tool processes
     share `crabd serve`'s uid).
 
+Server and SDK milestone review backlog ([reviews/sdk-milestone-review.md](reviews/sdk-milestone-review.md)):
+
+- **M1:** `crabd serve` as a subreaper that kills what a dead supervisor leaves (today:
+  `tree_clean: false`, the client destroys the sandbox; stated in [server.md](server.md)).
+- **m2:** two codes named `LIMIT_EXCEEDED` (server -32104, guest -32011).
+- **m3:** `server.capabilities` says `tree_kill: "subreaper"` with no live sandbox or self-test
+  behind it; report `"unknown"` until there is evidence.
+- **m4:** `destroy_by_label` can answer `empty: true` while a create of that uid is between
+  spawn and `set_owner`.
+- **m5:** refuse `/`, `/run`, `/var/run` as mount roots; protect the Docker socket's directory;
+  catch a protected directory bind-mounted below a requested mount.
+- **m6:** a Linux e2e for the cross-uid guarantee (a second uid on the build host).
+- **m7:** sleeps used as synchronisation in server and TS unit tests.
+- **m8:** one run of the server under the systemd unit before the pilot.
+- **m9:** self-test sandboxes are not counted against `max_sandboxes`.
+- Nits: process ids share one namespace across uids; `server.hello` does not advertise
+  `max_disk_mb`; `sandbox.destroyed` can be sent twice in a race.
+
 Also next:
 
 - Benchmarks: Docker on mac-m2 (`--backends docker,libkrun`) in an idle weekend window; one

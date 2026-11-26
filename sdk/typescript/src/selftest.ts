@@ -1,4 +1,4 @@
-import { InvalidSpecError, NOT_CONNECTED } from "./errors.ts";
+import { InvalidSpecError, NOT_CONNECTED, SandcrabError } from "./errors.ts";
 import type { ClientImpl } from "./client.ts";
 import type { Capabilities, SelftestReport } from "./generated/api.ts";
 
@@ -60,6 +60,8 @@ export class CapabilityCache {
       if (!(Number.isFinite(o.maxAgeMs) && o.maxAgeMs >= 0)) throw new InvalidSpecError("`maxAgeMs` must be a non-negative number");
       params.max_age_secs = Math.floor(o.maxAgeMs / 1000);
     }
+    const missing = this.#client._missingFeature("selftest");
+    if (missing !== null) throw new SandcrabError("UNSUPPORTED_FEATURE", missing);
     const report = await this.#client._request("server.selftest", params);
     const started = Date.parse(report.started_at);
     const now = Date.now();
@@ -75,7 +77,7 @@ export class CapabilityCache {
 
   snapshot(template: string): CapabilitiesSnapshot {
     const client = this.#client;
-    const down = client._incompatible ?? (client.connected ? null : NOT_CONNECTED);
+    const down = client._incompatible ?? (client.connected ? client._missingFeature("selftest") : NOT_CONNECTED);
     if (down !== null) return { backend: client._backend, isolation: { ok: false, reason: down }, ageMs: null };
     const now = Date.now();
     const e = typeof template === "string" ? this.#entries.get(template) : undefined;

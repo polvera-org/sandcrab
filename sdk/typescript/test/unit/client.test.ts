@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
+import { tmpdir } from "node:os";
 import { test } from "node:test";
 
 import { connectClient, versionMismatch } from "../../src/client.ts";
-import { ConnectionError, InvalidSpecError, ServerError } from "../../src/errors.ts";
+import { ConnectionError, errorName, InvalidSpecError, SandcrabError, ServerError } from "../../src/errors.ts";
 import { connect } from "../../src/index.ts";
 import { FakeRpcError, FakeServer } from "../../src/testing/fake-server.ts";
 import { setup, sleep, until } from "./helpers.ts";
@@ -189,4 +190,26 @@ test("events: sandboxDestroyed for a destroy and a TTL expiry, shutdown with its
   await server.shutdown(1500);
   await until(() => shutdowns.length === 1);
   assert.deepEqual(shutdowns, [{ graceMs: 1500 }]);
+});
+
+test("a feature the server does not list is a capability reason, and calls that need it are refused", async (t) => {
+  const { server, client } = await setup(t, { server: { features: ["forwards"] } });
+  const snap = client.capabilitiesSnapshot("base");
+  assert.equal(snap.isolation.ok, false);
+  assert.match(snap.isolation.reason ?? "", /does not offer "selftest"/);
+  await assert.rejects(client.selftest("base"), (e: unknown) => e instanceof SandcrabError && e.code === "UNSUPPORTED_FEATURE");
+  await assert.rejects(
+    client.createSandbox({ template: "base", mounts: [{ path: tmpdir(), mode: "ro" }] }),
+    (e: unknown) => e instanceof SandcrabError && e.code === "UNSUPPORTED_FEATURE" && /"mounts"/.test(e.message),
+  );
+  assert.ok(!server.calls.some((c) => c.method === "sandbox.create" || c.method === "server.selftest"), "nothing sent");
+  // A create that needs neither still works.
+  await client.createSandbox({ template: "base" });
+});
+
+test("every guest code that passes through has a name", () => {
+  assert.equal(errorName(-32003), "PATH_NOT_ALLOWED");
+  assert.equal(errorName(-32007), "UNIMPLEMENTED");
+  assert.equal(errorName(-32104), "LIMIT_EXCEEDED");
+  assert.equal(errorName(-1), "-1");
 });

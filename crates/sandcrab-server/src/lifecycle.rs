@@ -20,7 +20,7 @@ use tokio::task::JoinSet;
 use crate::config::resolve_group;
 use crate::control::core_mode;
 use crate::process::SHUTDOWN_GRACE_MS;
-use crate::{MAX_CONNECTIONS, Server, ServerConfig, ServerError, Shared, listener};
+use crate::{Server, ServerConfig, ServerError, Shared, listener};
 
 pub(crate) async fn start(
     mut config: ServerConfig,
@@ -134,9 +134,10 @@ pub(crate) async fn run(
             Some(_) = conns.join_next(), if !conns.is_empty() => {}
             accepted = listener.accept() => match accepted {
                 Ok((stream, _)) => {
-                    if conns.len() >= MAX_CONNECTIONS as usize {
-                        tracing::warn!(limit = MAX_CONNECTIONS, "connection refused: too many connections");
-                        tokio::spawn(listener::over_limit(stream, MAX_CONNECTIONS));
+                    let max = shared.limits.max_connections;
+                    if conns.len() >= max as usize {
+                        tracing::warn!(limit = max, "connection refused: too many connections");
+                        tokio::spawn(listener::over_limit(stream, max));
                         continue;
                     }
                     conns.spawn(listener::connection(Arc::clone(&shared), stream));

@@ -544,7 +544,8 @@ async fn check_mount_identities(client: &CrabdClient, spec: &ResolvedSpec) -> Re
     for ((path, want), got) in paths.iter().zip(expected).zip(got) {
         if (want.dev, want.ino) != (got.dev, got.ino) {
             return Err(SandboxError::WorkspaceRootChanged(format!(
-                "mount `{path}`: the sandbox sees device/inode {}:{}, the directory that was                  checked is {}:{}; the sandbox was destroyed",
+                "mount `{path}`: the sandbox sees device/inode {}:{}, the directory that was \
+                 checked is {}:{}; the sandbox was destroyed",
                 got.dev, got.ino, want.dev, want.ino
             )));
         }
