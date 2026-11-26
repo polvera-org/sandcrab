@@ -28,7 +28,7 @@ steps:
     title: "Design doc + ADR 0002, with a table mapping every field and invariant of the adopter's launcher interface to a Sandcrab primitive: the server API as JSON-RPC 2.0 on a Unix socket with raw byte streams beside it for process I/O and forwards (decided; the design fixes the framing and how a stream is attached), access by socket mode and peer uid with no token (decided), protocol 0.3, forwards that end at the client (a loopback port or a Unix socket the client names), same-path mounts with allowed roots and a path map, sandbox reuse for many short execs, labels and orphan listing across client and server restarts, the self-test lines, bring-your-own-image templates. Lists the contract points only the adopter can settle"
     depends_on: [contract-research]
     artifacts: [docs/design/server-and-sdk.md, docs/decisions/0002-server-and-sdk.md]
-    status: doing
+    status: done
 
   - id: adopter-flow
     phase: plan
