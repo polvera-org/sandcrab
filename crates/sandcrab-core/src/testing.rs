@@ -19,7 +19,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::client::{BoxedStream, Connector};
 use crate::{
-    BackendCapabilities, BackendKind, LifecycleTimings, NetworkConfig, NetworkPolicy,
+    BackendCapabilities, BackendKind, LifecycleTimings, NetworkConfig, NetworkPolicy, NprocScope,
     PublishedPort, ResolvedSpec, Result, RuntimeBackend, SandboxError, SandboxHandle, SandboxId,
 };
 
@@ -310,7 +310,9 @@ pub struct FakeBackend {
 }
 
 impl FakeBackend {
-    /// Hardware-isolated (Firecracker-like) fake that enforces only `disabled`.
+    /// Hardware-isolated (Firecracker-like) fake that enforces only `disabled`. Unlike the
+    /// real Firecracker backend it accepts forwards, host mounts, the `/tmp` options and the
+    /// process limits (they reach [`Self::last_spec`]); clear them in `caps` to test refusals.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -320,6 +322,12 @@ impl FakeBackend {
                 multi_tenant_safe: false,
                 supports_snapshots: false,
                 supports_host_dir_mounts: false,
+                supports_forwards: true,
+                supports_host_mounts: true,
+                supports_tmp_options: true,
+                supports_process_limits: true,
+                mount_identity_checked: false,
+                nproc_scope: NprocScope::Sandbox,
             },
             enforced: vec![NetworkPolicy::Disabled],
             mock: MockCrabd::default(),
@@ -341,6 +349,8 @@ impl FakeBackend {
                 multi_tenant_safe: false,
                 supports_snapshots: false,
                 supports_host_dir_mounts: true,
+                nproc_scope: NprocScope::HostUid,
+                ..Self::new().caps
             },
             enforced: vec![NetworkPolicy::Disabled, NetworkPolicy::Unrestricted],
             ..Self::new()
@@ -393,6 +403,7 @@ impl RuntimeBackend for FakeBackend {
 
     async fn spawn(&self, spec: &ResolvedSpec) -> Result<Box<dyn SandboxHandle>> {
         spec.reject_secrets()?;
+        spec.reject_unsupported(self.kind, &self.caps)?;
         if !self.enforces_network_policy(&spec.network) {
             return Err(SandboxError::PolicyUnenforceable(
                 spec.network.policy.to_string(),

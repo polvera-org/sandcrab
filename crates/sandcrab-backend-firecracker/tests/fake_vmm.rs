@@ -861,6 +861,30 @@ async fn unenforceable_requests_are_refused() {
         let err = e.manager.spawn(cfg).await.unwrap_err();
         assert!(matches!(err, SandboxError::InvalidConfig(_)), "{err}");
     }
+    // Forwards, host mounts and the new `/tmp` and process-limit options: refused by name.
+    let base = SandboxConfig::from_template("base");
+    for (cfg, what) in [
+        (base.clone().forward(5432), "forwards"),
+        (
+            base.clone().host_mount(e.tmp.path(), MountMode::ReadOnly),
+            "host mounts",
+        ),
+        (base.clone().tmp_exec(true), "tmp_exec"),
+        (
+            base.clone().resources(sandcrab_core::ResourceOverrides {
+                pids_max: Some(64),
+                ..Default::default()
+            }),
+            "pids_max",
+        ),
+    ] {
+        let err = e.manager.spawn(cfg).await.unwrap_err();
+        assert!(
+            matches!(&err, SandboxError::PolicyUnenforceable(m)
+                if m.contains(what) && m.contains("firecracker backend")),
+            "{what}: {err}"
+        );
+    }
     assert!(e.leftover_run_dirs().is_empty());
     assert!(
         !e.run_dir().join("fake-log").exists(),

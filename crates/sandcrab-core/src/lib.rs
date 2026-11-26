@@ -13,6 +13,7 @@ pub mod backend;
 pub mod client;
 pub mod error;
 pub(crate) mod fsx;
+pub mod hostmount;
 pub mod manager;
 pub mod mounts;
 pub mod pins;
@@ -28,13 +29,19 @@ pub mod tunnel;
 pub mod workspace;
 
 pub use auth::{AuthConnector, DEFAULT_AUTH_HANDSHAKE_TIMEOUT, generate_auth_token};
-pub use backend::{BackendCapabilities, BackendKind, ResolvedSpec, RuntimeBackend, SandboxHandle};
+pub use backend::{
+    BackendCapabilities, BackendKind, NprocScope, RequestedOptions, ResolvedSpec, RuntimeBackend,
+    SandboxHandle,
+};
 pub use client::{
     AsyncStream, BoxedStream, CALL_TIMEOUT_GRACE, Connector, CrabdClient, DEFAULT_CALL_TIMEOUT,
     Endpoint, ReadyClient, effective_timeout, open_tunnel, wait_ready,
 };
 pub use error::{Result, SandboxError};
-pub use manager::{ManagerConfig, Sandbox, SandboxInfo, SandboxManager};
+pub use hostmount::{HostMount, MAX_SANDBOX_MOUNTS, MountPolicy, MountRoot};
+pub use manager::{
+    DestroyByLabel, ManagerConfig, Sandbox, SandboxFilter, SandboxInfo, SandboxManager,
+};
 pub use mounts::{
     FORBIDDEN_GUEST_PREFIXES, ResolvedMount, ResolvedMounts, normalize_guest_path, resolve_mounts,
     validate_mount_target,
@@ -44,14 +51,17 @@ pub use pins::{
     effective_pin,
 };
 pub use policy::{
-    NetworkConfig, NetworkPolicy, PortSpec, PublishedPort, ResourceOverrides, SecretSource,
-    SecretSpec, UserSpec,
+    ForwardSpec, MAX_FORWARDS, NetworkConfig, NetworkPolicy, PortSpec, PublishedPort,
+    ResourceOverrides, SecretSource, SecretSpec, UserSpec,
 };
 pub use registry::{
     DEFAULT_READ_LIMIT, FileEntry, FileKind, HostWriteOptions, STATE_ROOT_ENV, WorkspaceLease,
     WorkspaceRegistry, default_state_root, verify_workspace_root,
 };
-pub use sandbox::{DEFAULT_TTL_SECS, SandboxConfig, SandboxId};
+pub use sandbox::{
+    DEFAULT_TTL_SECS, MAX_LABEL_VALUE_LEN, MAX_LABELS, SandboxConfig, SandboxId,
+    validate_label_key, validate_labels,
+};
 pub use template::{
     ImageArch, ImageVerifier, PinStatus, ResourceLimits, Template, TemplateManifest, TemplateMeta,
     TemplateNetwork, TemplateRegistry, ToolConfig, WorkspaceDefaults, check_digest,

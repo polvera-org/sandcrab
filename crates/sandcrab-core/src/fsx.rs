@@ -31,7 +31,7 @@ use rustix::io::Errno;
 use crate::registry::FileKind;
 use crate::{Result, SafeRelPath, SandboxError};
 
-const DIR_FLAGS: OFlags = OFlags::RDONLY
+pub(crate) const DIR_FLAGS: OFlags = OFlags::RDONLY
     .union(OFlags::DIRECTORY)
     .union(OFlags::NOFOLLOW)
     .union(OFlags::CLOEXEC);

@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    MountMode, NetworkConfig, PortSpec, ResourceOverrides, Result, SandboxError, SecretSpec,
-    UserSpec, WorkspaceMount, WorkspaceRef,
+    ForwardSpec, HostMount, MAX_FORWARDS, MountMode, NetworkConfig, PortSpec, ResourceOverrides,
+    Result, SandboxError, SecretSpec, UserSpec, WorkspaceMount, WorkspaceRef,
 };
 
 /// Unique identifier for an ephemeral sandbox instance.
@@ -36,6 +36,50 @@ impl Default for SandboxId {
 
 /// Default sandbox time-to-live: 30 minutes, then the manager's reaper destroys it.
 pub const DEFAULT_TTL_SECS: u64 = 30 * 60;
+
+/// Labels one sandbox may carry.
+pub const MAX_LABELS: usize = 16;
+/// Longest label value, in bytes.
+pub const MAX_LABEL_VALUE_LEN: usize = 256;
+
+/// A label key is `[a-z0-9][a-z0-9._-]{0,62}` and does not start with `sandcrab.`.
+pub fn validate_label_key(key: &str) -> Result<()> {
+    let b = key.as_bytes();
+    let ok = !b.is_empty()
+        && b.len() <= 63
+        && (b[0].is_ascii_lowercase() || b[0].is_ascii_digit())
+        && b.iter()
+            .all(|&c| c.is_ascii_lowercase() || c.is_ascii_digit() || b"._-".contains(&c))
+        && !key.starts_with("sandcrab.");
+    if ok {
+        Ok(())
+    } else {
+        Err(SandboxError::InvalidConfig(format!(
+            "label key `{key}` must match [a-z0-9][a-z0-9._-]{{0,62}} and not start with \
+             `sandcrab.`"
+        )))
+    }
+}
+
+/// Check a label set: at most [`MAX_LABELS`], valid keys, values of at most
+/// [`MAX_LABEL_VALUE_LEN`] bytes.
+pub fn validate_labels(labels: &BTreeMap<String, String>) -> Result<()> {
+    if labels.len() > MAX_LABELS {
+        return Err(SandboxError::InvalidConfig(format!(
+            "{} labels given, at most {MAX_LABELS} are allowed",
+            labels.len()
+        )));
+    }
+    for (k, v) in labels {
+        validate_label_key(k)?;
+        if v.len() > MAX_LABEL_VALUE_LEN {
+            return Err(SandboxError::InvalidConfig(format!(
+                "label `{k}`: value is longer than {MAX_LABEL_VALUE_LEN} bytes"
+            )));
+        }
+    }
+    Ok(())
+}
 
 #[allow(clippy::unnecessary_wraps)] // serde default fn must return the field type
 fn default_ttl() -> Option<u64> {
@@ -75,6 +119,24 @@ pub struct SandboxConfig {
     /// Refuse to spawn unless the backend is hardware isolated.
     #[serde(default)]
     pub require_hardware_isolation: bool,
+    /// Host directories mounted at the same path in the sandbox, allowed only beneath the
+    /// manager's [`crate::MountPolicy`] roots. Separate from workspace `mounts`.
+    #[serde(default)]
+    pub host_mounts: Vec<HostMount>,
+    /// Guest loopback ports forwarded to the host side (at most [`MAX_FORWARDS`]).
+    #[serde(default)]
+    pub forwards: Vec<ForwardSpec>,
+    /// Kept by the manager in memory, set at create and immutable (see
+    /// [`validate_labels`]).
+    #[serde(default)]
+    pub labels: BTreeMap<String, String>,
+    /// Drop `noexec` from the guest's `/tmp`.
+    #[serde(default)]
+    pub tmp_exec: bool,
+    /// Size of the guest's `/tmp` (counts against the sandbox's memory); `None`: the
+    /// backend's default.
+    #[serde(default)]
+    pub tmp_size_mb: Option<u64>,
 }
 
 impl SandboxConfig {
@@ -92,7 +154,42 @@ impl SandboxConfig {
             resources: ResourceOverrides::default(),
             ttl_secs: default_ttl(),
             require_hardware_isolation: false,
+            host_mounts: Vec::new(),
+            forwards: Vec::new(),
+            labels: BTreeMap::new(),
+            tmp_exec: false,
+            tmp_size_mb: None,
         }
+    }
+
+    #[must_use]
+    pub fn host_mount(mut self, path: impl Into<PathBuf>, mode: MountMode) -> Self {
+        self.host_mounts.push(HostMount::new(path, mode));
+        self
+    }
+
+    #[must_use]
+    pub fn forward(mut self, guest_port: u16) -> Self {
+        self.forwards.push(ForwardSpec::new(guest_port));
+        self
+    }
+
+    #[must_use]
+    pub fn label(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.labels.insert(key.into(), value.into());
+        self
+    }
+
+    #[must_use]
+    pub fn tmp_exec(mut self, exec: bool) -> Self {
+        self.tmp_exec = exec;
+        self
+    }
+
+    #[must_use]
+    pub fn tmp_size_mb(mut self, size_mb: u64) -> Self {
+        self.tmp_size_mb = Some(size_mb);
+        self
     }
 
     #[must_use]
@@ -203,6 +300,33 @@ impl SandboxConfig {
         if let Some(net) = &self.network {
             net.validate()?;
         }
+        validate_labels(&self.labels)?;
+        if self.forwards.len() > MAX_FORWARDS {
+            return Err(SandboxError::InvalidConfig(format!(
+                "{} forwards given, at most {MAX_FORWARDS} are allowed",
+                self.forwards.len()
+            )));
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for f in &self.forwards {
+            if f.guest_port == 0 || f.max_connections == Some(0) {
+                return Err(SandboxError::InvalidConfig(format!(
+                    "forward {}: guest_port and max_connections must be positive",
+                    f.guest_port
+                )));
+            }
+            if !seen.insert(f.guest_port) {
+                return Err(SandboxError::InvalidConfig(format!(
+                    "forward guest port {} is listed twice",
+                    f.guest_port
+                )));
+            }
+        }
+        if self.tmp_size_mb == Some(0) {
+            return Err(SandboxError::InvalidConfig(
+                "tmp_size_mb must be positive".into(),
+            ));
+        }
         Ok(())
     }
 }
@@ -231,6 +355,77 @@ mod tests {
     }
 
     #[test]
+    fn old_serialized_config_still_parses() {
+        // Every field a pre-0.3 config carried, none of the new ones.
+        let old = serde_json::json!({
+            "template": "base",
+            "mounts": [{"workspace": "proj", "guest_path": "/w", "mode": "read_write"}],
+            "default_cwd": "/w",
+            "env": {"A": "1"},
+            "network": {"policy": "disabled"},
+            "secrets": [],
+            "ports": [{"guest": 3000}],
+            "user": "1000:1000",
+            "resources": {"vcpu": 2},
+            "ttl_secs": 60,
+            "require_hardware_isolation": false
+        });
+        let c: SandboxConfig = serde_json::from_value(old).unwrap();
+        assert!(c.host_mounts.is_empty() && c.forwards.is_empty() && c.labels.is_empty());
+        assert!(!c.tmp_exec && c.tmp_size_mb.is_none());
+        assert_eq!(c.resources.pids_max, None);
+        c.validate().unwrap();
+
+        let new = SandboxConfig::from_template("base")
+            .host_mount("/srv/data", MountMode::ReadOnly)
+            .forward(5432)
+            .label("run", "r1")
+            .tmp_exec(true)
+            .tmp_size_mb(512);
+        let back: SandboxConfig =
+            serde_json::from_str(&serde_json::to_string(&new).unwrap()).unwrap();
+        assert_eq!(back, new);
+    }
+
+    #[test]
+    fn label_validation() {
+        for ok in ["a", "0", "run-id", "a.b_c-d", &"k".repeat(63), "sandcrabx"] {
+            validate_label_key(ok).unwrap();
+        }
+        for bad in [
+            "",
+            "A",
+            "-a",
+            ".a",
+            "_a",
+            "a/b",
+            "a b",
+            "é",
+            &"k".repeat(64),
+            "sandcrab.owner",
+        ] {
+            assert!(validate_label_key(bad).is_err(), "{bad:?}");
+        }
+        let base = SandboxConfig::from_template("base");
+        base.clone()
+            .label("v", "x".repeat(MAX_LABEL_VALUE_LEN))
+            .validate()
+            .unwrap();
+        assert!(
+            base.clone()
+                .label("v", "x".repeat(MAX_LABEL_VALUE_LEN + 1))
+                .validate()
+                .is_err()
+        );
+        let mut many = base.clone();
+        for i in 0..MAX_LABELS {
+            many = many.label(format!("k{i}"), "v");
+        }
+        many.validate().unwrap();
+        assert!(many.label("one-more", "v").validate().is_err());
+    }
+
+    #[test]
     fn validation() {
         let base = SandboxConfig::from_template("base");
         for bad in [
@@ -248,6 +443,21 @@ mod tests {
                 policy: NetworkPolicy::Disabled,
                 allow_domains: vec!["a.com".into()],
             }),
+            base.clone().forward(0),
+            base.clone().forward(80).forward(80),
+            SandboxConfig {
+                forwards: vec![ForwardSpec {
+                    guest_port: 80,
+                    max_connections: Some(0),
+                }],
+                ..base.clone()
+            },
+            SandboxConfig {
+                forwards: (1..=17).map(ForwardSpec::new).collect(),
+                ..base.clone()
+            },
+            base.clone().tmp_size_mb(0),
+            base.clone().label("Bad", "x"),
         ] {
             assert!(bad.validate().is_err(), "{bad:?}");
         }

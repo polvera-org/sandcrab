@@ -21,9 +21,9 @@ use bollard::query_parameters::{
 use sandcrab_core::template::ImageArch;
 use sandcrab_core::{
     AuthConnector, BackendCapabilities, BackendKind, Connector, Endpoint, ImageVerifier,
-    LifecyclePhase, LifecycleTimings, NetworkConfig, NetworkPolicy, PinStatus, PublishedPort,
-    ResolvedSpec, Result, RuntimeBackend, SandboxError, SandboxHandle, SandboxId, TemplateManifest,
-    UserSpec, generate_auth_token, verify_image_pin,
+    LifecyclePhase, LifecycleTimings, NetworkConfig, NetworkPolicy, NprocScope, PinStatus,
+    PublishedPort, ResolvedSpec, Result, RuntimeBackend, SandboxError, SandboxHandle, SandboxId,
+    TemplateManifest, UserSpec, generate_auth_token, verify_image_pin,
 };
 use sandcrab_protocol::AuthToken;
 
@@ -503,6 +503,13 @@ impl RuntimeBackend for DockerBackend {
             multi_tenant_safe: false,
             supports_snapshots: false,
             supports_host_dir_mounts: true,
+            // Turned on by the backend steps of the sdk-milestone flow; refused until then.
+            supports_forwards: false,
+            supports_host_mounts: false,
+            supports_tmp_options: false,
+            supports_process_limits: false,
+            mount_identity_checked: false,
+            nproc_scope: NprocScope::HostUid,
         }
     }
 
@@ -516,6 +523,7 @@ impl RuntimeBackend for DockerBackend {
 
     async fn spawn(&self, spec: &ResolvedSpec) -> Result<Box<dyn SandboxHandle>> {
         spec.reject_secrets()?;
+        spec.reject_unsupported(self.kind(), &self.capabilities())?;
         network_mode(&spec.network)?;
         let image_id = self.verify_image(spec).await?;
         spec.timings.mark_custom("image_verified");
@@ -786,6 +794,12 @@ mod tests {
                 multi_tenant_safe: false,
                 supports_snapshots: false,
                 supports_host_dir_mounts: true,
+                supports_forwards: false,
+                supports_host_mounts: false,
+                supports_tmp_options: false,
+                supports_process_limits: false,
+                mount_identity_checked: false,
+                nproc_scope: NprocScope::HostUid,
             }
         );
     }

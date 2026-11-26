@@ -1,6 +1,6 @@
 //! `SandboxManager`: policy gate, resolution, readiness, live-sandbox tracking, TTL reaper.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,10 +17,11 @@ use crate::client::DEFAULT_CALL_TIMEOUT;
 use crate::pins::{PinStore, effective_pin};
 use crate::template::ImageArch;
 use crate::{
-    BackendCapabilities, BackendKind, CrabdClient, LifecyclePhase, LifecycleTimings, NetworkPolicy,
-    PublishedPort, ResolvedSpec, Result, RuntimeBackend, SandboxConfig, SandboxError,
-    SandboxHandle, SandboxId, TemplateRegistry, TimingMarks, WorkspaceLease, WorkspaceRegistry,
-    resolve_mounts, wait_ready,
+    BackendCapabilities, BackendKind, CrabdClient, ForwardSpec, HostMount, LifecyclePhase,
+    LifecycleTimings, MountPolicy, NetworkPolicy, PublishedPort, RequestedOptions, ResolvedSpec,
+    Result, RuntimeBackend, SandboxConfig, SandboxError, SandboxHandle, SandboxId,
+    TemplateRegistry, TimingMarks, WorkspaceLease, WorkspaceRegistry, resolve_mounts,
+    validate_labels, wait_ready,
 };
 
 /// Manager-wide policy and timeouts.
@@ -38,6 +39,8 @@ pub struct ManagerConfig {
     /// Host-local template pin store ([`crate::pins`]). `None` = [`PinStore::open_default`]
     /// (`$SANDCRAB_TEMPLATE_PINS`, else `<$SANDCRAB_HOME or ~/.sandcrab>/template-pins`).
     pub template_pins: Option<PinStore>,
+    /// Allowed roots for [`SandboxConfig::host_mounts`]. `None`: every host mount is refused.
+    pub mount_policy: Option<MountPolicy>,
 }
 
 impl Default for ManagerConfig {
@@ -48,6 +51,7 @@ impl Default for ManagerConfig {
             call_timeout: DEFAULT_CALL_TIMEOUT,
             shutdown_timeout: Duration::from_secs(60),
             template_pins: None,
+            mount_policy: None,
         }
     }
 }
@@ -147,6 +151,12 @@ impl SandboxManager {
             .or_else(|| PinStore::open_default().ok())
     }
 
+    /// The allowed roots for host mounts ([`ManagerConfig::mount_policy`]).
+    #[must_use]
+    pub fn mount_policy(&self) -> Option<&MountPolicy> {
+        self.inner.config.mount_policy.as_ref()
+    }
+
     /// Validate `config`, enforce policy, resolve template + mounts, lease workspaces,
     /// spawn on the backend and wait for `crabd` readiness.
     pub async fn spawn(&self, config: SandboxConfig) -> Result<Sandbox> {
@@ -167,6 +177,13 @@ impl SandboxManager {
                 "secrets are reserved for Phase 3; no V1 backend can inject them".into(),
             ));
         }
+        RequestedOptions {
+            forwards: !config.forwards.is_empty(),
+            host_mounts: !config.host_mounts.is_empty(),
+            tmp_options: config.tmp_exec || config.tmp_size_mb.is_some(),
+            process_limits: config.resources.has_process_limits(),
+        }
+        .check(backend.kind(), &caps)?;
 
         let template = inner.templates.get(&config.template)?.clone();
         let manifest = &template.manifest;
@@ -199,6 +216,25 @@ impl SandboxManager {
             &manifest.workspace.workdir,
             |r| inner.workspaces.get(r),
         )?;
+        let host_mounts = if config.host_mounts.is_empty() {
+            Vec::new()
+        } else {
+            let taken: Vec<&Path> = resolved
+                .mounts
+                .iter()
+                .map(|m| m.guest_path.as_path())
+                .collect();
+            match &inner.config.mount_policy {
+                Some(policy) => policy.resolve(&config.host_mounts, &taken)?,
+                None => {
+                    return Err(SandboxError::MountNotAllowed {
+                        path: config.host_mounts[0].path.clone(),
+                        reason: "no mount roots are configured".into(),
+                        cap: None,
+                    });
+                }
+            }
+        };
 
         // Host-local pin (else a legacy in-manifest one). A corrupt pin file fails the spawn;
         // backends refuse a missing pin (`pins::unpinned_error`) unless explicitly opted out.
@@ -230,6 +266,12 @@ impl SandboxManager {
             resources,
             ttl: config.ttl_duration(),
             secrets: Vec::new(),
+            forwards: config.forwards.clone(),
+            host_mounts: host_mounts.clone(),
+            tmp_exec: config.tmp_exec,
+            tmp_size_mb: config.tmp_size_mb,
+            pids_max: config.resources.pids_max,
+            nofile: config.resources.nofile,
             timings: timings.clone(),
             template,
         };
@@ -259,19 +301,25 @@ impl SandboxManager {
         let handle = guard.0.take().expect("handle present until readiness");
         let ports = handle.published_ports();
 
-        let now = Instant::now();
+        let expires_at = config.ttl_duration().map(|ttl| Instant::now() + ttl);
         let sandbox = Sandbox {
             shared: Arc::new(SandboxShared {
                 id,
-                template: config.template.clone(),
+                template: config.template,
                 backend: backend.kind(),
                 client: ready.client.with_default_timeout(inner.config.call_timeout),
                 hello: ready.hello,
                 timings,
                 ports,
                 default_cwd: resolved.default_cwd,
+                labels: config.labels,
+                host_mounts: host_mounts
+                    .into_iter()
+                    .map(|m| HostMount::new(m.host_path, m.mode))
+                    .collect(),
+                forwards: config.forwards,
                 created_at: Utc::now(),
-                expires_at: config.ttl_duration().map(|ttl| now + ttl),
+                expires_at,
                 destroyed: AtomicBool::new(false),
                 live: Mutex::new(Some(Live { handle, leases })),
                 teardown: watch::Sender::new(None),
@@ -292,6 +340,60 @@ impl SandboxManager {
             .collect();
         all.sort_by_key(|i| i.created_at);
         all
+    }
+
+    /// Live sandboxes that match `filter`, oldest first.
+    #[must_use]
+    pub fn list(&self, filter: &SandboxFilter) -> Vec<SandboxInfo> {
+        let mut all: Vec<SandboxInfo> = lock(&self.inner.active)
+            .values()
+            .filter(|s| filter.matches(s))
+            .map(Sandbox::info)
+            .collect();
+        all.sort_by_key(|i| i.created_at);
+        all
+    }
+
+    /// Destroy every sandbox whose labels include all of `labels` (not empty), then look
+    /// again. `empty` is true only when every destroy succeeded and the second look finds no
+    /// match; a sandbox created with these labels meanwhile makes it false.
+    pub async fn destroy_by_label(
+        &self,
+        labels: &BTreeMap<String, String>,
+    ) -> Result<DestroyByLabel> {
+        if labels.is_empty() {
+            return Err(SandboxError::InvalidConfig(
+                "destroy_by_label needs at least one label".into(),
+            ));
+        }
+        validate_labels(labels)?;
+        let filter = SandboxFilter {
+            labels: labels.clone(),
+            ..SandboxFilter::default()
+        };
+        let matched: Vec<Sandbox> = lock(&self.inner.active)
+            .values()
+            .filter(|s| filter.matches(s))
+            .cloned()
+            .collect();
+        let mut tasks = tokio::task::JoinSet::new();
+        for s in &matched {
+            let s = s.clone();
+            tasks.spawn(async move { s.destroy().await.is_ok() });
+        }
+        let mut destroyed = 0;
+        while let Some(r) = tasks.join_next().await {
+            if r.unwrap_or(false) {
+                destroyed += 1;
+            }
+        }
+        let remaining: Vec<SandboxId> = self.list(&filter).iter().map(|i| i.id).collect();
+        Ok(DestroyByLabel {
+            matched: matched.len(),
+            destroyed,
+            empty: destroyed == matched.len() && remaining.is_empty(),
+            remaining,
+        })
     }
 
     pub fn get(&self, id: SandboxId) -> Result<Sandbox> {
@@ -467,6 +569,9 @@ struct SandboxShared {
     timings: LifecycleTimings,
     ports: Vec<PublishedPort>,
     default_cwd: PathBuf,
+    labels: BTreeMap<String, String>,
+    host_mounts: Vec<HostMount>,
+    forwards: Vec<ForwardSpec>,
     created_at: DateTime<Utc>,
     expires_at: Option<Instant>,
     destroyed: AtomicBool,
@@ -586,6 +691,37 @@ impl Drop for SandboxShared {
     }
 }
 
+/// Which sandboxes [`SandboxManager::list`] returns. Every given label must match exactly;
+/// `created_after` is inclusive, `created_before` exclusive.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SandboxFilter {
+    pub labels: BTreeMap<String, String>,
+    pub created_after: Option<DateTime<Utc>>,
+    pub created_before: Option<DateTime<Utc>>,
+}
+
+impl SandboxFilter {
+    fn matches(&self, sandbox: &Sandbox) -> bool {
+        let s = &sandbox.shared;
+        self.labels.iter().all(|(k, v)| s.labels.get(k) == Some(v))
+            && self.created_after.is_none_or(|t| s.created_at >= t)
+            && self.created_before.is_none_or(|t| s.created_at < t)
+    }
+}
+
+/// Outcome of [`SandboxManager::destroy_by_label`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DestroyByLabel {
+    /// Sandboxes that matched at the first look.
+    pub matched: usize,
+    /// Of those, how many were destroyed without error.
+    pub destroyed: usize,
+    /// Sandboxes that match at the second look.
+    pub remaining: Vec<SandboxId>,
+    /// Every destroy succeeded and nothing matches any more.
+    pub empty: bool,
+}
+
 /// Snapshot of a live sandbox for listings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SandboxInfo {
@@ -597,6 +733,10 @@ pub struct SandboxInfo {
     pub expires_in: Option<Duration>,
     pub default_cwd: PathBuf,
     pub published_ports: Vec<PublishedPort>,
+    pub labels: BTreeMap<String, String>,
+    /// Host mounts, at their resolved paths (host path = guest path).
+    pub host_mounts: Vec<HostMount>,
+    pub forwards: Vec<ForwardSpec>,
 }
 
 /// A live sandbox: typed tool-call proxy over its `crabd` connection. Cheap to clone.
@@ -649,6 +789,11 @@ impl Sandbox {
     }
 
     #[must_use]
+    pub fn labels(&self) -> &BTreeMap<String, String> {
+        &self.shared.labels
+    }
+
+    #[must_use]
     pub fn timings(&self) -> &LifecycleTimings {
         &self.shared.timings
     }
@@ -676,6 +821,9 @@ impl Sandbox {
                 .map(|t| t.saturating_duration_since(Instant::now())),
             default_cwd: s.default_cwd.clone(),
             published_ports: s.ports.clone(),
+            labels: s.labels.clone(),
+            host_mounts: s.host_mounts.clone(),
+            forwards: s.forwards.clone(),
         }
     }
 
@@ -1268,6 +1416,258 @@ mod tests {
         for (i, r) in results.into_iter().enumerate() {
             assert!(r.unwrap().stdout.ends_with(&format!(":{i}")));
         }
+    }
+
+    #[tokio::test]
+    async fn labels_list_filters() {
+        let env = env();
+        let backend = FakeBackend::new();
+        let mgr = manager(&env, &backend, quick());
+        let a = mgr
+            .spawn(
+                SandboxConfig::from_template("base")
+                    .label("run", "r1")
+                    .label("kind", "check"),
+            )
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let since = Utc::now();
+        let b = mgr
+            .spawn(SandboxConfig::from_template("base").label("run", "r1"))
+            .await
+            .unwrap();
+        let c = mgr
+            .spawn(SandboxConfig::from_template("base").label("run", "r2"))
+            .await
+            .unwrap();
+        assert_eq!(a.labels().get("kind").map(String::as_str), Some("check"));
+        let ids = |f: SandboxFilter| mgr.list(&f).iter().map(|i| i.id).collect::<Vec<_>>();
+        let by = |pairs: &[(&str, &str)]| SandboxFilter {
+            labels: pairs
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect(),
+            ..Default::default()
+        };
+        assert_eq!(ids(SandboxFilter::default()), [a.id(), b.id(), c.id()]);
+        assert_eq!(ids(by(&[("run", "r1")])), [a.id(), b.id()]);
+        assert_eq!(ids(by(&[("run", "r1"), ("kind", "check")])), [a.id()]);
+        assert!(ids(by(&[("run", "r3")])).is_empty());
+        assert_eq!(
+            ids(SandboxFilter {
+                created_after: Some(since),
+                ..by(&[("run", "r1")])
+            }),
+            [b.id()]
+        );
+        assert_eq!(
+            ids(SandboxFilter {
+                created_before: Some(since),
+                ..Default::default()
+            }),
+            [a.id()]
+        );
+        assert_eq!(mgr.list(&by(&[("run", "r2")]))[0].labels["run"], "r2");
+
+        // Invalid labels never reach the backend.
+        let n = backend.events().len();
+        assert!(matches!(
+            mgr.spawn(SandboxConfig::from_template("base").label("sandcrab.x", "v"))
+                .await,
+            Err(SandboxError::InvalidConfig(_))
+        ));
+        assert_eq!(backend.events().len(), n);
+    }
+
+    #[tokio::test]
+    async fn destroy_by_label_confirms_empty() {
+        let env = env();
+        let backend = FakeBackend::new();
+        let mgr = manager(&env, &backend, quick());
+        let labels: BTreeMap<String, String> = [("run".to_owned(), "r1".to_owned())].into();
+        for _ in 0..2 {
+            mgr.spawn(SandboxConfig::from_template("base").label("run", "r1"))
+                .await
+                .unwrap();
+        }
+        let other = mgr
+            .spawn(SandboxConfig::from_template("base").label("run", "r2"))
+            .await
+            .unwrap();
+        let r = mgr.destroy_by_label(&labels).await.unwrap();
+        assert_eq!(
+            r,
+            DestroyByLabel {
+                matched: 2,
+                destroyed: 2,
+                remaining: Vec::new(),
+                empty: true
+            }
+        );
+        assert_eq!(mgr.list_active().len(), 1);
+        assert!(!other.is_destroyed());
+        // Nothing matches: empty, nothing destroyed.
+        let r = mgr.destroy_by_label(&labels).await.unwrap();
+        assert!(r.empty && r.matched == 0);
+        assert!(matches!(
+            mgr.destroy_by_label(&BTreeMap::new()).await,
+            Err(SandboxError::InvalidConfig(_))
+        ));
+
+        // A failed destroy is never reported as empty.
+        mgr.spawn(SandboxConfig::from_template("base").label("run", "r1"))
+            .await
+            .unwrap();
+        backend.fail_destroy.store(true, Ordering::SeqCst);
+        let r = mgr.destroy_by_label(&labels).await.unwrap();
+        assert_eq!((r.matched, r.destroyed, r.empty), (1, 0, false));
+    }
+
+    #[tokio::test]
+    async fn unsupported_options_are_refused_explicitly() {
+        let env = env();
+        let mut backend = FakeBackend::new();
+        backend.caps.supports_forwards = false;
+        backend.caps.supports_host_mounts = false;
+        backend.caps.supports_tmp_options = false;
+        backend.caps.supports_process_limits = false;
+        let policy = crate::MountPolicy::new(
+            vec![crate::MountRoot {
+                path: env.project.clone(),
+                max_mode: MountMode::ReadWrite,
+            }],
+            Vec::new(),
+        )
+        .unwrap();
+        let mgr = manager(
+            &env,
+            &backend,
+            ManagerConfig {
+                mount_policy: Some(policy),
+                ..quick()
+            },
+        );
+        let base = SandboxConfig::from_template("base");
+        for (cfg, what) in [
+            (base.clone().forward(5432), "forwards"),
+            (
+                base.clone().host_mount(&env.project, MountMode::ReadOnly),
+                "host mounts",
+            ),
+            (base.clone().tmp_exec(true), "tmp_exec"),
+            (base.clone().tmp_size_mb(64), "tmp_size_mb"),
+            (
+                base.clone().resources(ResourceOverrides {
+                    pids_max: Some(64),
+                    ..Default::default()
+                }),
+                "pids_max",
+            ),
+            (
+                base.clone().resources(ResourceOverrides {
+                    nofile: Some(1024),
+                    ..Default::default()
+                }),
+                "nofile",
+            ),
+        ] {
+            let err = mgr.spawn(cfg).await.unwrap_err();
+            assert!(
+                matches!(&err, SandboxError::PolicyUnenforceable(m)
+                    if m.contains(what) && m.contains("firecracker backend")),
+                "{what}: {err}"
+            );
+        }
+        assert_eq!(
+            mgr.spawn(base.forward(5432)).await.unwrap_err().to_string(),
+            "policy cannot be enforced: forwards are not supported by the firecracker backend"
+        );
+        assert!(backend.events().is_empty());
+    }
+
+    #[tokio::test]
+    async fn new_options_reach_the_backend() {
+        let env = env();
+        let backend = FakeBackend::shared_kernel();
+        let data = env._tmp.path().join("data");
+        fs::create_dir_all(data.join("sub")).unwrap();
+        let data = fs::canonicalize(data).unwrap();
+        let policy = crate::MountPolicy::new(
+            vec![crate::MountRoot {
+                path: data.clone(),
+                max_mode: MountMode::ReadWrite,
+            }],
+            Vec::new(),
+        )
+        .unwrap();
+
+        // No policy: every host mount is refused.
+        let mgr = manager(&env, &backend, quick());
+        assert!(matches!(
+            mgr.spawn(SandboxConfig::from_template("base").host_mount(&data, MountMode::ReadOnly))
+                .await,
+            Err(SandboxError::MountNotAllowed { .. })
+        ));
+
+        let mgr = manager(
+            &env,
+            &backend,
+            ManagerConfig {
+                mount_policy: Some(policy),
+                ..quick()
+            },
+        );
+        let sb = mgr
+            .spawn(
+                SandboxConfig::from_template("base")
+                    .mount("proj", "/workspace", MountMode::ReadWrite)
+                    .host_mount(data.join("sub"), MountMode::ReadWrite)
+                    .forward(5432)
+                    .tmp_exec(true)
+                    .tmp_size_mb(512)
+                    .resources(ResourceOverrides {
+                        pids_max: Some(256),
+                        nofile: Some(4096),
+                        ..Default::default()
+                    }),
+            )
+            .await
+            .unwrap();
+        let spec = backend.last_spec().unwrap();
+        assert_eq!(spec.host_mounts.len(), 1);
+        assert_eq!(spec.host_mounts[0].host_path, data.join("sub"));
+        assert_eq!(spec.host_mounts[0].guest_path, data.join("sub"));
+        assert!(spec.host_mounts[0].root_identity.is_some());
+        assert_eq!(spec.mounts.len(), 1);
+        assert_eq!(spec.forwards, [crate::ForwardSpec::new(5432)]);
+        assert!(spec.tmp_exec);
+        assert_eq!(spec.tmp_size_mb, Some(512));
+        assert_eq!((spec.pids_max, spec.nofile), (Some(256), Some(4096)));
+        let info = sb.info();
+        assert_eq!(
+            info.host_mounts,
+            [HostMount::new(data.join("sub"), MountMode::ReadWrite)]
+        );
+        assert_eq!(info.forwards.len(), 1);
+
+        // A second sandbox may mount a folder nested with the first one's.
+        mgr.spawn(SandboxConfig::from_template("base").host_mount(&data, MountMode::ReadOnly))
+            .await
+            .unwrap();
+        // Within one sandbox, a host mount may not nest with a workspace mount.
+        let err = mgr
+            .spawn(
+                SandboxConfig::from_template("base")
+                    .mount("proj", data.join("sub/x"), MountMode::ReadOnly)
+                    .host_mount(data.join("sub"), MountMode::ReadOnly),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, SandboxError::MountNotAllowed { .. }),
+            "{err:?}"
+        );
     }
 
     async fn futures_join_all<F: std::future::Future + Send + 'static>(
