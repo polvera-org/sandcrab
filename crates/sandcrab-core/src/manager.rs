@@ -337,7 +337,7 @@ impl SandboxManager {
                     .collect(),
                 forwards: config.forwards,
                 created_at: Utc::now(),
-                expires_at,
+                expires_at: Mutex::new(expires_at),
                 destroyed: AtomicBool::new(false),
                 live: Mutex::new(Some(Live { handle, leases })),
                 teardown: watch::Sender::new(None),
@@ -412,6 +412,11 @@ impl SandboxManager {
             empty: destroyed == matched.len() && remaining.is_empty(),
             remaining,
         })
+    }
+
+    /// Change the TTL of sandbox `id` ([`Sandbox::set_ttl`]).
+    pub fn set_ttl(&self, id: SandboxId, ttl: Option<Duration>) -> Result<()> {
+        self.get(id)?.set_ttl(ttl)
     }
 
     pub fn get(&self, id: SandboxId) -> Result<Sandbox> {
@@ -526,7 +531,7 @@ fn expired(inner: &ManagerInner) -> Vec<Sandbox> {
     let now = Instant::now();
     lock(&inner.active)
         .values()
-        .filter(|s| s.shared.expires_at.is_some_and(|t| t <= now))
+        .filter(|s| s.expires_at().is_some_and(|t| t <= now))
         .cloned()
         .collect()
 }
@@ -618,7 +623,8 @@ struct SandboxShared {
     host_mounts: Vec<HostMount>,
     forwards: Vec<ForwardSpec>,
     created_at: DateTime<Utc>,
-    expires_at: Option<Instant>,
+    /// Changed by [`Sandbox::set_ttl`].
+    expires_at: Mutex<Option<Instant>>,
     destroyed: AtomicBool,
     /// Backend handle + leases until the (single) teardown claims them.
     live: Mutex<Option<Live>>,
@@ -847,7 +853,24 @@ impl Sandbox {
 
     #[must_use]
     pub fn expires_at(&self) -> Option<Instant> {
-        self.shared.expires_at
+        *lock(&self.shared.expires_at)
+    }
+
+    /// Change the time-to-live: the sandbox now expires `ttl` from now (`None`: never), and
+    /// the earlier expiry is forgotten. A long run renews its TTL this way. A destroyed
+    /// sandbox is [`SandboxError::NotFound`]; a zero `ttl` is refused.
+    pub fn set_ttl(&self, ttl: Option<Duration>) -> Result<()> {
+        if ttl.is_some_and(|d| d.is_zero()) {
+            return Err(SandboxError::InvalidConfig(
+                "ttl must be positive (use None for no TTL)".into(),
+            ));
+        }
+        let mut expires_at = lock(&self.shared.expires_at);
+        if self.is_destroyed() {
+            return Err(SandboxError::not_found("sandbox", self.id()));
+        }
+        *expires_at = ttl.map(|d| Instant::now() + d);
+        Ok(())
     }
 
     #[must_use]
@@ -863,8 +886,8 @@ impl Sandbox {
             template: s.template.clone(),
             backend: s.backend,
             created_at: s.created_at,
-            expires_in: s
-                .expires_at
+            expires_in: self
+                .expires_at()
                 .map(|t| t.saturating_duration_since(Instant::now())),
             default_cwd: s.default_cwd.clone(),
             published_ports: s.ports.clone(),
@@ -1401,6 +1424,50 @@ mod tests {
             mgr.list_active().iter().map(|i| i.id).collect::<Vec<_>>(),
             [forever.id()]
         );
+    }
+
+    #[tokio::test]
+    async fn set_ttl_renews_clears_and_shortens() {
+        let env = env();
+        let backend = FakeBackend::new();
+        let mgr = manager(&env, &backend, quick());
+        let sb = mgr
+            .spawn(SandboxConfig::from_template("base").ttl(Some(Duration::from_secs(1))))
+            .await
+            .unwrap();
+        // Renewed past the first expiry: the reaper leaves it alone.
+        mgr.set_ttl(sb.id(), Some(Duration::from_secs(600)))
+            .unwrap();
+        assert!(sb.info().expires_in.unwrap() > Duration::from_secs(500));
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert!(!sb.is_destroyed());
+        // No TTL at all.
+        sb.set_ttl(None).unwrap();
+        assert_eq!(sb.expires_at(), None);
+        assert_eq!(sb.info().expires_in, None);
+        assert!(matches!(
+            sb.set_ttl(Some(Duration::ZERO)),
+            Err(SandboxError::InvalidConfig(_))
+        ));
+        // Shortened: the reaper destroys it.
+        sb.set_ttl(Some(Duration::from_millis(50))).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !sb.is_destroyed() {
+            assert!(Instant::now() < deadline, "reaper did not fire");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(matches!(
+            sb.set_ttl(Some(Duration::from_secs(60))),
+            Err(SandboxError::NotFound { .. })
+        ));
+        while mgr.get(sb.id()).is_ok() {
+            assert!(Instant::now() < deadline, "sandbox still listed");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(matches!(
+            mgr.set_ttl(sb.id(), None),
+            Err(SandboxError::NotFound { .. })
+        ));
     }
 
     #[tokio::test]
