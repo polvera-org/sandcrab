@@ -1695,6 +1695,7 @@ dependencies = [
  "anyhow",
  "clap",
  "sandcrab-sdk",
+ "sandcrab-server",
  "serde",
  "serde_json",
  "tempfile",
@@ -1793,6 +1794,23 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "sandcrab-server"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "sandcrab-core",
+ "sandcrab-sdk",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "toml",
  "tracing",
  "uuid",
 ]
