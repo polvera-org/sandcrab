@@ -209,7 +209,7 @@ steps:
     title: "QA + security review, MVP posture (fix medium and up, backlog the rest): peer-uid check and socket modes, no mount outside the allowed roots or of the server's own directories, a forward reaches only what the client named, no network besides forwards, exact env and nothing logged, bounded memory, nothing outlives a command, no backend downgrade, self-test cannot pass on a timeout; fmt / clippy / unit / e2e green"
     depends_on: [ts-e2e, byo-image]
     artifacts: [docs/reviews/sdk-milestone-review.md]
-    status: doing
+    status: done
 
   - id: live-linux
     phase: verify
