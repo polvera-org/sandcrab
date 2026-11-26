@@ -465,7 +465,22 @@ impl Drop for KrunVm {
     }
 }
 
-/// Tools connector: the run dir's `v.sock`, failing fast once the VM has exited.
+/// How long [`KrunConnector`] keeps trying while libkrun's listener is full.
+const CONNECT_BUSY_BUDGET: Duration = Duration::from_secs(5);
+
+/// Whether a failed connect to `v.sock` means "the listen queue is full, try again".
+/// libkrun listens on the socket with a short backlog, and a burst of connections (parallel
+/// `process.open`, a forward's connections) overflows it: Linux answers `EAGAIN`, macOS
+/// `ECONNREFUSED` (a full queue is its only cause while the helper lives; a dead helper is
+/// caught by the exit watch first).
+fn listener_busy(e: &io::Error) -> bool {
+    e.kind() == io::ErrorKind::WouldBlock
+        || (cfg!(target_os = "macos") && e.kind() == io::ErrorKind::ConnectionRefused)
+}
+
+/// Tools connector: the run dir's `v.sock`, failing fast once the VM has exited. A connect
+/// that finds libkrun's listen queue full is retried with a short backoff
+/// ([`CONNECT_BUSY_BUDGET`]), so callers see a burst as a brief delay, not as an error.
 #[derive(Debug, Clone)]
 pub struct KrunConnector {
     endpoint: Endpoint,
@@ -475,13 +490,23 @@ pub struct KrunConnector {
 #[async_trait]
 impl Connector for KrunConnector {
     async fn connect(&self) -> io::Result<BoxedStream> {
-        if let Some(exit) = self.exit.as_ref().and_then(|rx| rx.borrow().clone()) {
-            return Err(io::Error::new(
-                io::ErrorKind::ConnectionAborted,
-                format!("libkrun vm exited: {exit}"),
-            ));
+        let give_up = Instant::now() + CONNECT_BUSY_BUDGET;
+        let mut delay = Duration::from_millis(1);
+        loop {
+            if let Some(exit) = self.exit.as_ref().and_then(|rx| rx.borrow().clone()) {
+                return Err(io::Error::new(
+                    io::ErrorKind::ConnectionAborted,
+                    format!("libkrun vm exited: {exit}"),
+                ));
+            }
+            match self.endpoint.connect().await {
+                Err(e) if listener_busy(&e) && Instant::now() < give_up => {
+                    tokio::time::sleep(delay).await;
+                    delay = (delay * 2).min(Duration::from_millis(50));
+                }
+                r => return r,
+            }
         }
-        self.endpoint.connect().await
     }
 }
 
@@ -631,6 +656,23 @@ mod tests {
         let err = c.connect().await.err().unwrap();
         assert_eq!(err.kind(), io::ErrorKind::ConnectionAborted);
         assert!(err.to_string().contains("vm exited: exit code 1"), "{err}");
+    }
+
+    /// Only "the listen queue is full" is retried (the e2e suite fills the real queue).
+    #[test]
+    fn only_a_full_listen_queue_is_busy() {
+        assert!(listener_busy(&io::Error::from(io::ErrorKind::WouldBlock)));
+        assert_eq!(
+            listener_busy(&io::Error::from(io::ErrorKind::ConnectionRefused)),
+            cfg!(target_os = "macos")
+        );
+        for kind in [
+            io::ErrorKind::NotFound,
+            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::ConnectionAborted,
+        ] {
+            assert!(!listener_busy(&io::Error::from(kind)), "{kind:?}");
+        }
     }
 
     /// A run dir under /tmp (the macOS $TMPDIR is too long for socket paths) and a
