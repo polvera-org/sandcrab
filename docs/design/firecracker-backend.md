@@ -275,7 +275,7 @@ The policy mapping is strict and has no silent fallback:
 
 **Least privilege, decided: a pre-created, user-owned tap pool.** A one-time root script (`scripts/host-setup.sh`, run as root
 and idempotent, plus a systemd oneshot so it survives reboot) does the following:
-- `ip tuntap add dev sctap<N> mode tap user nicolas group nicolas` for N in 0..63. Each tap gets `172.30.<N>.1/30`, guest `.2`.
+- `ip tuntap add dev sctap<N> mode tap user dev group dev` for N in 0..63. Each tap gets `172.30.<N>.1/30`, guest `.2`.
 - An `nftables` **dedicated table** `inet sandcrab` handles masquerade from `172.30.0.0/16` out the uplink, drops guest→host
   (`input iifname "sctap*" drop` except established) and guest→guest, and sets `net.ipv4.ip_forward=1`. Using a separate table keeps Proxmox's `pve-firewall` rules untouched.
 - At runtime the backend needs **no privileges**. It takes `flock(<tap lock dir>/sctap<N>.lock)` in a host-wide per-user dir
@@ -362,7 +362,7 @@ Not used in V1: MMDS, balloon, rate limiters, `/snapshot/*`. Those are Phase 2.
 
 ## 11. Risks and open questions
 
-1. **Host type (needs approval).** On **bare Proxmox** the setup needs `nicolas` in group `kvm`, a root run of `host-setup.sh`
+1. **Host type (needs approval).** On **bare Proxmox** the setup needs the dev user in group `kvm`, a root run of `host-setup.sh`
    (64 taps plus the nft table), and `firecracker` in `~/.local/bin`. On a **nested VM** we need `cpu: host` plus nested enabled on the hypervisor, and FC
    pays nested-exit overhead while Docker does not. The bench must record which one was used. Bare metal is recommended for credible numbers.
 2. **`/sys/block/vdX/serial` = drive_id** needs verifying on FC 1.18 (VIRTIO_BLK_T_GET_ID). The superblock-label fallback is specified.
