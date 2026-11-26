@@ -6,7 +6,7 @@ page is for the operator. Host prerequisites per backend are in [hosting.md](hos
 
 | Host | How it runs |
 | --- | --- |
-| Linux | A root service under systemd, socket in `/run/sandcrab/` ([below](#linux-a-root-service)) |
+| Linux | A root service under systemd, socket in `/run/sandcrab-server/` ([below](#linux-a-root-service)) |
 | macOS | A child process of its client, on libkrun ([below](#macos-a-child-of-the-client)) |
 
 ## Linux: a root service
@@ -25,24 +25,38 @@ sudo install -D -m 0755 target/x86_64-unknown-linux-musl/release/crabd /usr/loca
 sudo mkdir -p /etc/sandcrab && sudo cp -r templates /etc/sandcrab/templates
 sudo SANDCRAB_HOME=/var/lib/sandcrab /etc/sandcrab/templates/build.sh base
 
-# A group for the clients, and the directories clients may mount.
+# A group for the clients (log in again after joining it), and a directory clients may
+# mount, owned by the client so it can make its run folders there.
 sudo groupadd --system sandcrab
-sudo mkdir -p /srv/sandcrab
+sudo usermod -aG sandcrab <client user>
+sudo install -d -o <client user> -g <client user> /srv/sandcrab
 
 # Config and unit.
 sudo install -m 0644 packaging/systemd/server.toml /etc/sandcrab/server.toml   # then edit it
 sudo install -m 0644 packaging/systemd/sandcrab-server.service /etc/systemd/system/
-sudo SANDCRAB_HOME=/var/lib/sandcrab sandcrab doctor --server-config /etc/sandcrab/server.toml
+sudo systemctl edit sandcrab-server   # [Service] ReadWritePaths=/srv/sandcrab (see below)
+sudo SANDCRAB_HOME=/var/lib/sandcrab SANDCRAB_CRABD=/usr/local/lib/sandcrab/crabd \
+  sandcrab doctor --server-config /etc/sandcrab/server.toml
 sudo systemctl daemon-reload && sudo systemctl enable --now sandcrab-server
 ```
 
 The unit ([`packaging/systemd/sandcrab-server.service`](../packaging/systemd/sandcrab-server.service))
-restarts the server on failure, keeps `/run/sandcrab` across restarts
+restarts the server on failure, keeps `/run/sandcrab-server` across restarts
 (`RuntimeDirectoryPreserve=yes`), and turns on ordinary hardening (`ProtectSystem=strict`,
 `NoNewPrivileges`, `AF_UNIX` only, kernel tunables and modules protected). It is written for the
 Docker backend. **Add every read-write mount root to `ReadWritePaths=`**: with
-`ProtectSystem=strict` the server cannot write there otherwise, and the self-test makes its
-scratch directory in one.
+`ProtectSystem=strict` (and `ProtectHome=read-only` for roots under `/home`) the server cannot
+write there otherwise, and the self-test makes its scratch directory in one. Put it in a drop-in
+(`systemctl edit`), so reinstalling the unit does not drop it.
+
+The doctor needs the same `SANDCRAB_HOME` and `SANDCRAB_CRABD` as the unit; without
+`SANDCRAB_CRABD` its `crabd` check fails.
+
+Templates are Docker images with shared tags (`sandcrab/base:0.1.0`). If a user on the host
+already built and pinned them under their own `SANDCRAB_HOME`, rebuilding as root moves the tag
+and that user's pin no longer matches (their spawns are refused until they repin). Either
+adopt the existing image for the service (`sudo SANDCRAB_HOME=/var/lib/sandcrab sandcrab
+--templates-dir /etc/sandcrab/templates template pin base`) or rebuild and repin for both.
 
 The server raises its soft `RLIMIT_NOFILE` to the hard limit (at most 65536; the unit sets
 `LimitNOFILE=65536`) and sizes its caps from it, so a busy server refuses with
@@ -96,7 +110,8 @@ nothing and are in no privileged group, and keep the mount roots on a filesystem
 Bind-mount the socket's **directory** into the client's container, not the socket file:
 
 ```bash
-docker run -v /run/sandcrab:/run/sandcrab --group-add "$(getent group sandcrab | cut -d: -f3)" ...
+docker run --user <uid>:<gid> -v /run/sandcrab-server:/run/sandcrab-server \
+  --group-add "$(getent group sandcrab | cut -d: -f3)" -v /srv/sandcrab:/srv/sandcrab ...
 ```
 
 A bind mount of the file pins its inode, and the server replaces the socket at every start.

@@ -589,6 +589,8 @@ impl ScratchDir {
             Mode::from_raw_mode(0o644),
         )
         .map_err(|e| map(&rel, e))?;
+        // Readable whatever the umask is: a sandbox user reads it through a mount.
+        rustix::fs::fchmod(&fd, Mode::from_raw_mode(0o644)).map_err(|e| map(&rel, e))?;
         File::from(fd)
             .write_all(bytes)
             .map_err(|e| SandboxError::io_at(rel.as_path(), e))

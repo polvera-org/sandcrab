@@ -312,9 +312,11 @@ impl Scratch {
         s.dir.mkdir("rw")?;
         s.dir.write_new("ro/canary", s.canary.as_bytes())?;
         s.dir.write_new("canary-outside", s.canary.as_bytes())?;
-        // The sandbox user must be able to write through the rw mount.
+        // The sandbox user owns both mounted directories: it must write through the rw mount
+        // and get EROFS (not EACCES) from the ro one, whatever the server's umask is.
         if let Some(u) = config.user {
             s.dir.chown_dir("rw", u.uid, u.gid)?;
+            s.dir.chown_dir("ro", u.uid, u.gid)?;
         }
         Ok(s)
     }

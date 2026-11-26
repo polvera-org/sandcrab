@@ -32,10 +32,12 @@ Environment=SANDCRAB_CRABD=/usr/local/lib/sandcrab/crabd
 StateDirectory=sandcrab
 StateDirectoryMode=0700
 
-# The socket lives in /run/sandcrab. A containerised client bind-mounts this DIRECTORY (not
+# The socket lives in /run/sandcrab-server. A containerised client bind-mounts this DIRECTORY (not
 # the socket file): the server replaces the socket at every start, and the directory must
-# outlive a restart for the client's mount to stay valid.
-RuntimeDirectory=sandcrab
+# outlive a restart for the client's mount to stay valid. Not /run/sandcrab: every sandbox has
+# its own /run/sandcrab (crabd's socket), so the self-test's "server socket not reachable" line
+# would fail on it.
+RuntimeDirectory=sandcrab-server
 RuntimeDirectoryMode=0755
 RuntimeDirectoryPreserve=yes
 
