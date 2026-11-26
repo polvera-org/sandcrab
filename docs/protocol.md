@@ -1,8 +1,9 @@
 # Sandcrab protocol and tool reference
 
-Protocol version **`0.2`** (`sandcrab_protocol::PROTOCOL_VERSION`; `0.2` added the
-[`auth`](#authentication-auth) frame and the `UNAUTHORIZED` error code, and a `crabd`
-started without a token behaves exactly like `0.1`). This page describes the
+Protocol version **`0.3`** (`sandcrab_protocol::PROTOCOL_VERSION`; `0.2` added the
+[`auth`](#authentication-auth) frame and the `UNAUTHORIZED` error code; `0.3` added
+[`process.open`](#processes-processopen-and-processcancel), [forwards](#forwards-forwardlisten-forwardaccept-forwardstats),
+[`fs.identity`](#fsidentity), `hello` `features` and [version refusal](#versions)). This page describes the
 wire contract between a host (`sandcrab-core`, the SDK, the CLI) and `crabd`, the guest
 daemon inside every sandbox. Every backend speaks it, so Docker and Firecracker behave
 the same way.
@@ -20,6 +21,10 @@ behaviour. `sandcrab tools schema` prints the JSON Schema of every tool's input 
 - [Tools](#tools)
 - [Transports](#transports)
 - [Tunnels: `tunnel.open` (port forwarding)](#tunnels-tunnelopen-port-forwarding)
+- [Records](#records)
+- [Processes: `process.open` and `process.cancel`](#processes-processopen-and-processcancel)
+- [Forwards: `forward.listen`, `forward.accept`, `forward.stats`](#forwards-forwardlisten-forwardaccept-forwardstats)
+- [`fs.identity`](#fsidentity)
 - [`init.*` control contract (microVMs)](#init-control-contract-microvms)
 - [Archive format `sandcrab-tar-v1`](#archive-format-sandcrab-tar-v1)
 
@@ -46,7 +51,8 @@ Every message is one frame:
 
 ## Envelope (JSON-RPC 2.0)
 
-`method` is a tool name or `hello` / `ping`. `params` is the tool's typed params object.
+`method` is a tool name, `hello` / `ping`, or one of the non-tool methods `process.cancel`,
+`fs.identity` and `forward.stats`. `params` is the method's typed params object.
 
 ```text
 -> {"jsonrpc":"2.0","id":1,"method":"bash","params":{"command":"ls"}}
@@ -64,9 +70,9 @@ Every message is one frame:
   64 connections are served at once (`--max-connections`).
 - **Relative paths** in any tool resolve against the sandbox's default working directory
   (`default_cwd`, reported by `hello`).
-- `stream_event` notifications (`StreamEvent::Output`, `StreamEvent::ProcessExited`) are
-  defined but **reserved**: `crabd` 0.1 never emits them. Use `process_poll` for incremental
-  output.
+- **Connection-level verbs** (`auth`, `tunnel.open`, `process.open`, `forward.listen`,
+  `forward.accept`) may only be the first frame of a connection (after `auth` where a token
+  is set). They are not tools, not in `TOOL_NAMES` and not part of `Call`.
 
 ## Authentication: `auth`
 
@@ -106,11 +112,32 @@ It is not in `TOOL_NAMES` and not part of `Call`.
 
 | Method | Params | Result |
 | --- | --- | --- |
-| `hello` | `protocol_version?: string`, `client?: string` (both optional, diagnostics only) | `crabd_version`, `protocol_version` (`"0.2"`), `tools: string[]`, `default_cwd` |
+| `hello` | `protocol_version?: string`, `client?: string` (both optional) | `crabd_version`, `protocol_version` (`"0.3"`), `tools: string[]`, `default_cwd`, `features: string[]`, `forward_ports: u16[]` |
 | `ping` | `{}` | `{}` |
 
 The host calls `hello` once after connecting; `sandcrab-core` treats the sandbox as ready
 when it answers. `ping` is a cheap liveness probe.
+
+`features` (`sandcrab_protocol::features`) lists what this `crabd` can do beyond the tools:
+`"process.open"`, `"forward"`, and exactly one of `"tree_kill:subreaper"` or
+`"tree_kill:process_group"` (the fallback where a child subreaper is refused; a `setsid`
+escapes it). `forward_ports` are the ports this `crabd` forwards. A `crabd` before 0.3 sends
+neither; both then read as empty. Check `features` before using a 0.3 method: a `crabd` that
+does not list a feature answers its methods `-32601`.
+
+### Versions
+
+Both sides refuse a peer of another version, so a host and a `crabd` that differ never run a
+call:
+
+- **Host:** `sandcrab-core` refuses a `crabd` whose `hello` reports another
+  `protocol_version` and closes the connection.
+- **`crabd` (0.3):** a `hello` whose `protocol_version` differs is answered with
+  `-32009 UNSUPPORTED_VERSION`, `data: {crabd, host}` (`HelloParams::check_version`). A
+  `hello` without a version is still answered.
+
+In practice the two cannot differ: Docker bind-mounts the host's `crabd` into every
+container, and the microVM rootfs cache key includes the `crabd` digest.
 
 ## Errors
 
@@ -133,6 +160,10 @@ structured fields.
 | -32006 | `TOO_LARGE` | Input or output over a size limit | `{size, limit}` |
 | -32007 | `UNIMPLEMENTED` | Tool not implemented by this daemon / backend | `{detail}` |
 | -32008 | `UNAUTHORIZED` | The connection did not authenticate ([`auth`](#authentication-auth)); `crabd` closes it | `{detail}` |
+| -32009 | `UNSUPPORTED_VERSION` | `hello` from a host of another protocol version ([Versions](#versions)) | `{crabd, host}` |
+| -32010 | `SPAWN_FAILED` | `process.open`: the program could not be started. The sandbox works; retrying will not help | `{errno, what}`; `errno` such as `"ENOENT"`, `"EACCES"`, `"ENOEXEC"`, `"ENOTDIR"`; `what` is `"program"` or `"cwd"` |
+| -32011 | `LIMIT_EXCEEDED` | `process.open`: a sandbox-wide limit is reached | `{what, limit}`, e.g. `{"what": "processes", "limit": 64}` |
+| -32012 | `CANCELLED` | `process.open`: a `process.cancel` for its id arrived before the program started | `{detail}` |
 
 Unknown codes are preserved verbatim (`ProtocolError::Other`).
 
@@ -140,8 +171,9 @@ The SDK's LLM bridge (`Sandbox::tool_dispatch`, used by crabagent and by `sandcr
 reports the same errors as `{"error": {"code": "<snake_case>", "message": "..."}}` with
 stable string codes: `parse_error`, `invalid_request`, `unknown_tool`, `invalid_params`,
 `internal_error`, `execution_failed`, `timed_out`, `path_not_allowed`, `not_found`,
-`ambiguous_edit`, `too_large`, `unimplemented`, `unauthorized` (fatal), and `tool_error` for
-unknown numeric codes.
+`ambiguous_edit`, `too_large`, `unimplemented`, `unauthorized` (fatal), `unsupported_version`
+(fatal), and `tool_error` for unknown numeric codes and the `process.open` errors (which a
+tool call never returns).
 
 Note: a `bash` timeout is **not** an error. It returns a normal result with
 `timed_out: true` and the output captured so far.
@@ -335,7 +367,8 @@ carries the last output. Unknown id → `NOT_FOUND`.
 
 Params: `process_id`, `data` (end with `\n` to submit a line). Result: `bytes_written`.
 Exited process or closed stdin → `EXECUTION_FAILED`; a write blocked for 10 s fails the
-same way. There is no EOF/close operation in protocol 0.1.
+same way. `process_stdin` has no EOF/close operation; for a program that reads stdin to its
+end, use [`process.open`](#processes-processopen-and-processcancel) with `stdin: "pipe"`.
 
 ### `process_kill`
 
@@ -382,7 +415,9 @@ The same frames run over every transport.
 | vsock | Firecracker | `crabd serve --vsock 1024` (any CID). The host side uses Firecracker's vsock-over-UDS: connect to the VM's vsock Unix socket, write `CONNECT <port>\n`, read one line `OK <host_port>\n`; after that the stream carries frames. Any other reply, or EOF (no guest listener yet), means retry. |
 
 `crabd serve` flags: `--default-cwd` (default `/workspace`), `--max-connections` (64),
-`--max-inflight` (64), `--max-tunnels` (64), `--shutdown-grace-ms` (10 000),
+`--max-inflight` (64), `--max-tunnels` (64), `--max-processes` (64, protocol 0.3),
+`--forward-port <p>` (repeatable, protocol 0.3), `--max-forward-conns` (256, protocol 0.3),
+`--shutdown-grace-ms` (10 000),
 `--auth-token-file` (none). On SIGTERM / SIGINT it stops
 accepting, lets in-flight requests finish within the grace period, kills background
 process groups and removes the Unix socket. Logs go to stderr (`RUST_LOG`, default `info`).
@@ -467,6 +502,145 @@ client's EOF (upload-until-EOF gets no reply), and a guest server that half-clos
 then keeps reading (host bytes after the guest's FIN are dropped). Unix-socket transports
 (Docker) keep full half-close semantics in both directions.
 
+## Records
+
+Process and forward connections leave frame mode after their ack and carry **records**:
+
+```text
++---------+----------------------+------------------+
+| u8 kind | u32 length, big-end. | `length` bytes   |
++---------+----------------------+------------------+
+```
+
+| Kind | Connection, direction | Payload | Max length |
+| --- | --- | --- | --- |
+| `0x01 STDIN` | process, towards the guest | bytes for the program's stdin | 64 KiB |
+| `0x02 STDIN_EOF` | process, towards the guest | empty; closes the program's stdin | 0 |
+| `0x11 STDOUT` | process, from the guest | stdout bytes (and stderr with `merge`) | 64 KiB |
+| `0x12 STDERR` | process, from the guest | stderr bytes, only with `stderr: "stream"` | 64 KiB |
+| `0x1F EXIT` | process, from the guest | JSON `ProcessExit`; always the last record, the sender closes after it | 256 KiB |
+| `0x21 DATA` | forward, both ways | bytes | 64 KiB |
+| `0x22 EOF` | forward, both ways | empty; this side sends no more | 0 |
+
+- `RECORD_HEADER_LEN = 5`. A kind that is unknown, or not valid on that connection and
+  direction, or a length above the kind's maximum, is fatal: the receiver closes the
+  connection (on a process connection that stops the program's tree). Oversized lengths are
+  rejected from the header, before any allocation.
+- Payloads are bytes. Nothing treats them as lines or UTF-8; only `EXIT` is JSON.
+- The codec (`encode_record`, `encode_record_header`, `parse_record_header`, `RecordDecoder`
+  with a `RecordChannel`) is synchronous and runtime-agnostic, like the frame codec.
+
+**Why records and not raw bytes** (as `tunnel.open` uses): stdin needs an end-of-file that
+leaves stdout open, and a forwarded upload needs one too. On a raw connection that is a
+half-close, which neither microVM vsock bridge carries in both directions (see
+[Half-close over vsock](#tunnels-tunnelopen-port-forwarding)). A five-byte header gives an
+explicit end-of-file, a tagged stderr and an in-band exit on every transport. It is not
+multiplexing: one connection still carries one process or one forwarded connection.
+
+## Processes: `process.open` and `process.cancel`
+
+`process.open` runs one program per dedicated connection, with an exact argv and
+environment, and streams its output. It is the programmatic interface; the `bash` and
+`process_*` tools stay the LLM interface, unchanged, and do not share process ids with it.
+
+```text
+-> {"jsonrpc":"2.0","id":1,"method":"process.open","params":{"process_id":"<uuid>","argv":["make","test"],"env":{"PATH":"/usr/bin:/bin"}}}
+<- {"jsonrpc":"2.0","id":1,"result":{"process_id":"<uuid>","pid":42}}
+   ... records: STDIN / STDIN_EOF in; STDOUT / STDERR out; EXIT last ...
+```
+
+| Param | Type | Default | |
+| --- | --- | --- | --- |
+| `process_id` | string | required | A UUID chosen by the caller, so a cancel can arrive before the ack |
+| `argv` | string[] | required | `argv[0]` is the program (no shell). Not empty; no NUL |
+| `env` | map string→string | `{}` | The **exact** environment: nothing is added or inherited. Names not empty, no `=` or NUL |
+| `cwd` | string | `default_cwd` | Absolute |
+| `stdin` | `"null"` \| `"pipe"` | `"null"` | `pipe`: fed by `STDIN` records, closed by `STDIN_EOF` |
+| `stderr` | `"tail"` \| `"merge"` \| `"stream"` | `"tail"` | `tail`: kept for `EXIT` only; `merge`: one pipe with stdout; `stream`: `STDERR` records |
+| `stderr_tail_bytes` | u32 | 4096 | Max 65 536. Kept for `EXIT` with `tail` and `stream` |
+| `limits` | `{nproc?, data_bytes?, fsize_bytes?, nofile?}` | inherit | `RLIMIT_NPROC`, `RLIMIT_DATA` (at least 32 MiB), `RLIMIT_FSIZE`, `RLIMIT_NOFILE` (at least 64). Above the sandbox's own hard limit → `-32602`, never clamped |
+| `oom_score_adj` | u16 | unchanged | 0..=1000; only raises the score |
+| `timeout_ms` | u64 | none | Wall-clock bound, timed in the guest; at least 1 |
+| `kill_grace_ms` | u64 | 500 | Ask → force grace at the timeout, at the cap and on a closed connection |
+| `output_cap` | `{max_bytes, on_overflow: "kill" \| "tail"}` | none | Bounds stdout (and stderr with `merge`). `max_bytes` at least 1; at most 8 MiB with `tail` |
+
+- **The ack means it runs.** `{process_id, pid}` is sent after the program started. Otherwise
+  the answer is an error and `crabd` closes the connection: `-32010 SPAWN_FAILED` (could not
+  start), `-32011 LIMIT_EXCEEDED` (64 programs open at once, `--max-processes`), `-32012
+  CANCELLED` (cancelled before it started), `-32602` (bad params). A connection that closes
+  after the request and without `EXIT` means **lost**: the program may have run.
+- **Order and backpressure.** Each pipe read becomes one record; nothing reorders within a
+  stream. The next read happens only after the previous record was written, so a slow
+  receiver blocks the program and memory per stream is one 64 KiB buffer. stdin is the
+  mirror image. `EXIT` comes after both output pipes reached EOF.
+- **The tree dies with its leader.** When the program exits, whatever it left behind is
+  killed, the pipes are drained for at most 2 s, then `EXIT` is sent.
+- **Timeout and cap** are enforced in the guest, so they hold when the host is gone. At
+  `timeout_ms` the tree is stopped and `EXIT` has `timed_out: true`. With `output_cap`
+  `kill`, stdout is cut at `max_bytes`, the tree is stopped and `overflow` is true. With
+  `tail`, stdout is not streamed: the last `max_bytes` are sent as `STDOUT` records after the
+  program ended, and `overflow` is true when bytes were dropped.
+- A closed process connection stops the program: ask, wait `kill_grace_ms`, force.
+
+`EXIT` payload (`ProcessExit`):
+
+| Field | Type | |
+| --- | --- | --- |
+| `code` | i32 \| null | Exit code; `null` when a signal ended the leader |
+| `signal` | i32 \| null | |
+| `stderr_tail` | string | Last bytes of stderr, lossy UTF-8, cut at a character boundary. Empty with `merge`. Trimmed further if needed to keep the record within 256 KiB |
+| `timed_out`, `cancelled`, `overflow` | bool | |
+| `tree_clean` | bool | `false`: something of the tree could not be stopped; destroy the sandbox |
+| `duration_ms` | u64 | |
+
+**`process.cancel`** is an ordinary method on a tool connection, so a blocked stdin cannot
+hold it up: `{process_id, grace_ms?}` (default 5000; 0 forces at once) →
+`{was_running, tree_clean}`. It answers when nothing of the tree is left. It is idempotent;
+an unknown or finished id answers `was_running: false`. A cancel that arrives after the
+`process.open` frame was read but before the program started is remembered: the program is
+not started and the open is answered `-32012`.
+
+## Forwards: `forward.listen`, `forward.accept`, `forward.stats`
+
+A forward makes a loopback port inside the sandbox reach a target the **host** chose. The
+sandbox keeps network `disabled`, and every connection is still opened by the host.
+
+```text
+program in the sandbox ── connect 127.0.0.1:P ──► crabd
+listen connection:  -> {"jsonrpc":"2.0","id":1,"method":"forward.listen","params":{}}
+                    <- {"jsonrpc":"2.0","id":1,"result":{"ports":[P]}}
+                    <- {"jsonrpc":"2.0","method":"forward.incoming","params":{"conn_id":7,"port":P}}
+new connection:     -> {"jsonrpc":"2.0","id":1,"method":"forward.accept","params":{"conn_id":7}}
+                    <- {"jsonrpc":"2.0","id":1,"result":{"port":P}}
+                       ... DATA / EOF records both ways until either side closes ...
+```
+
+| Method | Kind | Params | Result |
+| --- | --- | --- | --- |
+| `forward.listen` | connection-level | `{}` | `{ports: u16[]}`; the connection stays in frame mode and receives `forward.incoming` notifications. One at a time; a second is `-32001` |
+| `forward.incoming` | notification, from `crabd` | `{conn_id: u64, port}` | none |
+| `forward.reject` | notification, from the host, on the listen connection | `{conn_id}` | none; the target could not be reached |
+| `forward.accept` | connection-level | `{conn_id}` | `{port}`, then `DATA` / `EOF` records. A `conn_id` is used once; unknown is `-32004` |
+| `forward.stats` | method on a tool connection | `{}` | `[{port, accepted, refused: {no_listener, cap, unclaimed, rejected}}]`, counters since start |
+
+- **Fixed ports, set at spawn**: `crabd serve --forward-port <p>` (repeatable) or
+  `init.configure` `forward_ports`. `crabd` binds `127.0.0.1:<p>` (and `[::1]:<p>`) before
+  it answers `hello`; a port that cannot be bound fails the start.
+- **Fail closed.** No listen connection, over a cap, not accepted within 10 s, or rejected:
+  the program's connection is closed and the matching counter goes up. A port not in the
+  list gets `ECONNREFUSED` from the kernel.
+- **Limits:** 16 forwards per sandbox; 64 connections per forward by default; 256 per
+  sandbox (`--max-forward-conns`); 32 announced and not yet accepted. Forward connections
+  do not take `--max-connections` slots.
+- `EOF` gives a correct half-close in both directions on every transport, so upload-until-EOF
+  works (unlike a raw `tunnel.open` over vsock).
+
+## `fs.identity`
+
+A method on a tool connection, not an LLM tool: `{paths: string[]}` (absolute, not empty) →
+`[{dev, ino}]`, one per path in order, as `stat` reports them. The host uses it to check that
+a bind-mounted folder is the one it resolved (`(dev, ino)` match).
+
 ## `init.*` control contract (microVMs)
 
 In a Firecracker VM, `crabd` is PID 1 (`crabd init`, also selected automatically when its
@@ -477,7 +651,7 @@ readiness probe.
 
 | Method | Params | Result |
 | --- | --- | --- |
-| `init.configure` | `InitConfig`: `sandbox_id`, `hostname`, `user {uid, gid, home?, name?}`, `env`, `default_cwd`, `mounts[]` (see below), `network`, `dns[]`, `tools_port`, `host_time_unix_ms?` | `{serve_pid, boot_ms}`; once per boot |
+| `init.configure` | `InitConfig`: `sandbox_id`, `hostname`, `user {uid, gid, home?, name?}`, `env`, `default_cwd`, `mounts[]` (see below), `network`, `dns[]`, `tools_port`, `host_time_unix_ms?`; since 0.3 `tmp_exec?`, `tmp_size_mb?`, `pids_max?`, `nofile?`, `forward_ports?` (below) | `{serve_pid, boot_ms}`; once per boot |
 | `init.export` | `{drive_id}` (a writable drive) | `{format: "sandcrab-tar-v1", guest_path}`, then **raw tar bytes until EOF** on the same connection |
 | `init.shutdown` | `{grace_ms}` (default 500) | `{}`; then processes get SIGTERM, SIGKILL after the grace, and the guest reboots so the VMM exits |
 
@@ -485,6 +659,17 @@ Configuration travels over vsock rather than the kernel command line because `en
 carry secrets and `/proc/cmdline` is world-readable. Drive ids are at most 20 bytes (the
 virtio-blk serial limit); ext4 labels at most 16. After an `init.export` ack the
 connection carries no more frames; open a new control connection for further requests.
+
+The 0.3 fields are all optional and are not serialized at their defaults, so a config
+without them parses as before and stays byte-compatible with older guests:
+
+| Field | Default | Effect |
+| --- | --- | --- |
+| `tmp_exec` | `false` | Drop `noexec` from the `/tmp` tmpfs (`nosuid,nodev` stay) |
+| `tmp_size_mb` | 256 (`SANDBOX_TMP_SIZE_MB`) | Size of the `/tmp` tmpfs; counts against the sandbox's memory |
+| `pids_max` | 1024 (`SANDBOX_PIDS_MAX`) | `pids.max` of the sandbox cgroup |
+| `nofile` | inherited | `RLIMIT_NOFILE` of `crabd serve` and every tool process |
+| `forward_ports` | `[]` | Passed to `crabd serve` as `--forward-port` |
 
 Each `mounts[]` entry (`GuestMount`) is a flat object with a `source` discriminator:
 
