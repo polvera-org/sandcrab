@@ -629,9 +629,6 @@ restart such processes.
 | `lk:orphans` | Reaps run dirs and helpers left by dead sandcrab processes (live sandboxes are never touched) | |
 | `libkrun` | Summary: ready, or the list of blockers | |
 
-The summary line still ends with "e2e pending"; that note is stale (the e2e suites pass on
-both platforms).
-
 ### 4.3 Networking
 
 | `--network` | libkrun |

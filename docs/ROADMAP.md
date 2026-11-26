@@ -95,7 +95,6 @@ Review backlog, in priority order ([reviews/libkrun-backend-review.md](reviews/l
 
 Also next:
 
-- `doctor`'s libkrun summary still says "e2e pending"; drop the note.
 - Benchmarks: Docker on mac-m2 (`--backends docker,libkrun`) in an idle weekend window; one
   interleaved, valid `docker,firecracker,libkrun` run on an SSD/NVMe KVM host (kvm-dedicated's
   HDDs skew Docker); rerun Firecracker with its memory/CPU probes ([bench/README.md](bench/README.md#open-bench-todo)).

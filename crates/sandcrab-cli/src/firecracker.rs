@@ -24,10 +24,6 @@ use crate::args::BackendArg;
 use crate::doctor::{Report, Status};
 use crate::util::{self, print_json};
 
-/// Appended to the doctor summary until the backend has passed its end-to-end run on a KVM
-/// host (maintainer decision: e2e pending, no KVM host yet).
-pub const E2E_NOTE: &str = "e2e pending";
-
 /// Backend config rooted at the CLI state root (`--state-dir` / `$SANDCRAB_HOME`), with the
 /// CLI's `crabd` injected into template rootfs images.
 pub fn config(g: &Global) -> anyhow::Result<FirecrackerConfig> {
@@ -482,16 +478,13 @@ pub fn doctor(g: &Global, r: &mut Report, fix: bool) {
         r.add(
             "firecracker",
             Status::Ok,
-            format!("Firecracker: ready (hardware isolated) — {E2E_NOTE}"),
+            "Firecracker: ready (hardware isolated)".to_owned(),
         );
     } else {
         r.add(
             "firecracker",
             if selected { Status::Fail } else { Status::Info },
-            format!(
-                "Firecracker: unavailable ({}) — {E2E_NOTE}",
-                blockers.join(", ")
-            ),
+            format!("Firecracker: unavailable ({})", blockers.join(", ")),
         );
     }
 }
