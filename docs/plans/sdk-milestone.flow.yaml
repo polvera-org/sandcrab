@@ -193,7 +193,7 @@ steps:
     title: "Walking skeleton: the process-contract suite in TypeScript against a real server on Docker, mirroring the adopter's launcher invariants (exact env and argv; 1 MiB mixed UTF-8 and CRLF; stdin end / open; cancel kills a TERM-ignoring grandchild, twice is fine; could-not-start; bound vs. abort incl. a pre-aborted signal; cap with kill and tail, live output under a tail cap; streams in and out; abandoned reader). Warm-exec latency measured"
     depends_on: [server-streams, ts-sdk]
     artifacts: [sdk/typescript/test]
-    status: doing
+    status: done
 
   - id: ts-e2e
     phase: implement
@@ -201,7 +201,7 @@ steps:
     title: "Full e2e as a matrix on Docker and libkrun: mounts at the same path, forwards (TCP port, Unix socket, handler; undeclared port refused; throughput and 16 parallel connections), a pipeline between two sandboxes with a paused reader, destroy by label confirmed empty, client killed then reaped by a new client, server restart (exit is not `unavailable`, client reconnects), 16 concurrent sandboxes; CI job for the SDK; server and SDK tarball in the release packaging"
     depends_on: [ts-contract, server-ops, docker-backend, libkrun-backend]
     artifacts: [sdk/typescript/test, .github/workflows/ci.yml, scripts/package-release.sh]
-    status: todo
+    status: doing
 
   - id: review
     phase: verify
