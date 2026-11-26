@@ -169,7 +169,7 @@ steps:
     title: "sandcrab-server streams: a connection per process carrying the records, cancel that cannot lose a race with spawn, a closed connection stops its tree; forward notifications and attach connections relayed to the client"
     depends_on: [server-core]
     artifacts: [crates/sandcrab-server/src]
-    status: doing
+    status: done
 
   - id: server-ops
     phase: implement
@@ -177,7 +177,7 @@ steps:
     title: "sandcrab-server operations: capabilities and self-test calls (per template), graceful shutdown, doctor checks, systemd unit example (root, hardened), how to run it as a child process on a Mac"
     depends_on: [server-streams, selftest]
     artifacts: [crates/sandcrab-server/src, crates/sandcrab-cli/src, docs/hosting.md]
-    status: todo
+    status: doing
 
   - id: ts-sdk
     phase: implement
@@ -193,7 +193,7 @@ steps:
     title: "Walking skeleton: the process-contract suite in TypeScript against a real server on Docker, mirroring the adopter's launcher invariants (exact env and argv; 1 MiB mixed UTF-8 and CRLF; stdin end / open; cancel kills a TERM-ignoring grandchild, twice is fine; could-not-start; bound vs. abort incl. a pre-aborted signal; cap with kill and tail, live output under a tail cap; streams in and out; abandoned reader). Warm-exec latency measured"
     depends_on: [server-streams, ts-sdk]
     artifacts: [sdk/typescript/test]
-    status: todo
+    status: doing
 
   - id: ts-e2e
     phase: implement
