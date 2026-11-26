@@ -10,9 +10,9 @@ use std::time::{Duration, Instant};
 use sandcrab_protocol::{
     FileIdentity, ForwardAcceptAck, ForwardAcceptParams, ForwardListenAck, ForwardListenParams,
     ForwardPortStats, ForwardRejectParams, ForwardStatsResult, FsIdentityResult,
-    METHOD_FORWARD_REJECT, ProcessCancelParams, ProcessCancelResult, ProcessExit, ProcessOpenAck,
-    ProcessOpenParams, ProtocolError, RECORD_HEADER_LEN, RecordChannel, RecordKind, RpcMessage,
-    RpcRequest, RpcResponse, SpawnTarget, StderrMode, encode_frame, encode_record,
+    METHOD_FORWARD_REJECT, Overflow, ProcessCancelParams, ProcessCancelResult, ProcessExit,
+    ProcessOpenAck, ProcessOpenParams, ProtocolError, RECORD_HEADER_LEN, RecordChannel, RecordKind,
+    RpcMessage, RpcRequest, RpcResponse, SpawnTarget, StderrMode, encode_frame, encode_record,
     forward::{FORWARD_UNCLAIMED_TIMEOUT_MS, MAX_PENDING_FORWARD_CONNS},
     parse_record_header,
     record::MAX_RECORD_DATA_LEN,
@@ -70,10 +70,10 @@ pub(super) fn fs_identity(paths: &[String]) -> Result<FsIdentityResult, Protocol
 /// | --- | --- |
 /// | `echo` | Each `STDIN` record comes back as one `STDOUT` record; exits 0 at `STDIN_EOF` |
 /// | `exit <code>` | Exits with `<code>`, stderr tail `"bye"` |
-/// | `emit <n>` | Writes `n` bytes (`i % 251`) as 64 KiB `STDOUT` records, then exits 0 |
+/// | `emit <n>` | Writes `n` bytes (`i % 251`) as 64 KiB `STDOUT` records, then exits 0. With an `output_cap` of `kill` below `n`: stops at the cap, `EXIT {signal: 15, overflow: true}` |
 /// | `mixed` | `STDOUT "a"`, `STDERR "b"` (only with `stderr: "stream"`), `STDOUT "c"`, exit 0 |
 /// | `env` | One `STDOUT` record: `KEY=value\n` per env entry, sorted; then exit 0 |
-/// | `sleep` | Runs until cancelled or its connection closes |
+/// | `sleep` | Runs until cancelled or its connection closes. With `timeout_ms`: `EXIT {signal: 15, timed_out: true}` after that long |
 /// | `slow-start <ms>` | Waits `<ms>` before it "starts" (a cancel meanwhile is remembered), then runs like `sleep` |
 /// | `hangup` | Acks, then closes the connection without `EXIT` (the host sees it as lost) |
 /// | `hangup-before-ack` | Closes the connection without answering |
@@ -349,13 +349,23 @@ impl MockProcesses {
             }
             "emit" => {
                 let n: usize = argv.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-                let data: Vec<u8> = (0..n).map(|i| (i % 251) as u8).collect();
+                let cap = params
+                    .output_cap
+                    .filter(|c| c.on_overflow == Overflow::Kill)
+                    .and_then(|c| usize::try_from(c.max_bytes).ok())
+                    .filter(|&c| c < n);
+                let data: Vec<u8> = (0..cap.unwrap_or(n)).map(|i| (i % 251) as u8).collect();
                 for chunk in data.chunks(MAX_RECORD_DATA_LEN) {
                     if self.out(w, RecordKind::Stdout, chunk).await.is_err() {
                         return End::Closed;
                     }
                 }
-                finish(exit(0))
+                finish(ProcessExit {
+                    code: cap.map_or(Some(0), |_| None),
+                    signal: cap.map(|_| 15),
+                    overflow: cap.is_some(),
+                    ..exit(0)
+                })
             }
             "mixed" => {
                 let mut recs = vec![(RecordKind::Stdout, &b"a"[..])];
@@ -395,11 +405,22 @@ impl MockProcesses {
             }
             "hangup" => End::Closed,
             // `sleep`, `slow-start`: until cancelled (the caller's select) or closed.
-            _ => loop {
-                if input.recv().await.is_none() {
+            _ => {
+                let closed = async { while input.recv().await.is_some() {} };
+                let Some(ms) = params.timeout_ms else {
+                    closed.await;
                     return End::Closed;
+                };
+                match tokio::time::timeout(Duration::from_millis(ms), closed).await {
+                    Ok(()) => End::Closed,
+                    Err(_) => finish(ProcessExit {
+                        code: None,
+                        signal: Some(15),
+                        timed_out: true,
+                        ..exit(0)
+                    }),
                 }
-            },
+            }
         }
     }
 

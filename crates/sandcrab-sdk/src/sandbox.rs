@@ -1,21 +1,31 @@
 //! [`Sandbox`]: typed helpers for every tool in the catalog.
 
+use std::collections::BTreeMap;
+use std::future::Future;
+use std::io;
 use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use sandcrab_core::{
-    BackendKind, PublishedPort, Result, SandboxError, SandboxId, SandboxInfo, TimingMarks,
+    AsyncStream, BackendKind, ForwardTarget, PublishedPort, Result, SandboxError, SandboxId,
+    SandboxInfo, TimingMarks,
 };
 use sandcrab_protocol::{
     BashParams, BashResult, DownloadParams, DownloadResult, FileDeleteParams, FileDeleteResult,
-    FileEditParams, FileEditResult, FileMoveParams, FileMoveResult, FileReadParams, FileReadResult,
-    FileWriteParams, FileWriteResult, GlobParams, GlobResult, GrepParams, GrepResult, HelloResult,
-    KillSignal, ListDirParams, ListDirResult, ProcessKillParams, ProcessKillResult,
-    ProcessListParams, ProcessListResult, ProcessPollParams, ProcessPollResult, ProcessStartParams,
-    ProcessStartResult, ProcessStdinParams, ProcessStdinResult, ProtocolError, ToolCall,
-    ToolDefinition, ToolResult, UploadParams, UploadResult, tool_definitions,
+    FileEditParams, FileEditResult, FileIdentity, FileMoveParams, FileMoveResult, FileReadParams,
+    FileReadResult, FileWriteParams, FileWriteResult, ForwardPortStats, GlobParams, GlobResult,
+    GrepParams, GrepResult, HelloResult, KillSignal, ListDirParams, ListDirResult,
+    ProcessKillParams, ProcessKillResult, ProcessListParams, ProcessListResult, ProcessPollParams,
+    ProcessPollResult, ProcessStartParams, ProcessStartResult, ProcessStdinParams,
+    ProcessStdinResult, ProtocolError, ToolCall, ToolDefinition, ToolResult, UploadParams,
+    UploadResult, tool_definitions,
 };
+
+use crate::forward::FnTarget;
+use crate::process::{ExecOutput, OutputStream, Process, ProcessSpec};
 
 /// A live sandbox. Every tool runs inside it via `crabd`; relative paths resolve against
 /// the sandbox's default working directory.
@@ -59,6 +69,14 @@ impl Sandbox {
         Self {
             inner,
             detached: false,
+        }
+    }
+
+    /// A handle to a sandbox somebody else owns: dropping it does nothing.
+    pub(crate) fn borrowed(inner: sandcrab_core::Sandbox) -> Self {
+        Self {
+            inner,
+            detached: true,
         }
     }
 
@@ -118,6 +136,83 @@ impl Sandbox {
     #[must_use]
     pub fn is_destroyed(&self) -> bool {
         self.inner.is_destroyed()
+    }
+
+    /// The labels given at spawn (immutable).
+    #[must_use]
+    pub fn labels(&self) -> &BTreeMap<String, String> {
+        self.inner.labels()
+    }
+
+    /// Change the time-to-live: the sandbox now expires `ttl` from now (`None`: never). A
+    /// long run renews its TTL this way.
+    pub fn set_ttl(&self, ttl: Option<Duration>) -> Result<()> {
+        self.inner.set_ttl(ttl)
+    }
+
+    // ---- processes -----------------------------------------------------------------
+
+    /// Start a program with an exact argv and environment and get its handle and its
+    /// output. Returns at once; fails only for a malformed spec. Everything later is in
+    /// [`Process::exit`]. See [`crate::process`] for an example, the outcomes, backpressure
+    /// and what dropping the handle does.
+    pub fn spawn(&self, spec: ProcessSpec) -> Result<(Process, OutputStream)> {
+        Process::spawn(&self.inner, &spec)
+    }
+
+    /// Run a program to its end and collect its output, bounded: a spec without a timeout
+    /// gets [`crate::DEFAULT_EXEC_TIMEOUT`], one without an output cap gets
+    /// [`crate::DEFAULT_EXEC_OUTPUT_CAP`] with [`sandcrab_protocol::Overflow::Kill`]. stdin
+    /// is closed at once. Dropping the future stops the program. Like [`Self::spawn`] it
+    /// fails only for a malformed spec; see [`ExecOutput::outcome`] for the rest.
+    pub async fn exec(&self, spec: ProcessSpec) -> Result<ExecOutput> {
+        crate::process::exec(&self.inner, spec).await
+    }
+
+    // ---- forwards ------------------------------------------------------------------
+
+    /// Start serving this sandbox's forwards ([`sandcrab_core::SandboxConfig::forward`]):
+    /// every connection a program makes to a forward port is offered to `target`. Once per
+    /// sandbox; it stops when the sandbox is destroyed. See [`crate::forward`].
+    pub fn serve_forwards(&self, target: Arc<dyn ForwardTarget>) -> Result<()> {
+        self.inner.serve_forwards(target)
+    }
+
+    /// [`Self::serve_forwards`] with a closure: it gets the guest port and answers with the
+    /// stream to relay to (accept) or an error (reject).
+    pub fn serve_forwards_with<F, Fut, S>(&self, target: F) -> Result<()>
+    where
+        F: Fn(u16) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = io::Result<S>> + Send + 'static,
+        S: AsyncStream + 'static,
+    {
+        self.inner.serve_forwards(Arc::new(FnTarget(target)))
+    }
+
+    /// Whether the forwards are served and the guest hands connections to the host.
+    #[must_use]
+    pub fn forwards_listening(&self) -> bool {
+        self.inner.forwards_listening()
+    }
+
+    /// Per forward port: connections accepted and refused (and why) since the sandbox
+    /// started.
+    pub async fn forward_stats(&self) -> Result<Vec<ForwardPortStats>> {
+        self.inner.forward_stats().await
+    }
+
+    // ---- mounts --------------------------------------------------------------------
+
+    /// `(dev, ino)` of each absolute guest path, in order, as the sandbox sees them: to
+    /// check that a mount shows the directory that was meant.
+    pub async fn fs_identity<I, S>(&self, paths: I) -> Result<Vec<FileIdentity>>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.inner
+            .fs_identity(paths.into_iter().map(Into::into).collect())
+            .await
     }
 
     /// The underlying core handle (cheap clone).
