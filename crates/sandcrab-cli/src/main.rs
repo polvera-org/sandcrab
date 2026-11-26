@@ -15,6 +15,7 @@ mod firecracker;
 ))]
 mod libkrun;
 mod run;
+mod server;
 mod util;
 mod workspace;
 
@@ -178,6 +179,11 @@ pub enum Commands {
         params: Option<String>,
     },
 
+    /// Run the host daemon: a Unix-socket API for clients (SDKs) on one explicit backend.
+    /// Stops on SIGINT / SIGTERM (or, with --lifeline-stdin, when stdin closes) and destroys
+    /// every sandbox it made.
+    Server(server::ServerArgs),
+
     /// Tool catalog.
     Tools {
         #[command(subcommand)]
@@ -257,6 +263,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<u8> {
             name,
             params,
         } => run::tool(g, &spawn, &name, params.as_deref()).await,
+        Commands::Server(args) => server::server(g, &args).await,
         Commands::Tools {
             action: ToolsCmd::Schema,
         } => {

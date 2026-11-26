@@ -15,18 +15,19 @@ path = "src/main.rs"
 [features]
 default = ["docker", "firecracker", "libkrun"]
 # Docker backend (`--backend docker`). Future backends are added the same way.
-docker = ["sandcrab-sdk/docker"]
+docker = ["sandcrab-sdk/docker", "sandcrab-server/docker"]
 # Firecracker microVM backend (`--backend firecracker`, `sandcrab rootfs`, doctor checks).
 # On by default; it only compiles in on Linux targets (a no-op elsewhere).
-firecracker = ["sandcrab-sdk/firecracker"]
+firecracker = ["sandcrab-sdk/firecracker", "sandcrab-server/firecracker"]
 # libkrun microVM backend (`--backend libkrun`, `--libkrun-tsi`, `sandcrab libkrun install`,
 # doctor checks). On by default; it only compiles in on macOS aarch64 and Linux (a no-op
 # elsewhere, like `firecracker`): Cargo default features cannot be target-specific, so the
 # SDK dependency is target-gated and the code is `cfg`-gated on the same targets.
-libkrun = ["sandcrab-sdk/libkrun"]
+libkrun = ["sandcrab-sdk/libkrun", "sandcrab-server/libkrun"]
 
 [dependencies]
 sandcrab-sdk = { workspace = true, default-features = false }
+sandcrab-server.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 serde.workspace = true

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, bail};
-use sandcrab_sdk::{Sandcrab, TemplateClient, WorkspaceClient};
+use sandcrab_sdk::{Sandcrab, SandcrabBuilder, TemplateClient, WorkspaceClient};
 use serde::Serialize;
 use tokio::sync::watch;
 
@@ -66,6 +66,17 @@ pub fn crabd_path(g: &Global) -> PathBuf {
 
 /// Build a [`Sandcrab`] on the explicitly selected backend.
 pub fn sandcrab(g: &Global) -> anyhow::Result<Sandcrab> {
+    let (mut builder, _) = backend_builder(g)?;
+    builder = builder.state_dir(state_root(g)?);
+    for d in templates_dirs(g)? {
+        builder = builder.templates_dir(d);
+    }
+    builder.build().context("cannot initialise the backend")
+}
+
+/// A builder with only the explicitly selected backend set (preflighted), and the backend's
+/// own directories outside the state root (no mount may touch them).
+pub fn backend_builder(g: &Global) -> anyhow::Result<(SandcrabBuilder, Vec<PathBuf>)> {
     let Some(backend) = g.backend else {
         bail!(
             "no backend selected: pass --backend <{}> (or set SANDCRAB_BACKEND); \
@@ -76,10 +87,9 @@ pub fn sandcrab(g: &Global) -> anyhow::Result<Sandcrab> {
     if g.libkrun_tsi && !is_libkrun(backend) {
         bail!("--libkrun-tsi only applies to --backend libkrun");
     }
-    let mut builder = Sandcrab::builder().state_dir(state_root(g)?);
-    for d in templates_dirs(g)? {
-        builder = builder.templates_dir(d);
-    }
+    let mut builder = Sandcrab::builder();
+    #[allow(unused_mut)]
+    let mut dirs = Vec::new();
     match backend {
         #[cfg(feature = "docker")]
         BackendArg::Docker => {
@@ -95,6 +105,7 @@ pub fn sandcrab(g: &Global) -> anyhow::Result<Sandcrab> {
             // or artifact is a precise, actionable error (never a fallback).
             let config = crate::firecracker::config(g)?;
             crate::firecracker::preflight(&config)?;
+            dirs.push(config.run_dir.clone());
             builder = builder.firecracker(config);
         }
         #[cfg(all(
@@ -113,10 +124,26 @@ pub fn sandcrab(g: &Global) -> anyhow::Result<Sandcrab> {
                      loopback and LAN; drop the flag"
                 );
             }
+            dirs.push(config.run_dir.clone());
             builder = builder.libkrun(config);
         }
     }
-    builder.build().context("cannot initialise the backend")
+    Ok((builder, dirs))
+}
+
+/// The backend's name as configs and `server.hello` spell it.
+pub fn backend_name(b: BackendArg) -> &'static str {
+    match b {
+        #[cfg(feature = "docker")]
+        BackendArg::Docker => "docker",
+        #[cfg(all(feature = "firecracker", target_os = "linux"))]
+        BackendArg::Firecracker => "firecracker",
+        #[cfg(all(
+            feature = "libkrun",
+            any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))
+        ))]
+        BackendArg::Libkrun => "libkrun",
+    }
 }
 
 #[allow(clippy::unnecessary_wraps, unreachable_patterns)]
