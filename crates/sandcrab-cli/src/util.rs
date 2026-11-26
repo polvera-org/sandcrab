@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, bail};
-use sandcrab_sdk::{Sandcrab, TemplateClient, WorkspaceClient};
+use sandcrab_sdk::{Sandcrab, SandcrabBuilder, TemplateClient, WorkspaceClient};
 use serde::Serialize;
 use tokio::sync::watch;
 
@@ -66,6 +66,11 @@ pub fn crabd_path(g: &Global) -> PathBuf {
 
 /// Build a [`Sandcrab`] on the explicitly selected backend.
 pub fn sandcrab(g: &Global) -> anyhow::Result<Sandcrab> {
+    builder(g)?.build().context("cannot initialise the backend")
+}
+
+/// [`sandcrab`] before `build()`, for a command that adds to it.
+pub fn builder(g: &Global) -> anyhow::Result<SandcrabBuilder> {
     let Some(backend) = g.backend else {
         bail!(
             "no backend selected: pass --backend <{}> (or set SANDCRAB_BACKEND); \
@@ -116,7 +121,7 @@ pub fn sandcrab(g: &Global) -> anyhow::Result<Sandcrab> {
             builder = builder.libkrun(config);
         }
     }
-    builder.build().context("cannot initialise the backend")
+    Ok(builder)
 }
 
 #[allow(clippy::unnecessary_wraps, unreachable_patterns)]

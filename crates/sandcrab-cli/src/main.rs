@@ -3,7 +3,7 @@
 //! Exit codes: `run` exits with the sandboxed command's code (`128 + signal` if killed);
 //! if `sandcrab` itself gets SIGINT / SIGTERM / SIGHUP / SIGQUIT, `run` and `tool` destroy
 //! the sandbox first and exit `128 + signal` (130 on Ctrl-C); other commands exit `0` on success, `1` on error (`doctor`: any failed
-//! check), `2` on usage errors.
+//! check; `selftest`: a line that did not pass), `2` on usage errors.
 
 mod args;
 mod doctor;
@@ -15,6 +15,7 @@ mod firecracker;
 ))]
 mod libkrun;
 mod run;
+mod selftest;
 mod util;
 mod workspace;
 
@@ -183,6 +184,19 @@ pub enum Commands {
         #[command(subcommand)]
         action: ToolsCmd,
     },
+
+    /// Prove a template's isolation on this host: probe two real sandboxes and print one
+    /// line per check (pass, fail, inconclusive). Exits 1 unless every line passes.
+    Selftest {
+        /// The template the claim is about.
+        #[arg(long)]
+        template: String,
+
+        /// Directory for the mount canaries (mounted into the sandbox). Default: the system
+        /// temp directory.
+        #[arg(long, value_name = "DIR")]
+        scratch_root: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -263,5 +277,9 @@ async fn dispatch(cli: Cli) -> anyhow::Result<u8> {
             util::print_json(&sandcrab_sdk::tool_definitions())?;
             Ok(0)
         }
+        Commands::Selftest {
+            template,
+            scratch_root,
+        } => selftest::selftest(g, &template, scratch_root.as_deref()).await,
     }
 }

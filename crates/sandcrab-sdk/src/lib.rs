@@ -74,6 +74,7 @@
 //!   roots of [`SandcrabBuilder::mount_policy`]. Without a policy every host mount is refused.
 //! - [`SandboxConfig::label`] labels a sandbox; [`Sandcrab::list`] and
 //!   [`Sandcrab::destroy_by_label`] select by label. [`Sandbox::set_ttl`] renews a TTL.
+//! - [`selftest::run`] proves a template's isolation on this host by probing two real sandboxes.
 //!
 //! A backend that cannot do one of these refuses the spawn with an explicit error
 //! ([`BackendCapabilities`] says what it supports); nothing is silently dropped.
@@ -91,6 +92,7 @@ mod dispatch;
 pub mod forward;
 pub mod process;
 mod sandbox;
+pub mod selftest;
 mod workspace;
 
 use std::collections::BTreeMap;

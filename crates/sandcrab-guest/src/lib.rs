@@ -20,7 +20,7 @@
 //! - [`supervise`] — `process.open` / `process.cancel` and `crabd supervise`, the per-program
 //!   supervisor that owns the connection and stops the program's whole tree.
 //! - [`proctree`] — the process tree of a supervisor, read from `/proc`.
-//! - [`probe`] — `crabd probe` (the self-test's in-sandbox half; not implemented yet).
+//! - [`probe`] — `crabd probe`, the self-test's in-sandbox half: one check, one JSON line.
 //! - [`vsock`] — AF_VSOCK listener (Linux only).
 //! - [`init`] — `crabd init`, PID 1 of a microVM (control port, mounts, workspace export).
 
