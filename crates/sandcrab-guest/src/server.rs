@@ -27,6 +27,14 @@
 //! [`TunnelConfig::max_tunnels`], so port forwards cannot starve tool connections (nor the
 //! reverse). `tunnel.open` on a connection that already carried a frame is `-32600`.
 //!
+//! # Processes
+//!
+//! A connection whose **first** frame is `process.open` is handed to a `crabd supervise`
+//! that runs one program and then carries records ([`crate::supervise`]). It gives back its
+//! `max_connections` slot at the handover; [`crate::supervise::SupervisorConfig::max_processes`]
+//! bounds them instead. `process.open` on a connection that already carried a frame is
+//! `-32600`. `process.cancel` and `fs.identity` are ordinary methods.
+//!
 //! # Shutdown
 //!
 //! [`Server::run`] takes a shutdown future (normally [`shutdown_signal`]). When it fires the
@@ -62,7 +70,10 @@ use std::{
     future::Future,
     io,
     net::SocketAddr,
-    os::unix::fs::{FileTypeExt, PermissionsExt},
+    os::{
+        fd::AsFd,
+        unix::fs::{FileTypeExt, MetadataExt, PermissionsExt},
+    },
     path::{Path, PathBuf},
     pin::Pin,
     sync::Arc,
@@ -70,8 +81,9 @@ use std::{
 };
 
 use sandcrab_protocol::{
-    Call, FrameError, HelloParams, HelloResult, METHOD_TUNNEL_OPEN, PROTOCOL_VERSION, PingResult,
-    ProtocolError, Reply, RpcMessage, RpcRequest, RpcResponse, TOOL_NAMES, encode_frame,
+    Call, FileIdentity, FrameError, FsIdentityParams, FsIdentityResult, HelloParams, HelloResult,
+    METHOD_PROCESS_OPEN, METHOD_TUNNEL_OPEN, PROTOCOL_VERSION, PingResult, ProtocolError, Reply,
+    RpcMessage, RpcRequest, RpcResponse, TOOL_NAMES, encode_frame, features,
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt},
@@ -86,6 +98,7 @@ use crate::{
     auth::{self, AuthConfig},
     codec,
     preauth::{PendingQueue, PendingTicket, RateLimitedLog},
+    supervise::{self, SupervisorConfig},
     tools,
     tunnel::{self, TunnelConfig, TunnelService},
 };
@@ -117,6 +130,8 @@ pub struct ServerConfig {
     pub auth: Option<AuthConfig>,
     /// With `auth`: max connections authenticating at once (outside `max_connections`).
     pub max_pending: usize,
+    /// `process.open`: the supervisor binary and `--max-processes`.
+    pub supervisor: SupervisorConfig,
 }
 
 impl ServerConfig {
@@ -130,6 +145,7 @@ impl ServerConfig {
             tunnels: TunnelConfig::default(),
             auth: None,
             max_pending: crate::preauth::DEFAULT_PENDING,
+            supervisor: SupervisorConfig::default(),
         }
     }
 }
@@ -153,10 +169,12 @@ pub fn tool_handler(ctx: Arc<ToolContext>) -> Handler {
 /// Handle one request against `ctx`.
 pub async fn handle_request(ctx: &ToolContext, req: RpcRequest) -> RpcResponse {
     let outcome = match Call::from_request(&req) {
-        Ok(Call::Hello(p)) => Ok(Reply::Hello(hello(ctx, &p))),
+        Ok(Call::Hello(p)) => hello(ctx, &p).map(Reply::Hello),
         Ok(Call::Ping) => Ok(Reply::Ping(PingResult {})),
+        Ok(Call::ProcessCancel(p)) => Ok(Reply::ProcessCancel(ctx.supervisors.cancel(&p).await)),
+        Ok(Call::FsIdentity(p)) => fs_identity(&p).map(Reply::FsIdentity),
         // Protocol 0.3 methods this crabd does not serve yet.
-        Ok(other @ (Call::ProcessCancel(_) | Call::FsIdentity(_) | Call::ForwardStats)) => {
+        Ok(other @ Call::ForwardStats) => {
             Err(ProtocolError::MethodNotFound(other.method().to_owned()))
         }
         Ok(Call::Tool(call)) => {
@@ -172,25 +190,50 @@ pub async fn handle_request(ctx: &ToolContext, req: RpcRequest) -> RpcResponse {
     RpcResponse::from_outcome(req.id, outcome)
 }
 
-fn hello(ctx: &ToolContext, p: &HelloParams) -> HelloResult {
-    if let Some(v) = p.protocol_version.as_deref()
-        && v != PROTOCOL_VERSION
-    {
-        warn!(
-            host = v,
-            crabd = PROTOCOL_VERSION,
-            "host protocol version differs"
-        );
+fn hello(ctx: &ToolContext, p: &HelloParams) -> Result<HelloResult, ProtocolError> {
+    if let Err(e) = p.check_version() {
+        warn!(error = %e, "hello refused");
+        return Err(e);
     }
     info!(client = p.client.as_deref().unwrap_or("-"), "hello");
-    HelloResult {
+    Ok(HelloResult {
         crabd_version: CRABD_VERSION.to_owned(),
         protocol_version: PROTOCOL_VERSION.to_owned(),
         tools: TOOL_NAMES.iter().map(|&t| t.to_owned()).collect(),
         default_cwd: ctx.default_cwd.display().to_string(),
-        features: Vec::new(),
+        features: hello_features(),
         forward_ports: Vec::new(),
-    }
+    })
+}
+
+/// What this `crabd` serves beyond the tools. The tree kill follows every descendant on Linux
+/// (the supervisor is a child subreaper); elsewhere it reaches the process group only.
+#[must_use]
+pub fn hello_features() -> Vec<String> {
+    let tree_kill = if cfg!(target_os = "linux") {
+        features::TREE_KILL_SUBREAPER
+    } else {
+        features::TREE_KILL_PROCESS_GROUP
+    };
+    vec![features::PROCESS_OPEN.to_owned(), tree_kill.to_owned()]
+}
+
+/// `fs.identity`: `(dev, ino)` of each path, following symlinks like `stat`.
+fn fs_identity(p: &FsIdentityParams) -> Result<FsIdentityResult, ProtocolError> {
+    p.paths
+        .iter()
+        .map(|path| match std::fs::metadata(path) {
+            Ok(md) => Ok(FileIdentity {
+                dev: md.dev(),
+                ino: md.ino(),
+            }),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                Err(ProtocolError::NotFound(path.clone()))
+            }
+            Err(e) => Err(ProtocolError::ExecutionFailed(format!("stat {path}: {e}"))),
+        })
+        .collect::<Result<_, _>>()
+        .map(FsIdentityResult)
 }
 
 /// Resolves on the first SIGTERM or SIGINT. Handlers are installed when this is called,
@@ -341,6 +384,7 @@ impl Server {
             config,
         } = self;
         let handler = tool_handler(Arc::clone(&ctx));
+        let supervisor = Arc::new(config.supervisor.clone());
         // vsock bridges drop half-close: end tunnels on target EOF (see `crate::tunnel`).
         let tunnel_config = TunnelConfig {
             close_on_target_eof: config.tunnels.close_on_target_eof || listener.is_vsock(),
@@ -411,6 +455,8 @@ impl Server {
                 tunnels: Arc::clone(&tunnels),
                 auth: auth.clone(),
                 refusals: Arc::clone(&refusals),
+                ctx: Arc::clone(&ctx),
+                supervisor: Arc::clone(&supervisor),
             };
             match conn {
                 Conn::Unix(s) => conns.spawn(async move {
@@ -443,6 +489,7 @@ impl Server {
             while conns.join_next().await.is_some() {}
         }
         ctx.processes.shutdown().await;
+        ctx.supervisors.shutdown(config.shutdown_grace).await;
         if let ListenAddr::Unix(path) = &config.listen {
             match std::fs::remove_file(path) {
                 Ok(()) => {}
@@ -494,6 +541,9 @@ pub struct ConnConfig {
     pub auth: Option<Arc<AuthConfig>>,
     /// Rate-limited log for refused connections.
     pub refusals: Arc<RateLimitedLog>,
+    /// For `process.open` connections.
+    pub ctx: Arc<ToolContext>,
+    pub supervisor: Arc<SupervisorConfig>,
 }
 
 /// A connection's claim on [`ServerConfig::max_connections`].
@@ -508,7 +558,8 @@ pub enum ConnSlot {
 }
 
 /// Serve an accepted connection: authenticate it (when configured), then a raw tunnel if
-/// its first frame is `tunnel.open`, else frame mode ([`serve_connection`]). `slot` is the
+/// its first frame is `tunnel.open`, a supervised process if it is `process.open`, else frame
+/// mode ([`serve_connection`]). `slot` is the
 /// claim on a `max_connections` permit (taken only after `auth`, see [`ConnSlot`]); a tunnel
 /// releases the permit once it has its own slot.
 pub async fn serve_stream<S>(
@@ -518,7 +569,7 @@ pub async fn serve_stream<S>(
     peer: String,
     slot: ConnSlot,
 ) where
-    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    S: AsyncRead + AsyncWrite + AsFd + Unpin + Send + 'static,
 {
     let ConnConfig {
         handler,
@@ -526,6 +577,8 @@ pub async fn serve_stream<S>(
         tunnels,
         auth,
         refusals,
+        ctx,
+        supervisor,
     } = cfg;
     debug!(%peer, "connection opened");
     let mut slot = slot;
@@ -584,6 +637,13 @@ pub async fn serve_stream<S>(
         drop(conn_slot);
         tunnels.serve(stream, req, stop, &peer).await;
         debug!(%peer, "tunnel connection closed");
+        return;
+    }
+    if let Ok(Some(payload)) = &first
+        && let Some(req) = as_process_open(payload)
+    {
+        drop(conn_slot);
+        supervise::serve_open(stream, req, ctx, &supervisor, &peer).await;
         return;
     }
     let (rd, wr) = tokio::io::split(stream);
@@ -657,10 +717,13 @@ async fn serve_frames<R, W>(
             }
         };
         match RpcMessage::from_slice(&payload) {
-            Ok(RpcMessage::Request(req)) if req.method == METHOD_TUNNEL_OPEN => {
-                let e = ProtocolError::InvalidRequest(
-                    "`tunnel.open` must be the first frame of a fresh connection".into(),
-                );
+            Ok(RpcMessage::Request(req))
+                if req.method == METHOD_TUNNEL_OPEN || req.method == METHOD_PROCESS_OPEN =>
+            {
+                let e = ProtocolError::InvalidRequest(format!(
+                    "`{}` must be the first frame of a fresh connection",
+                    req.method
+                ));
                 let _ = tx.send(RpcResponse::failure(Some(req.id), &e)).await;
                 drop(permit);
             }
@@ -706,6 +769,14 @@ async fn serve_frames<R, W>(
     drop(tx);
     let _ = writer.await;
     debug!(%peer, "connection closed");
+}
+
+/// The request if `payload` is a `process.open` request (params are checked later).
+fn as_process_open(payload: &[u8]) -> Option<RpcRequest> {
+    match RpcMessage::from_slice(payload) {
+        Ok(RpcMessage::Request(req)) if req.method == METHOD_PROCESS_OPEN => Some(req),
+        _ => None,
+    }
 }
 
 async fn write_loop<W>(mut wr: W, mut rx: mpsc::Receiver<RpcResponse>, peer: String)
