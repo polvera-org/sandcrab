@@ -3,7 +3,8 @@
 //! Order (design §3): early mounts → overlay root + `pivot_root` → late mounts → hostname,
 //! `lo` up, Ctrl-Alt-Del off → pids cgroup → hardening sysctls, read-only `/proc/sys` (and
 //! Docker's other `ReadonlyPaths`) and `/sys` → reaper → control port. `init.configure` then
-//! mounts the workspaces and starts `crabd serve` as the sandbox user.
+//! applies its `/tmp`, `pids_max` and `nofile` options, mounts the workspaces and starts
+//! `crabd serve` as the sandbox user.
 
 use std::{
     fs,
@@ -298,6 +299,12 @@ impl Pid1Ops {
         if c.network && !c.dns.is_empty() {
             fs::write("/etc/resolv.conf", config::resolv_conf(&c.dns))?;
         }
+        // Fail closed: an option that cannot be applied refuses the sandbox.
+        if let Some(tmp) = v.tmp_remount() {
+            sys::remount_tmp(tmp)?;
+            info!(exec = tmp.exec, size_mb = tmp.size_mb, "/tmp remounted");
+        }
+        self.apply_pids_max(v.pids_max)?;
         let mut mounted = Vec::new();
         for step in &v.mounts {
             let source = match &step.source {
@@ -328,6 +335,22 @@ impl Pid1Ops {
         })
     }
 
+    /// Set the configured `pids_max` on the cap made at boot (with [`SANDBOX_PIDS_MAX`]).
+    /// The cgroupfs is still writable here: it is sealed after `crabd serve` is placed.
+    fn apply_pids_max(&self, pids_max: u32) -> io::Result<()> {
+        if pids_max == SANDBOX_PIDS_MAX {
+            return Ok(());
+        }
+        match &self.pids_cap {
+            PidsCap::Cgroup(dir) => sys::set_pids_max(dir, pids_max)?,
+            PidsCap::Rlimit => sys::limit_nproc(pids_max)?,
+            // `hardening_refusal` already refused the sandbox.
+            PidsCap::Unlimited => return Ok(()),
+        }
+        info!(pids_max, "sandbox pids cap set");
+        Ok(())
+    }
+
     /// Spawn `crabd serve` as the sandbox user with an empty capability bounding set, inside
     /// the pids cgroup.
     ///
@@ -349,13 +372,21 @@ impl Pid1Ops {
             s.spawn(|| {
                 // Fail closed: never start tools with a non-empty bounding set.
                 hardening::clear_capability_bounding_set()?;
-                let Some(dir) = cgroup else {
-                    return cmd.spawn();
+                let old_nofile = v.config.nofile.map(sys::set_nofile).transpose()?;
+                let child = match cgroup {
+                    None => cmd.spawn(),
+                    Some(dir) => sys::enter_cgroup(dir).and_then(|()| {
+                        let child = cmd.spawn();
+                        if let Err(e) = sys::enter_cgroup(Path::new(sys::CGROUP_ROOT)) {
+                            error!(error = %e, "PID 1 could not leave the sandbox cgroup");
+                        }
+                        child
+                    }),
                 };
-                sys::enter_cgroup(dir)?;
-                let child = cmd.spawn();
-                if let Err(e) = sys::enter_cgroup(Path::new(sys::CGROUP_ROOT)) {
-                    error!(error = %e, "PID 1 could not leave the sandbox cgroup");
+                if let Some(old) = old_nofile
+                    && let Err(e) = sys::restore_nofile(old)
+                {
+                    warn!(error = %e, "PID 1 keeps the sandbox's RLIMIT_NOFILE");
                 }
                 child
             })
@@ -385,6 +416,9 @@ impl Pid1Ops {
             gid = v.config.user.gid,
             port = v.config.tools_port,
             pids_cap = ?self.pids_cap,
+            pids_max = v.pids_max,
+            nofile = ?v.config.nofile,
+            forward_ports = ?v.config.forward_ports,
             "crabd serve started"
         );
         Ok(pid)
