@@ -17,12 +17,14 @@ goes in `docs/plans/sdk-milestone.flow.yaml`.
 The first adopter is a TypeScript agent product. It runs as a hardened container with no Docker socket, on
 purpose. A native binding would need `docker.sock` inside that container, which is root-equivalent and would
 undo its hardening. So the SDK talks to **`sandcrab-server`**, a host daemon with backend access, over a
-token-protected Unix socket. The adopter mounts only that socket. The Python SDK will reuse the same server later.
+Unix socket. The adopter mounts only that socket. The Python SDK will reuse the same server later.
 
 ## Scope
 
 1. **`sandcrab-server` (minimal).**
-   - It listens on a Unix socket, and on TCP as an option, with a bearer token.
+   - It listens on a Unix socket only: JSON-RPC 2.0 for control, raw byte streams beside it for process I/O. No
+     token: the socket's owner, group and mode are the access control. A token per client comes only with a TCP
+     listener, which is not in this milestone (decided 2026-11-26).
    - It offers sandbox create/destroy, workspaces, tool calls, and process output streaming.
    - It can label sandboxes and sweep them by label.
 2. **TypeScript SDK (`@sandcrab/sdk`).**

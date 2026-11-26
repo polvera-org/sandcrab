@@ -1,0 +1,107 @@
+---
+slug: sdk-milestone
+name: "Server, TypeScript SDK and socket forwards"
+---
+
+import { ExecutionFlowchart, TodoList, PhaseTimeline } from "ministack/components";
+
+# Server, TypeScript SDK and socket forwards — execution plan
+
+Sandcrab becomes usable from an application that is not written in Rust and has no backend access of its own. A
+host daemon (`sandcrab-server`) owns the backend and listens on a Unix socket; a TypeScript SDK
+talks to it. The target is concrete: the first adopter has put every process it starts behind one launcher
+interface (`spawn`, `exec`, `sweep`, `reap`, `capabilities`) with a conformance suite. This milestone ships the
+generic primitives that let a Sandcrab-backed launcher pass that suite, while the adopter keeps its own egress
+proxy.
+
+Background and the decisions of 2026-11-25: [sdk-milestone.brief.md](./sdk-milestone.brief.md).
+
+<PhaseTimeline src="./sdk-milestone.flow.yaml" />
+
+## Flow
+
+Steps side by side run in parallel. Arrows are real dependencies.
+
+<ExecutionFlowchart src="./sdk-milestone.flow.yaml" />
+
+## Work
+
+<TodoList src="./sdk-milestone.flow.yaml" />
+
+## The contract, and what Sandcrab needs for each part
+
+| The adopter's launcher asks for | Sandcrab today | This milestone |
+| --- | --- | --- |
+| argv, no shell; the exact env, nothing inherited | `bash -c` string, env added on top | argv exec with an exact env (shell tools stay for LLMs) |
+| stdout as ordered bytes, complete, exit after the last byte | polled text, 1 MiB buffer that drops the oldest | a byte stream per process with backpressure |
+| stdin: written once and closed, or kept open; also a stream in | write only, no close | stdin stream with close |
+| stderr as a 4096-character tail, or merged into stdout in order | separate buffers | tail or merge, done in the guest |
+| cancel: ask, wait a grace, force; nothing the command started is left, even a grandchild that ignores TERM | group kill on `bash` timeout | tree kill with grace on every exec and process |
+| bounded exec: timeout, output cap (kill or keep the tail), abort | timeout only | all of them, enforced in the guest so a dead client leaks nothing |
+| per-process limits: nproc, data, fsize, nofile | per-sandbox vcpu, memory, disk | rlimits per exec, plus pids and nofile per sandbox |
+| folders at the same absolute path, ro or rw, not nested | registered workspaces at a chosen guest path | ad-hoc mounts, guest path = client path, under allowed roots |
+| network `none`, `endpoints` (a loopback port, optionally backed by a Unix socket), or `open` | `disabled` or `unrestricted` | `disabled` + forwards; `open` = `unrestricted` |
+| sweep everything of an identity, answer true only when empty | TTL reaper | labels, destroy by label, confirmed empty |
+| reap by label after the host crashed | orphan reaping by Sandcrab's own state | labels stored with the sandbox; list by label and age after a client or server restart |
+| capabilities: is the isolation proven, and why not | static backend capabilities | a self-test with named lines, run in a real sandbox |
+| could not start (`ENOENT`) vs. backend unavailable | one error type | two distinct outcomes |
+| `host` identity: run on the host | n/a | nothing: the adopter's launcher keeps its local one for these |
+
+## Decisions
+
+- **The adopter's launcher is the acceptance test.** Our TypeScript e2e mirrors its invariants; the pilot runs its
+  real suite. The adapter that implements its interface lives in the adopter's repository, not here.
+- **Forwards end at the client, not at the server.** The adopter's endpoints are loopback ports inside its own
+  container; a host daemon cannot dial them. So a forwarded connection travels guest → `crabd` → server → SDK,
+  and the SDK dials the port or socket the client itself named. The server never opens a host socket on a client's
+  say-so. This replaces the earlier "Unix sockets only, the adopter adds listeners" recommendation.
+- **Sandboxes outlive the connection.** Reaping after a crash is the adopter's call (`reap`), so a disconnect
+  destroys nothing; TTL and labels do. This replaces "sweep on client disconnect".
+- **No client binary for check steps.** With a Sandcrab launcher, a sandboxed step is one exec with folders and
+  one endpoint; the adopter's step-runtime seam becomes a pass-through.
+- **Bring your own image.** The sandbox must contain what the adopter's processes expect (its agent CLIs, git,
+  node, python). A template that points at the adopter's existing image is less work than keeping two in step.
+- **Wire (owner, 2026-11-26): JSON-RPC 2.0 over a Unix socket for control, raw byte streams beside it for process
+  I/O and forwarded connections.** The same shape the adopter already speaks to its agent CLIs. Framing of the
+  control channel (the length prefix `crabd` uses, or newline-delimited) is a detail for the design step.
+- **Auth (owner, 2026-11-26): no token on the Unix socket.** Whoever can open the socket has full control, so two
+  guards are mandatory: the server starts only with an explicit list of allowed peer uids (checked on every
+  connection; the socket's mode is the second layer, not the only one), and it refuses any mount that contains its
+  own socket. A token per client comes only if the server is ever exposed over TCP, which this milestone does not do.
+- **Where the server runs (owner, 2026-11-26).**
+  - Linux: a host service with Docker access. A containerised client mounts only the server socket; its data sits
+    in a Docker named volume, so the path map points at the volume's host mountpoint.
+  - Mac: the adopter runs as a host process beside the server, on libkrun. Paths are the same on both sides, so
+    the path map is the identity. No TCP, so no token.
+- **One flow.** Check steps and agent runs need the same protocol work. Docker and libkrun only; Firecracker
+  refuses forwards with an explicit error.
+- **Sandcrab stays generic.** No adopter name, path or policy in this repository.
+
+## Contract points only the adopter can settle
+
+These go into the adopter-side flow. None blocks Sandcrab work; each shapes the adapter.
+
+1. **`started` is read right after `spawn` returns.** A remote launcher cannot know it yet. Either it becomes
+   known with `exit`, or the adapter reports `true` and delivers the failure in `exit.spawnError`.
+2. **Most short execs as a run identity declare no folders** (git and file operations, slot housekeeping). A
+   sandbox cannot run those without knowing what to mount. They either gain folders, or run as `host`.
+3. **`sweep` names an OS user, which a sandbox launcher ignores.** It needs a grouping key (the adopter's spec
+   foresees one) that the adapter turns into a label.
+4. **`orphan` is null for a sandbox launcher**, so recovery goes by label only. Its two database columns go unused.
+5. **Its test database is not among a run's endpoints** today; inside a sandbox it is unreachable until it is.
+6. **Program files** (agent CLIs, helper scripts) are not folders of the spec. They come from the image or from
+   extra read-only mounts the adapter adds.
+7. **One sandbox per run, reused for that run's short execs**, or one per exec. The interface is per call; pooling
+   is the adapter's job. Sandcrab's part is a cheap warm exec, which the e2e measures.
+8. **File ownership.** During the transition both launchers write the same volume, so a sandbox runs as the uid
+   and gid the local launcher would have used (`user` on spawn exists today).
+
+## Risks & open questions for you
+
+1. **Throughput of client-ended forwards.** Every egress byte crosses four hops. Fine for package installs and
+   model traffic in principle; the live check measures it. A server-side Unix-socket target is the fallback.
+2. **Timing.** The adopter's launcher refactor is not merged yet (last sub-step in progress). The pilot waits for
+   it; nothing before the pilot does.
+3. **Disk on the Mac is at 9 GB free.** Builds and Docker e2e go to the remote hosts; only the libkrun live check
+   runs locally.
+4. **No backend reports `multi_tenant_safe`.** Stated in the server's capabilities; fine for a single owner.
