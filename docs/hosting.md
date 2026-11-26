@@ -15,7 +15,16 @@ No backend reports `multi_tenant_safe = true` yet, so none of them is meant for 
 multi-tenant code today; Firecracker is the one on the path to it (`jailer`).
 
 To run `sandcrab server` (the daemon behind the SDKs) on a prepared host, as a systemd service
-on Linux or as a child of its client on macOS, see [server.md](server.md).
+on Linux or as a child of its client on macOS, see [server.md](server.md). Which host for which
+server backend:
+
+| Server backend | Host | Prepare with | Then |
+| --- | --- | --- | --- |
+| Docker | Any Linux with Docker Engine, an ordinary VPS without KVM included | [1](#1-docker-host-linux) | [server.md: a root service](server.md#linux-a-root-service) |
+| libkrun | Linux x86_64 with KVM, or macOS on Apple Silicon | [3.4](#34-libkrun-on-linux) or [2.2](#22-libkrun-on-macos) | On macOS [a child of the client](server.md#macos-a-child-of-the-client). On Linux the server was verified as an ordinary user's process (the e2e starts it as a child); a libkrun systemd unit was not tested. At most 4 mounts per sandbox on x86_64 |
+| Firecracker | Not served | | It refuses forwards, mounts and the server's process options |
+
+Docker on macOS (Docker Desktop, the `tcp` transport) was not run through the server.
 
 Placeholders: `<user>` is the account that runs Sandcrab, `<host>` the machine, `<state root>`
 is `$SANDCRAB_HOME` or `~/.sandcrab`.
