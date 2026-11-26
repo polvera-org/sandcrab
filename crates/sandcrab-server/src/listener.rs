@@ -12,12 +12,12 @@ use std::time::Duration;
 
 use sandcrab_sdk::protocol::api::{self, ApiError};
 use sandcrab_sdk::protocol::{
-    JsonRpcVersion, ProtocolError, RequestId, ResponsePayload, RpcMessage, RpcResponse,
+    JsonRpcVersion, ProtocolError, RequestId, ResponsePayload, RpcMessage, RpcRequest, RpcResponse,
 };
 use tokio::net::{UnixListener, UnixStream};
 
 use crate::wire::{frame, read_frame, write_frame};
-use crate::{FIRST_FRAME_TIMEOUT, Peer, ServerError, Shared, control};
+use crate::{FIRST_FRAME_TIMEOUT, Peer, ServerError, Shared, control, process};
 
 /// The bound socket: its path and the identity of the file the server created, so a stop
 /// removes only its own socket, never a successor's.
@@ -150,6 +150,39 @@ async fn refuse(mut stream: UnixStream, id: Option<RequestId>, err: ApiError) {
     let _ = write_frame(&mut stream, &frame(&failure(id, &err))).await;
 }
 
+/// Over the connection limit: one `LIMIT_EXCEEDED` frame, then close. Bounded, so a peer
+/// that does not read cannot hold the task.
+pub(crate) async fn over_limit(stream: UnixStream, limit: u32) {
+    let err = ApiError::LimitExceeded(api::LimitExceededData {
+        what: "connections".into(),
+        limit: u64::from(limit),
+    });
+    let _ = tokio::time::timeout(Duration::from_secs(1), refuse(stream, None, err)).await;
+}
+
+/// A connection whose first frame was `forward.attach`: claim the announced connection,
+/// ack, and hand the stream to the waiting target; raw bytes follow. An unknown, used or
+/// timed-out `conn_id` (or another uid's) is `-32004`, then close.
+async fn attach(shared: &Shared, peer: Peer, mut stream: UnixStream, req: RpcRequest) {
+    let p: api::ForwardAttachParams = match api::decode_params(req.params.clone()) {
+        Ok(p) => p,
+        Err(e) => return refuse(stream, Some(req.id), e.into()).await,
+    };
+    let Some(tx) = shared.hub.claim(&p.conn_id, peer.uid) else {
+        tracing::debug!(uid = peer.uid, "forward.attach for an unknown connection");
+        let err = ProtocolError::NotFound("no announced connection with this conn_id".into());
+        return refuse(stream, Some(req.id), err.into()).await;
+    };
+    let ack = RpcResponse::success(
+        req.id,
+        serde_json::to_value(api::Empty {}).expect("empty object serializes"),
+    );
+    if write_frame(&mut stream, &frame(&ack)).await.is_ok() {
+        // The target may have given up meanwhile: then the stream drops here and closes.
+        let _ = tx.send(stream);
+    }
+}
+
 /// One accepted connection: the peer check, then the first frame decides its kind.
 pub(crate) async fn connection(shared: Arc<Shared>, mut stream: UnixStream) {
     let peer = match Peer::of(&stream) {
@@ -182,14 +215,8 @@ pub(crate) async fn connection(shared: Arc<Shared>, mut stream: UnixStream) {
     };
     match req.method.as_str() {
         api::METHOD_SERVER_HELLO => control::run(shared, peer, stream, req).await,
-        // Process and forward connections come with the next step; the dispatch is here.
-        api::METHOD_PROCESS_SPAWN | api::METHOD_FORWARD_ATTACH => {
-            let err = ProtocolError::Unimplemented(format!(
-                "`{}` is not implemented by this server yet",
-                req.method
-            ));
-            refuse(stream, Some(req.id), err.into()).await;
-        }
+        api::METHOD_PROCESS_SPAWN => process::run(&shared, peer, stream, req).await,
+        api::METHOD_FORWARD_ATTACH => attach(&shared, peer, stream, req).await,
         other => {
             let err = ProtocolError::InvalidRequest(format!(
                 "a connection starts with `server.hello`, `process.spawn` or `forward.attach`, \

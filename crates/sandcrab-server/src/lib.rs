@@ -11,6 +11,8 @@
 //! listener.rs   the socket (directory check, stale socket, mode and group) and the first frame
 //! peer.rs       peer credentials and the uid check
 //! control.rs    a control connection: `server.hello`, then the sandbox calls
+//! process.rs    a process connection (`process.spawn`), the process table, `process.cancel`
+//! forwards.rs   control connections and forwards: `forward.incoming`, `forward.attach`
 //! wire.rs       async frames
 //! ```
 //!
@@ -20,9 +22,11 @@
 
 pub mod config;
 mod control;
+mod forwards;
 mod lifecycle;
 mod listener;
 pub mod peer;
+mod process;
 mod wire;
 
 use std::collections::HashMap;
@@ -142,6 +146,10 @@ pub(crate) struct Shared {
     /// Creates in flight, counted against `max_sandboxes`.
     creating: Mutex<usize>,
     pub shutting_down: AtomicBool,
+    /// Control connections, who serves which forwards, announced forwarded connections.
+    pub hub: Arc<forwards::Hub>,
+    /// Process connections by `process_id`.
+    pub processes: process::Processes,
 }
 
 impl Shared {
@@ -169,6 +177,8 @@ impl Shared {
             owners: Mutex::default(),
             creating: Mutex::new(0),
             shutting_down: AtomicBool::new(false),
+            hub: Arc::default(),
+            processes: process::Processes::default(),
         }
     }
 
@@ -189,7 +199,8 @@ impl Shared {
         self.owners().remove(&id);
     }
 
-    /// Drop owner records of sandboxes that are gone (TTL, backend exit).
+    /// Drop owner records (and who served their forwards) of sandboxes that are gone (TTL,
+    /// backend exit).
     pub(crate) fn prune_owners(&self) {
         let live: std::collections::HashSet<SandboxId> = self
             .sandcrab
@@ -197,7 +208,13 @@ impl Shared {
             .into_iter()
             .map(|i| i.id)
             .collect();
-        self.owners().retain(|id, _| live.contains(id));
+        self.owners().retain(|id, _| {
+            let keep = live.contains(id);
+            if !keep {
+                self.hub.forget(*id);
+            }
+            keep
+        });
     }
 
     /// Take a sandbox slot or answer `LIMIT_EXCEEDED`. The slot is returned when the guard

@@ -1803,6 +1803,7 @@ name = "sandcrab-server"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "getrandom 0.4.3",
  "sandcrab-core",
  "sandcrab-sdk",
  "serde",
@@ -1812,6 +1813,7 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 

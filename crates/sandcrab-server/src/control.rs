@@ -12,12 +12,15 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use sandcrab_sdk::protocol::api::{
     self, ApiError, Capabilities, CapabilitiesParams, DestroyByLabelParams, DestroyByLabelResult,
-    DetailData, ForwardInfo, LimitExceededData, MountMode, MountNotAllowedData, MountSpec,
-    NetworkMode, SandboxCreate, SandboxDestroyParams, SandboxDestroyResult, SandboxGetParams,
+    DestroyReason, DetailData, Empty, ForwardInfo, ForwardRejectParams, ForwardServeParams,
+    ForwardServeResult, LimitExceededData, MountMode, MountNotAllowedData, MountSpec, NetworkMode,
+    SandboxCreate, SandboxDestroyParams, SandboxDestroyResult, SandboxDestroyed, SandboxGetParams,
     SandboxInfo, SandboxListParams, SandboxNotFoundData, SandboxSetTtlParams, SandboxState,
     ServerHelloParams, ServerHelloResult, TemplateErrorData, TemplateErrorKind, decode_params,
 };
-use sandcrab_sdk::protocol::{ForwardRefused, ProtocolError, RpcMessage, RpcRequest, RpcResponse};
+use sandcrab_sdk::protocol::{
+    ForwardRefused, ProcessCancelParams, ProtocolError, RpcMessage, RpcRequest, RpcResponse,
+};
 use sandcrab_sdk::{
     ForwardSpec, HostMount, NetworkPolicy, NprocScope, ResourceOverrides, SandboxConfig,
     SandboxError, SandboxFilter, SandboxId, UserSpec,
@@ -31,9 +34,9 @@ use crate::listener::failure;
 use crate::wire::{frame, read_frame, write_frame};
 use crate::{MAX_MEMORY_MB, MAX_NOFILE, MAX_PIDS, MAX_REQUESTS_IN_FLIGHT, MAX_VCPU, Peer, Shared};
 
-/// Features this server serves now ([`api::features`]). `forwards` and `selftest` come with
-/// the steps that build them.
-pub(crate) const FEATURES: &[&str] = &[api::features::MOUNTS];
+/// Features this server serves now ([`api::features`]). `selftest` comes with the step that
+/// builds it. Process connections are part of API 1.0 and need no feature.
+pub(crate) const FEATURES: &[&str] = &[api::features::FORWARDS, api::features::MOUNTS];
 
 /// Serve a control connection whose first frame was `hello`.
 pub(crate) async fn run(shared: Arc<Shared>, peer: Peer, stream: UnixStream, hello: RpcRequest) {
@@ -49,9 +52,12 @@ pub(crate) async fn run(shared: Arc<Shared>, peer: Peer, stream: UnixStream, hel
     if write_frame(&mut wr, &frame(&answer)).await.is_err() {
         return;
     }
-    tracing::debug!(uid = peer.uid, "control connection open");
-
     let (tx, mut rx) = mpsc::channel::<Vec<u8>>(MAX_REQUESTS_IN_FLIGHT as usize);
+    // Unregistered when this task ends or is aborted: its forwards become unserved.
+    let guard = shared.hub.register(peer.uid, tx.clone());
+    let control = guard.id;
+    tracing::debug!(uid = peer.uid, control, "control connection open");
+
     let writer = tokio::spawn(async move {
         while let Some(bytes) = rx.recv().await {
             if write_frame(&mut wr, &bytes).await.is_err() {
@@ -80,7 +86,7 @@ pub(crate) async fn run(shared: Arc<Shared>, peer: Peer, stream: UnixStream, hel
                 let shared = Arc::clone(&shared);
                 let tx = tx.clone();
                 tokio::spawn(async move {
-                    let answer = handle(&shared, peer, req).await;
+                    let answer = handle(&shared, peer, control, req).await;
                     let _ = tx.send(frame(&answer)).await;
                     drop(permit);
                 });
@@ -93,7 +99,9 @@ pub(crate) async fn run(shared: Arc<Shared>, peer: Peer, stream: UnixStream, hel
             }
         }
     }
-    // A lost control connection destroys nothing; requests in flight finish unanswered.
+    // A lost control connection destroys nothing and stops no process; requests in flight
+    // finish unanswered; the forwards it served are refused from now on.
+    drop(guard);
     drop(tx);
     let _ = writer.await;
     tracing::debug!(uid = peer.uid, "control connection closed");
@@ -122,7 +130,7 @@ fn invalid(msg: impl Into<String>) -> ApiError {
     ApiError::Protocol(ProtocolError::InvalidParams(msg.into()))
 }
 
-fn not_found(id: &str) -> ApiError {
+pub(crate) fn not_found(id: &str) -> ApiError {
     ApiError::SandboxNotFound(SandboxNotFoundData {
         sandbox_id: id.to_owned(),
     })
@@ -136,14 +144,19 @@ fn limit(what: &str, limit: u64) -> ApiError {
 }
 
 /// Answer one request on a control connection.
-pub(crate) async fn handle(shared: &Shared, peer: Peer, req: RpcRequest) -> RpcResponse {
+pub(crate) async fn handle(
+    shared: &Shared,
+    peer: Peer,
+    control: u64,
+    req: RpcRequest,
+) -> RpcResponse {
     let RpcRequest {
         id, method, params, ..
     } = req;
     let out = if shared.shutting_down.load(Ordering::SeqCst) {
         Err(ApiError::ShuttingDown)
     } else {
-        call(shared, peer, &method, params).await
+        call(shared, peer, control, &method, params).await
     };
     match out {
         Ok(v) => RpcResponse::success(id, v),
@@ -157,6 +170,7 @@ pub(crate) async fn handle(shared: &Shared, peer: Peer, req: RpcRequest) -> RpcR
 async fn call(
     shared: &Shared,
     peer: Peer,
+    control: u64,
     method: &str,
     params: Option<Value>,
 ) -> Result<Value, ApiError> {
@@ -168,21 +182,41 @@ async fn call(
             let _: CapabilitiesParams = decode_params(params)?;
             ok(&capabilities(shared))
         }
-        api::METHOD_SANDBOX_CREATE => ok(&create(shared, peer, decode_params(params)?).await?),
+        api::METHOD_SANDBOX_CREATE => {
+            ok(&create(shared, peer, control, decode_params(params)?).await?)
+        }
         api::METHOD_SANDBOX_GET => {
             let p: SandboxGetParams = decode_params(params)?;
-            ok(&info_of(shared, peer, &p.sandbox_id)?)
+            ok(&info_of(shared, peer, &p.sandbox_id).await?)
         }
         api::METHOD_SANDBOX_LIST => ok(&list(shared, peer, decode_params(params)?)?),
-        api::METHOD_SANDBOX_SET_TTL => ok(&set_ttl(shared, peer, decode_params(params)?)?),
+        api::METHOD_SANDBOX_SET_TTL => ok(&set_ttl(shared, peer, decode_params(params)?).await?),
         api::METHOD_SANDBOX_DESTROY => ok(&destroy(shared, peer, decode_params(params)?).await?),
         api::METHOD_SANDBOX_DESTROY_BY_LABEL => {
             ok(&destroy_by_label(shared, peer, decode_params(params)?).await?)
         }
-        api::METHOD_SERVER_SELFTEST
-        | api::METHOD_PROCESS_CANCEL
-        | api::METHOD_FORWARD_SERVE
-        | api::METHOD_FORWARD_REJECT => Err(ApiError::Protocol(ProtocolError::Unimplemented(
+        api::METHOD_PROCESS_CANCEL => {
+            let p: ProcessCancelParams = decode_params(params)?;
+            ok(&shared.processes.cancel(peer.uid, p).await?)
+        }
+        api::METHOD_FORWARD_SERVE => {
+            let p: ForwardServeParams = decode_params(params)?;
+            let sid = owned(shared, peer, &p.sandbox_id)?;
+            let sb = shared
+                .sandcrab
+                .manager()
+                .get(sid)
+                .map_err(|_| not_found(&p.sandbox_id))?;
+            shared.hub.serve(sid, control);
+            let ports = sb.info().forwards.iter().map(|f| f.guest_port).collect();
+            ok(&ForwardServeResult { ports })
+        }
+        api::METHOD_FORWARD_REJECT => {
+            let p: ForwardRejectParams = decode_params(params)?;
+            shared.hub.reject(&p.conn_id, peer.uid);
+            ok(&Empty {})
+        }
+        api::METHOD_SERVER_SELFTEST => Err(ApiError::Protocol(ProtocolError::Unimplemented(
             format!("`{method}` is not implemented by this server yet"),
         ))),
         other => Err(ApiError::Protocol(ProtocolError::MethodNotFound(
@@ -283,7 +317,13 @@ fn rfc3339(t: DateTime<Utc>) -> String {
     t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
-fn to_info(i: sandcrab_sdk::SandboxInfo) -> SandboxInfo {
+/// A sandbox as the API shows it. `stats`: the guest's forward counters, when fetched.
+fn to_info(
+    shared: &Shared,
+    i: sandcrab_sdk::SandboxInfo,
+    stats: &[sandcrab_sdk::protocol::ForwardPortStats],
+) -> SandboxInfo {
+    let forwards_served = !i.forwards.is_empty() && shared.hub.is_served(i.id);
     let now = Utc::now();
     SandboxInfo {
         sandbox_id: i.id.to_string(),
@@ -305,17 +345,19 @@ fn to_info(i: sandcrab_sdk::SandboxInfo) -> SandboxInfo {
                 mode: api_mode(m.mode),
             })
             .collect(),
-        // Counters come with the forwards (next step).
         forwards: i
             .forwards
             .into_iter()
-            .map(|f| ForwardInfo {
-                guest_port: f.guest_port,
-                accepted: 0,
-                refused: ForwardRefused::default(),
+            .map(|f| {
+                let s = stats.iter().find(|s| s.port == f.guest_port);
+                ForwardInfo {
+                    guest_port: f.guest_port,
+                    accepted: s.map_or(0, |s| s.accepted),
+                    refused: s.map_or_else(ForwardRefused::default, |s| s.refused),
+                }
             })
             .collect(),
-        forwards_served: false,
+        forwards_served,
     }
 }
 
@@ -442,7 +484,12 @@ pub(crate) fn sandbox_config(
     Ok(c)
 }
 
-async fn create(shared: &Shared, peer: Peer, p: SandboxCreate) -> Result<SandboxInfo, ApiError> {
+async fn create(
+    shared: &Shared,
+    peer: Peer,
+    control: u64,
+    p: SandboxCreate,
+) -> Result<SandboxInfo, ApiError> {
     let config = sandbox_config(shared, peer, p)?;
     let template = config.template.clone();
     let slot = shared.reserve_slot()?;
@@ -450,8 +497,21 @@ async fn create(shared: &Shared, peer: Peer, p: SandboxCreate) -> Result<Sandbox
         .sandcrab
         .spawn(config)
         .await
-        .map_err(|e| map_err(e, &template))?
-        .detach();
+        .map_err(|e| map_err(e, &template))?;
+    if !sb.info().forwards.is_empty() {
+        // The creating connection serves the forwards until another calls `forward.serve`.
+        shared.hub.serve(sb.id(), control);
+        let (hub, id) = (Arc::clone(&shared.hub), sb.id());
+        if let Err(e) = sb.serve_forwards_with(move |port| {
+            let hub = Arc::clone(&hub);
+            async move { hub.incoming(id, port).await }
+        }) {
+            shared.hub.forget(id);
+            let _ = sb.destroy().await;
+            return Err(map_err(e, &template));
+        }
+    }
+    let sb = sb.detach();
     drop(slot);
     if shared.shutting_down.load(Ordering::SeqCst) {
         // The stop may have destroyed the others already; do not leave this one behind.
@@ -460,24 +520,34 @@ async fn create(shared: &Shared, peer: Peer, p: SandboxCreate) -> Result<Sandbox
     }
     shared.set_owner(sb.id(), peer.uid);
     tracing::info!(uid = peer.uid, sandbox = %sb.id(), template = %template, "sandbox created");
-    Ok(to_info(sb.info()))
+    Ok(to_info(shared, sb.info(), &[]))
 }
 
 /// The sandbox `id` when `peer` owns it.
-fn owned(shared: &Shared, peer: Peer, id: &str) -> Result<SandboxId, ApiError> {
+pub(crate) fn owned(shared: &Shared, peer: Peer, id: &str) -> Result<SandboxId, ApiError> {
     parse_id(id)
         .filter(|sid| shared.owns(peer.uid, *sid))
         .ok_or_else(|| not_found(id))
 }
 
-fn info_of(shared: &Shared, peer: Peer, id: &str) -> Result<SandboxInfo, ApiError> {
+/// One sandbox with fresh forward counters from its guest.
+async fn info_of(shared: &Shared, peer: Peer, id: &str) -> Result<SandboxInfo, ApiError> {
     let sid = owned(shared, peer, id)?;
     let sb = shared
         .sandcrab
         .manager()
         .get(sid)
         .map_err(|_| not_found(id))?;
-    Ok(to_info(sb.info()))
+    let info = sb.info();
+    let stats = if info.forwards.is_empty() {
+        Vec::new()
+    } else {
+        sb.forward_stats().await.unwrap_or_else(|e| {
+            tracing::debug!(sandbox = %sid, error = %e, "forward.stats failed");
+            Vec::new()
+        })
+    };
+    Ok(to_info(shared, info, &stats))
 }
 
 fn filter(
@@ -508,13 +578,18 @@ fn list(shared: &Shared, peer: Peer, p: SandboxListParams) -> Result<Vec<Sandbox
         p.created_before.as_deref(),
     )?;
     shared.prune_owners();
+    // Without the guest's forward counters: `sandbox.get` has them.
     Ok(owned_matches(shared, peer, &f)
         .into_iter()
-        .map(to_info)
+        .map(|i| to_info(shared, i, &[]))
         .collect())
 }
 
-fn set_ttl(shared: &Shared, peer: Peer, p: SandboxSetTtlParams) -> Result<SandboxInfo, ApiError> {
+async fn set_ttl(
+    shared: &Shared,
+    peer: Peer,
+    p: SandboxSetTtlParams,
+) -> Result<SandboxInfo, ApiError> {
     let sid = owned(shared, peer, &p.sandbox_id)?;
     let max = shared.config.limits.max_ttl_secs;
     let ttl = match p.ttl_secs {
@@ -526,7 +601,7 @@ fn set_ttl(shared: &Shared, peer: Peer, p: SandboxSetTtlParams) -> Result<Sandbo
         .sandcrab
         .set_ttl(sid, ttl)
         .map_err(|e| map_err(e, ""))?;
-    info_of(shared, peer, &p.sandbox_id)
+    info_of(shared, peer, &p.sandbox_id).await
 }
 
 async fn destroy(
@@ -540,16 +615,30 @@ async fn destroy(
     };
     match shared.sandcrab.manager().destroy(sid).await {
         Ok(_) => {
-            shared.forget(sid);
+            gone(shared, peer, sid);
             tracing::info!(uid = peer.uid, sandbox = %sid, "sandbox destroyed");
             Ok(SandboxDestroyResult { destroyed: true })
         }
         Err(SandboxError::NotFound { .. }) => {
-            shared.forget(sid);
+            gone(shared, peer, sid);
             Ok(SandboxDestroyResult { destroyed: false })
         }
         Err(e) => Err(map_err(e, "")),
     }
+}
+
+/// A sandbox of `peer` was destroyed: forget it and tell the uid's control connections.
+fn gone(shared: &Shared, peer: Peer, id: SandboxId) {
+    shared.forget(id);
+    shared.hub.forget(id);
+    shared.hub.notify(
+        Some(peer.uid),
+        api::NOTIFY_SANDBOX_DESTROYED,
+        &SandboxDestroyed {
+            sandbox_id: id.to_string(),
+            reason: DestroyReason::Destroyed,
+        },
+    );
 }
 
 /// Design §7, within the peer's own sandboxes: destroy every match, then look again.
@@ -575,7 +664,7 @@ async fn destroy_by_label(
     let mut destroyed = 0u64;
     while let Some(r) = tasks.join_next().await {
         if let Ok((id, true)) = r {
-            shared.forget(id);
+            gone(shared, peer, id);
             destroyed += 1;
         }
     }
@@ -628,7 +717,7 @@ mod tests {
 
     async fn call(s: &Shared, uid: u32, method: &str, params: Value) -> Result<Value, i64> {
         let req = RpcRequest::new(1, method, Some(params));
-        match handle(s, Peer { uid, gid: uid }, req).await.payload {
+        match handle(s, Peer { uid, gid: uid }, 0, req).await.payload {
             ResponsePayload::Result(v) => Ok(v),
             ResponsePayload::Error(e) => Err(e.code),
         }
