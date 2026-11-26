@@ -15,6 +15,8 @@
 //! - [`hardening`] — `no_new_privs` for `crabd serve` and everything it spawns.
 //! - [`tools`] — [`tools::dispatch`] plus one module per tool family.
 //! - [`tunnel`] — `tunnel.open`: raw relay to a guest loopback TCP port.
+//! - [`forward`] — `forward.listen` / `forward.accept` / `forward.stats`: guest loopback ports
+//!   whose connections the host routes.
 //! - [`supervise`] — `process.open` / `process.cancel` and `crabd supervise`, the per-program
 //!   supervisor that owns the connection and stops the program's whole tree.
 //! - [`proctree`] — the process tree of a supervisor, read from `/proc`.
@@ -25,6 +27,7 @@
 pub mod auth;
 pub mod codec;
 pub mod context;
+pub mod forward;
 pub mod hardening;
 pub mod init;
 pub mod preauth;

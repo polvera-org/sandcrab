@@ -35,6 +35,13 @@
 //! bounds them instead. `process.open` on a connection that already carried a frame is
 //! `-32600`. `process.cancel` and `fs.identity` are ordinary methods.
 //!
+//! # Forwards
+//!
+//! The forward ports are bound in [`Server::bind`], before any `hello` can be answered. A
+//! connection whose **first** frame is `forward.listen` or `forward.accept` is served by
+//! [`crate::forward`]; like a tunnel it gives back its `max_connections` slot, and the
+//! forward caps bound it instead. `forward.stats` is an ordinary method.
+//!
 //! # Shutdown
 //!
 //! [`Server::run`] takes a shutdown future (normally [`shutdown_signal`]). When it fires the
@@ -82,8 +89,9 @@ use std::{
 
 use sandcrab_protocol::{
     Call, FileIdentity, FrameError, FsIdentityParams, FsIdentityResult, HelloParams, HelloResult,
-    METHOD_PROCESS_OPEN, METHOD_TUNNEL_OPEN, PROTOCOL_VERSION, PingResult, ProtocolError, Reply,
-    RpcMessage, RpcRequest, RpcResponse, TOOL_NAMES, encode_frame, features,
+    METHOD_FORWARD_ACCEPT, METHOD_FORWARD_LISTEN, METHOD_PROCESS_OPEN, METHOD_TUNNEL_OPEN,
+    PROTOCOL_VERSION, PingResult, ProtocolError, Reply, RpcMessage, RpcRequest, RpcResponse,
+    TOOL_NAMES, encode_frame, features,
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt},
@@ -97,6 +105,7 @@ use crate::{
     CRABD_VERSION, ToolContext,
     auth::{self, AuthConfig},
     codec,
+    forward::{self, ForwardConfig, ForwardListeners, ForwardService},
     preauth::{PendingQueue, PendingTicket, RateLimitedLog},
     supervise::{self, SupervisorConfig},
     tools,
@@ -132,6 +141,8 @@ pub struct ServerConfig {
     pub max_pending: usize,
     /// `process.open`: the supervisor binary and `--max-processes`.
     pub supervisor: SupervisorConfig,
+    /// Forward ports (`--forward-port`) and their caps.
+    pub forwards: ForwardConfig,
 }
 
 impl ServerConfig {
@@ -146,6 +157,7 @@ impl ServerConfig {
             auth: None,
             max_pending: crate::preauth::DEFAULT_PENDING,
             supervisor: SupervisorConfig::default(),
+            forwards: ForwardConfig::default(),
         }
     }
 }
@@ -157,26 +169,29 @@ pub type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
 /// their own to exercise the connection machinery.
 pub type Handler = Arc<dyn Fn(RpcRequest) -> BoxFuture<RpcResponse> + Send + Sync>;
 
-/// The production handler: `hello` / `ping` here, everything else via [`tools::dispatch`].
+/// The production handler: `hello` / `ping` / `forward.stats` here, everything else via
+/// [`tools::dispatch`].
 #[must_use]
-pub fn tool_handler(ctx: Arc<ToolContext>) -> Handler {
+pub fn tool_handler(ctx: Arc<ToolContext>, forwards: Arc<ForwardService>) -> Handler {
     Arc::new(move |req| {
         let ctx = Arc::clone(&ctx);
-        Box::pin(async move { handle_request(&ctx, req).await })
+        let forwards = Arc::clone(&forwards);
+        Box::pin(async move { handle_request(&ctx, &forwards, req).await })
     })
 }
 
 /// Handle one request against `ctx`.
-pub async fn handle_request(ctx: &ToolContext, req: RpcRequest) -> RpcResponse {
+pub async fn handle_request(
+    ctx: &ToolContext,
+    forwards: &ForwardService,
+    req: RpcRequest,
+) -> RpcResponse {
     let outcome = match Call::from_request(&req) {
-        Ok(Call::Hello(p)) => hello(ctx, &p).map(Reply::Hello),
+        Ok(Call::Hello(p)) => hello(ctx, forwards, &p).map(Reply::Hello),
         Ok(Call::Ping) => Ok(Reply::Ping(PingResult {})),
         Ok(Call::ProcessCancel(p)) => Ok(Reply::ProcessCancel(ctx.supervisors.cancel(&p).await)),
         Ok(Call::FsIdentity(p)) => fs_identity(&p).map(Reply::FsIdentity),
-        // Protocol 0.3 methods this crabd does not serve yet.
-        Ok(other @ Call::ForwardStats) => {
-            Err(ProtocolError::MethodNotFound(other.method().to_owned()))
-        }
+        Ok(Call::ForwardStats) => Ok(Reply::ForwardStats(forwards.stats())),
         Ok(Call::Tool(call)) => {
             let tool = call.name();
             let res = tools::dispatch(ctx, call).await;
@@ -190,7 +205,11 @@ pub async fn handle_request(ctx: &ToolContext, req: RpcRequest) -> RpcResponse {
     RpcResponse::from_outcome(req.id, outcome)
 }
 
-fn hello(ctx: &ToolContext, p: &HelloParams) -> Result<HelloResult, ProtocolError> {
+fn hello(
+    ctx: &ToolContext,
+    forwards: &ForwardService,
+    p: &HelloParams,
+) -> Result<HelloResult, ProtocolError> {
     if let Err(e) = p.check_version() {
         warn!(error = %e, "hello refused");
         return Err(e);
@@ -202,7 +221,7 @@ fn hello(ctx: &ToolContext, p: &HelloParams) -> Result<HelloResult, ProtocolErro
         tools: TOOL_NAMES.iter().map(|&t| t.to_owned()).collect(),
         default_cwd: ctx.default_cwd.display().to_string(),
         features: hello_features(),
-        forward_ports: Vec::new(),
+        forward_ports: forwards.ports(),
     })
 }
 
@@ -215,7 +234,11 @@ pub fn hello_features() -> Vec<String> {
     } else {
         features::TREE_KILL_PROCESS_GROUP
     };
-    vec![features::PROCESS_OPEN.to_owned(), tree_kill.to_owned()]
+    vec![
+        features::PROCESS_OPEN.to_owned(),
+        features::FORWARD.to_owned(),
+        tree_kill.to_owned(),
+    ]
 }
 
 /// `fs.identity`: `(dev, ino)` of each path, following symlinks like `stat`.
@@ -311,6 +334,8 @@ pub struct Server {
     listener: Listener,
     ctx: Arc<ToolContext>,
     config: ServerConfig,
+    forwards: Arc<ForwardService>,
+    forward_listeners: ForwardListeners,
 }
 
 impl Server {
@@ -327,6 +352,8 @@ impl Server {
                  be at least 1",
             ));
         }
+        // Forward ports first: a port that cannot be bound fails the start.
+        let (forwards, forward_listeners) = ForwardService::bind(config.forwards.clone()).await?;
         let listener = match &config.listen {
             ListenAddr::Unix(path) => Listener::Unix {
                 listener: bind_unix(path)?,
@@ -351,6 +378,8 @@ impl Server {
             listener,
             ctx,
             config,
+            forwards,
+            forward_listeners,
         })
     }
 
@@ -382,8 +411,12 @@ impl Server {
             listener,
             ctx,
             config,
+            forwards,
+            forward_listeners,
         } = self;
-        let handler = tool_handler(Arc::clone(&ctx));
+        let handler = tool_handler(Arc::clone(&ctx), Arc::clone(&forwards));
+        let mut forward_ports = JoinSet::new();
+        forwards.serve_ports(forward_listeners, &mut forward_ports);
         let supervisor = Arc::new(config.supervisor.clone());
         // vsock bridges drop half-close: end tunnels on target EOF (see `crate::tunnel`).
         let tunnel_config = TunnelConfig {
@@ -457,6 +490,7 @@ impl Server {
                 refusals: Arc::clone(&refusals),
                 ctx: Arc::clone(&ctx),
                 supervisor: Arc::clone(&supervisor),
+                forwards: Arc::clone(&forwards),
             };
             match conn {
                 Conn::Unix(s) => conns.spawn(async move {
@@ -474,6 +508,8 @@ impl Server {
 
         info!(connections = conns.len(), "shutting down");
         drop(listener);
+        forward_ports.abort_all();
+        forwards.shutdown();
         let _ = stop_tx.send(true);
         let drained = tokio::time::timeout(config.shutdown_grace, async {
             while conns.join_next().await.is_some() {}
@@ -544,6 +580,8 @@ pub struct ConnConfig {
     /// For `process.open` connections.
     pub ctx: Arc<ToolContext>,
     pub supervisor: Arc<SupervisorConfig>,
+    /// For `forward.listen` / `forward.accept` connections.
+    pub forwards: Arc<ForwardService>,
 }
 
 /// A connection's claim on [`ServerConfig::max_connections`].
@@ -579,6 +617,7 @@ pub async fn serve_stream<S>(
         refusals,
         ctx,
         supervisor,
+        forwards,
     } = cfg;
     debug!(%peer, "connection opened");
     let mut slot = slot;
@@ -644,6 +683,17 @@ pub async fn serve_stream<S>(
     {
         drop(conn_slot);
         supervise::serve_open(stream, req, ctx, &supervisor, &peer).await;
+        return;
+    }
+    if let Ok(Some(payload)) = &first
+        && let Some(req) = forward::as_forward_verb(payload)
+    {
+        drop(conn_slot);
+        if req.method == METHOD_FORWARD_LISTEN {
+            forwards.serve_listen(stream, req, stop, &peer).await;
+        } else {
+            forwards.serve_accept(stream, req, stop, &peer).await;
+        }
         return;
     }
     let (rd, wr) = tokio::io::split(stream);
@@ -718,7 +768,13 @@ async fn serve_frames<R, W>(
         };
         match RpcMessage::from_slice(&payload) {
             Ok(RpcMessage::Request(req))
-                if req.method == METHOD_TUNNEL_OPEN || req.method == METHOD_PROCESS_OPEN =>
+                if [
+                    METHOD_TUNNEL_OPEN,
+                    METHOD_PROCESS_OPEN,
+                    METHOD_FORWARD_LISTEN,
+                    METHOD_FORWARD_ACCEPT,
+                ]
+                .contains(&req.method.as_str()) =>
             {
                 let e = ProtocolError::InvalidRequest(format!(
                     "`{}` must be the first frame of a fresh connection",
