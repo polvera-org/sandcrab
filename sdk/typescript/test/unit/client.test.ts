@@ -166,3 +166,27 @@ test("after a reconnect the snapshot forgets what another server proved", async 
   assert.equal(client.capabilitiesSnapshot("base").isolation.ok, false);
   await until(() => client.capabilitiesSnapshot("base").isolation.reason === 'no self-test has run for template "base"');
 });
+
+test("events: sandboxDestroyed for a destroy and a TTL expiry, shutdown with its grace; a throwing listener breaks nothing", async (t) => {
+  const { server, client } = await setup(t);
+  const a = await client.createSandbox({ template: "base" });
+  const b = await client.createSandbox({ template: "base" });
+  const destroyed: { sandboxId: string; reason: string }[] = [];
+  const shutdowns: { graceMs: number }[] = [];
+  client.on("sandboxDestroyed", () => {
+    throw new Error("a caller's bug");
+  });
+  client.on("sandboxDestroyed", (e) => destroyed.push(e));
+  client.on("shutdown", (e) => shutdowns.push(e));
+  await a.destroy();
+  assert.equal(server.expire(b.id), true);
+  await until(() => destroyed.length === 2);
+  assert.deepEqual(destroyed, [
+    { sandboxId: a.id, reason: "destroyed" },
+    { sandboxId: b.id, reason: "ttl" },
+  ]);
+  assert.deepEqual(await client.listSandboxes(), [], "the connection survived the throwing listener");
+  await server.shutdown(1500);
+  await until(() => shutdowns.length === 1);
+  assert.deepEqual(shutdowns, [{ graceMs: 1500 }]);
+});

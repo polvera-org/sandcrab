@@ -218,6 +218,18 @@ export class FakeServer {
     });
   }
 
+  /** Stops like a server shutting down: `server.shutdown {grace_ms}` on every control connection, then `stop()`. */
+  async shutdown(graceMs = 0): Promise<void> {
+    this.notify("server.shutdown", { grace_ms: graceMs });
+    await new Promise((resolve) => setImmediate(resolve));
+    await this.stop();
+  }
+
+  /** Plays a sandbox whose TTL ran out: it is gone, and `sandbox.destroyed {reason: "ttl"}` is sent. */
+  expire(sandboxId: string): boolean {
+    return this.#destroy(sandboxId, "ttl");
+  }
+
   /** Stops like a server that died: every connection is cut, sandboxes are forgotten. `listen()` restarts it. */
   stop(): Promise<void> {
     return new Promise((resolve) => {
@@ -387,10 +399,10 @@ export class FakeServer {
     );
   }
 
-  #destroy(id: string): boolean {
+  #destroy(id: string, reason: "destroyed" | "ttl" = "destroyed"): boolean {
     if (!this.sandboxes.delete(id)) return false;
     this.#serving.delete(id);
-    this.notify("sandbox.destroyed", { sandbox_id: id, reason: "destroyed" });
+    this.notify("sandbox.destroyed", { sandbox_id: id, reason });
     return true;
   }
 

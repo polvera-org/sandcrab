@@ -11,7 +11,7 @@ export function connect(o: ConnectOptions): Promise<SandcrabClient> {
 }
 
 export { MIN_SERVER_API_VERSION } from "./client.ts";
-export type { ConnectOptions, SandcrabClient } from "./client.ts";
+export type { ConnectOptions, SandboxDestroyedEvent, SandcrabClient, ServerShutdownEvent } from "./client.ts";
 export { AbortedError, ConnectionError, errorName, InvalidSpecError, SandcrabError, ServerError } from "./errors.ts";
 export type { ExecOptions, ExecOutput } from "./exec.ts";
 export type { ForwardSpec } from "./forwards.ts";
