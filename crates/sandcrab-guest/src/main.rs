@@ -6,6 +6,7 @@
 //! crabd relay --tcp <addr> --unix <path>   # TCP -> Unix socket pump (Docker TCP transport)
 //! crabd init        # PID 1 of a microVM (also selected automatically when PID == 1)
 //! crabd supervise   # started by `serve` for each `process.open`; not for humans
+//! crabd probe       # the self-test's in-sandbox half
 //! ```
 //!
 //! Subcommands:
@@ -136,6 +137,7 @@ fn main() -> ExitCode {
     // from `serve`.
     match args.get(1).and_then(|a| a.to_str()) {
         Some("supervise") => return sandcrab_guest::supervise::main(),
+        Some("probe") => return sandcrab_guest::probe::main(&args[2..]),
         _ => {}
     }
     // Before the runtime starts any thread: `no_new_privs` is per thread, inherited by every

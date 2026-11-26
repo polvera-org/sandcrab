@@ -18,6 +18,7 @@
 //! - [`supervise`] — `process.open` / `process.cancel` and `crabd supervise`, the per-program
 //!   supervisor that owns the connection and stops the program's whole tree.
 //! - [`proctree`] — the process tree of a supervisor, read from `/proc`.
+//! - [`probe`] — `crabd probe` (the self-test's in-sandbox half; not implemented yet).
 //! - [`vsock`] — AF_VSOCK listener (Linux only).
 //! - [`init`] — `crabd init`, PID 1 of a microVM (control port, mounts, workspace export).
 
@@ -27,6 +28,7 @@ pub mod context;
 pub mod hardening;
 pub mod init;
 pub mod preauth;
+pub mod probe;
 pub mod proctree;
 pub mod relay;
 pub mod server;
