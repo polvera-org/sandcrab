@@ -55,8 +55,8 @@ Steps side by side run in parallel. Arrows are real dependencies.
   container; a host daemon cannot dial them. So a forwarded connection travels guest → `crabd` → server → SDK,
   and the SDK dials the port or socket the client itself named. The server never opens a host socket on a client's
   say-so. This replaces the earlier "Unix sockets only, the adopter adds listeners" recommendation.
-- **Sandboxes outlive the connection.** Reaping after a crash is the adopter's call (`reap`), so a disconnect
-  destroys nothing; TTL and labels do. This replaces "sweep on client disconnect".
+- **Sandboxes outlive the connection.** Reaping after a client crash is the adopter's call (`reap`), so a
+  disconnect destroys nothing; TTL and labels do. They do not outlive the server (see the review section).
 - **No client binary for check steps.** With a Sandcrab launcher, a sandboxed step is one exec with folders and
   one endpoint; the adopter's step-runtime seam becomes a pass-through.
 - **Bring your own image.** The sandbox must contain what the adopter's processes expect (its agent CLIs, git,
@@ -95,6 +95,33 @@ These go into the adopter-side flow. None blocks Sandcrab work; each shapes the 
    is the adapter's job. Sandcrab's part is a cheap warm exec, which the e2e measures.
 8. **File ownership.** During the transition both launchers write the same volume, so a sandbox runs as the uid
    and gid the local launcher would have used (`user` on spawn exists today).
+
+## Changes after the adopter-side review (2026-11-26)
+
+A review from the adopter's side (kept private, it names the adopter) found the architecture sound and the plan
+not ready to dispatch. Taken, with the owner's MVP direction (one to three users per host, sane defaults, no
+enterprise design):
+
+- **The flow now matches the design**: colliding steps are serialized, the guest init options have a step, the
+  three largest steps are split.
+- **A walking skeleton comes first** (`ts-contract`): the process contract runs against a real server as soon as
+  process streams exist, before forwards, mounts and the rest.
+- **Simpler streams**: one connection per process carries records (stdin, stdout, stderr, exit) end to end. No
+  second connection for stderr, no separate wait call, no unary exec with base64. Raw bytes only for forwards.
+- **Simpler lifetime**: labels live in the server's memory. A new server removes what its predecessor left. A
+  server restart ends every run, on both backends; clients drain before an upgrade. This replaces "labels stored
+  with the backend object".
+- **Simpler mounts**: allowed roots, same path on both sides, no path map. A containerised client binds host
+  directories at the same absolute path. No rule about nesting across sandboxes.
+- **Linux**: the server runs as root (Docker access is root already). The client mounts the socket's directory,
+  not the socket file, so a server restart does not strand it.
+- **Mac**: the client starts the server as a child process. Templates are built on the Mac with Docker for now.
+- **Allowed uids default to the server's own uid**; any other uid stays explicit.
+- **SDK rules**: `unavailable` only when nothing ran; a pre-aborted signal starts nothing; live output is never
+  held back by a tail cap; writes are never dropped mid-stream; the SDK checks the server's version and features.
+- **Cut from the server API and the TypeScript SDK until someone needs them**: file upload / download, the LLM
+  tool call, template list / verify, PTY and signals on the new process call.
+- **Exit test**: the adopter's own suite through a Sandcrab-backed launcher, on Docker and on libkrun.
 
 ## Risks & open questions for you
 
