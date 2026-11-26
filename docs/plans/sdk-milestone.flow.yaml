@@ -105,7 +105,7 @@ steps:
     title: "sandcrab-core: forwards, exec /tmp, pids / nofile on SandboxConfig; ad-hoc host-dir mounts (ro / rw) at the client's own path under allowed roots, opened beneath a held root fd, no symlinks, no nesting inside one sandbox; labels in the manager, list by label and creation time, destroy by label with a confirmed-empty answer; Firecracker refuses forwards and ad-hoc mounts explicitly; fix the struct literals in every backend crate and the bench"
     depends_on: [protocol-03]
     artifacts: [crates/sandcrab-core/src, crates/sandcrab-backend-firecracker/src]
-    status: doing
+    status: done
 
   - id: core-streams
     phase: implement
@@ -113,7 +113,7 @@ steps:
     title: "sandcrab-core host side: process.open client with records and backpressure, cancel; forward listen / accept with a target resolver; FakeBackend coverage"
     depends_on: [core-config]
     artifacts: [crates/sandcrab-core/src/process.rs, crates/sandcrab-core/src/forward.rs, crates/sandcrab-core/src/client.rs]
-    status: todo
+    status: doing
 
   - id: docker-backend
     phase: implement
