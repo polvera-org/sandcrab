@@ -34,9 +34,13 @@ use crate::listener::failure;
 use crate::wire::{frame, read_frame, write_frame};
 use crate::{MAX_MEMORY_MB, MAX_NOFILE, MAX_PIDS, MAX_REQUESTS_IN_FLIGHT, MAX_VCPU, Peer, Shared};
 
-/// Features this server serves now ([`api::features`]). `selftest` comes with the step that
-/// builds it. Process connections are part of API 1.0 and need no feature.
-pub(crate) const FEATURES: &[&str] = &[api::features::FORWARDS, api::features::MOUNTS];
+/// Features this server serves now ([`api::features`]). Process connections are part of API
+/// 1.0 and need no feature.
+pub(crate) const FEATURES: &[&str] = &[
+    api::features::FORWARDS,
+    api::features::MOUNTS,
+    api::features::SELFTEST,
+];
 
 /// Serve a control connection whose first frame was `hello`.
 pub(crate) async fn run(shared: Arc<Shared>, peer: Peer, stream: UnixStream, hello: RpcRequest) {
@@ -179,8 +183,8 @@ async fn call(
             "`server.hello` was already answered on this connection".into(),
         ))),
         api::METHOD_SERVER_CAPABILITIES => {
-            let _: CapabilitiesParams = decode_params(params)?;
-            ok(&capabilities(shared))
+            let p: CapabilitiesParams = decode_params(params)?;
+            ok(&capabilities(shared, p.template.as_deref()))
         }
         api::METHOD_SANDBOX_CREATE => {
             ok(&create(shared, peer, control, decode_params(params)?).await?)
@@ -216,9 +220,9 @@ async fn call(
             shared.hub.reject(&p.conn_id, peer.uid);
             ok(&Empty {})
         }
-        api::METHOD_SERVER_SELFTEST => Err(ApiError::Protocol(ProtocolError::Unimplemented(
-            format!("`{method}` is not implemented by this server yet"),
-        ))),
+        api::METHOD_SERVER_SELFTEST => {
+            ok(&crate::selftest::call(shared, decode_params(params)?).await?)
+        }
         other => Err(ApiError::Protocol(ProtocolError::MethodNotFound(
             other.to_owned(),
         ))),
@@ -365,7 +369,8 @@ fn to_info(
 // Methods
 // ---------------------------------------------------------------------------------------------
 
-fn capabilities(shared: &Shared) -> Capabilities {
+/// `template`: whose last self-test to include.
+fn capabilities(shared: &Shared, template: Option<&str>) -> Capabilities {
     let caps = shared.sandcrab.backend_capabilities();
     // The guest names its tree-kill mode in `hello`. Until the self-test reports it, a live
     // sandbox that fell back to the process group is the evidence.
@@ -396,7 +401,7 @@ fn capabilities(shared: &Shared) -> Capabilities {
         .to_owned(),
         mount_identity_checked: caps.mount_identity_checked,
         max_mounts: shared.limits.max_mounts,
-        selftest: None,
+        selftest: template.and_then(|t| shared.selftests.summary(t)),
     }
 }
 

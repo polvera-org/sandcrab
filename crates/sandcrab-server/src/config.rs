@@ -132,6 +132,10 @@ pub struct ServerConfig {
     /// May a client ask for uid or gid 0 in a sandbox (also as the default user of a root
     /// peer).
     pub allow_root_user: bool,
+    /// Templates whose self-test runs once at start, in the background. Default: none. A
+    /// failure does not stop the server; `server.capabilities` then says why isolation is
+    /// not proven.
+    pub selftest_on_start: Vec<String>,
     pub limits: LimitsConfig,
     /// No roots: every mount is refused.
     pub mount_roots: Vec<MountRootConfig>,
@@ -149,6 +153,7 @@ impl Default for ServerConfig {
             templates_dirs: Vec::new(),
             default_template: None,
             allow_root_user: false,
+            selftest_on_start: Vec::new(),
             limits: LimitsConfig::default(),
             mount_roots: Vec::new(),
         }
@@ -238,6 +243,11 @@ impl ServerConfig {
         if self.default_template.as_deref() == Some("") {
             return Err(ServerError::Config("`default_template` is empty".into()));
         }
+        if self.selftest_on_start.iter().any(String::is_empty) {
+            return Err(ServerError::Config(
+                "`selftest_on_start` names an empty template".into(),
+            ));
+        }
         Ok(())
     }
 }
@@ -280,6 +290,7 @@ state_dir = "/var/lib/sandcrab"
 templates_dirs = ["/etc/sandcrab/templates"]
 default_template = "base"
 allow_root_user = false
+selftest_on_start = ["base"]
 
 [limits]
 max_sandboxes = 128
@@ -304,6 +315,7 @@ mode = "ro"
         assert_eq!(c.limits.max_ttl_secs, DEFAULT_MAX_TTL_SECS);
         assert_eq!(c.mount_roots[1].mode, MountMode::ReadOnly);
         assert_eq!(c.default_template.as_deref(), Some("base"));
+        assert_eq!(c.selftest_on_start, ["base"]);
     }
 
     #[test]
@@ -315,6 +327,7 @@ mode = "ro"
         assert_eq!(c.limits, LimitsConfig::default());
         assert_eq!(c.limits.max_sandboxes, 64);
         assert!(c.mount_roots.is_empty() && !c.allow_root_user);
+        assert!(c.selftest_on_start.is_empty());
     }
 
     #[test]
@@ -345,6 +358,7 @@ mode = "ro"
             "[limits]\ndefault_ttl_secs = 100000",
             "[[mount_roots]]\npath = \"rel\"",
             "default_template = \"\"",
+            "selftest_on_start = [\"\"]",
         ] {
             let c = ServerConfig::from_toml(&format!("{ok}{extra}")).unwrap();
             assert!(c.validate().is_err(), "{extra}");

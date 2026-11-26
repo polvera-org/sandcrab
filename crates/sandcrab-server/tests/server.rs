@@ -20,7 +20,7 @@ async fn hello_and_the_first_frame() {
     let r = c.ok("server.hello", hello("1.0")).await;
     assert_eq!(r["api_version"], "1.0");
     assert_eq!(r["backend"], "docker");
-    assert_eq!(r["features"], json!(["forwards", "mounts"]));
+    assert_eq!(r["features"], json!(["forwards", "mounts", "selftest"]));
     assert_eq!(r["limits"]["max_sandboxes"], 64);
     assert_eq!(r["limits"]["max_mounts"], 16);
     assert_eq!(r["limits"]["default_ttl_secs"], 1800);
@@ -311,9 +311,12 @@ async fn every_sandbox_call() {
     assert_eq!(caps["max_mounts"], 16);
     assert_eq!(caps["selftest"], Value::Null);
 
-    // Not yet served on this step.
-    assert_eq!(code(&c.err("server.selftest", json!({})).await), -32007);
-    for m in ["process.cancel", "forward.serve", "forward.reject"] {
+    for m in [
+        "server.selftest",
+        "process.cancel",
+        "forward.serve",
+        "forward.reject",
+    ] {
         assert_eq!(code(&c.err(m, json!({})).await), -32602, "{m}");
     }
 }
