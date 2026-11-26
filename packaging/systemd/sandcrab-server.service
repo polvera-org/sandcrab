@@ -20,6 +20,9 @@ Restart=on-failure
 RestartSec=2
 # The stop cancels processes (5 s grace) and destroys every sandbox.
 TimeoutStopSec=60
+# Connections and forwarded connections take two descriptors each; the server sizes its caps
+# from this limit (1024 connections, 4096 forwarded connections at 65536).
+LimitNOFILE=65536
 
 # State root: the backend's run directories and the host-local template pins
 # (/var/lib/sandcrab/template-pins). Build and pin templates with the same SANDCRAB_HOME.

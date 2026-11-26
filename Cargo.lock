@@ -1804,6 +1804,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "getrandom 0.4.3",
+ "rustix",
  "sandcrab-core",
  "sandcrab-sdk",
  "serde",

@@ -15,14 +15,17 @@
 
 use std::collections::HashMap;
 use std::io;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use sandcrab_sdk::SandboxId;
 use sandcrab_sdk::protocol::api::{self, ForwardIncoming};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::UnixStream;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 
 use crate::wire::frame;
 
@@ -53,10 +56,47 @@ struct State {
     pending: HashMap<String, Pending>,
 }
 
-#[derive(Default)]
 pub(crate) struct Hub {
     next: AtomicU64,
     state: Mutex<State>,
+    /// Forwarded connections from announcement to the relay's end, all sandboxes.
+    forwarded: Arc<Semaphore>,
+    max_forwarded: u32,
+}
+
+/// An attached forwarded connection; it holds its place under the server-wide cap until the
+/// relay drops it.
+pub(crate) struct Forwarded {
+    stream: UnixStream,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl AsyncRead for Forwarded {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for Forwarded {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.stream).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_shutdown(cx)
+    }
 }
 
 /// Unregisters a control connection when dropped (also when its task is aborted).
@@ -91,6 +131,16 @@ fn conn_id() -> io::Result<String> {
 }
 
 impl Hub {
+    /// A hub that relays at most `max_forwarded` forwarded connections at once.
+    pub(crate) fn new(max_forwarded: u32) -> Self {
+        Self {
+            next: AtomicU64::new(0),
+            state: Mutex::default(),
+            forwarded: Arc::new(Semaphore::new(max_forwarded as usize)),
+            max_forwarded,
+        }
+    }
+
     fn lock(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -160,8 +210,13 @@ impl Hub {
         &self,
         sandbox: SandboxId,
         guest_port: u16,
-    ) -> io::Result<UnixStream> {
+    ) -> io::Result<Forwarded> {
         let refuse = |why: &str| io::Error::new(io::ErrorKind::ConnectionRefused, why.to_owned());
+        let Ok(permit) = Arc::clone(&self.forwarded).try_acquire_owned() else {
+            tracing::warn!(%sandbox, guest_port, limit = self.max_forwarded,
+                "forwarded connection refused: too many forwarded connections");
+            return Err(refuse("too many forwarded connections on this server"));
+        };
         let conn_id = conn_id()?;
         let (tx, rx) = oneshot::channel();
         let control = {
@@ -205,7 +260,10 @@ impl Hub {
                 .map_err(|_| refuse("the client rejected the connection or went away"))
         };
         match tokio::time::timeout(ATTACH_TIMEOUT, wait).await {
-            Ok(r) => r,
+            Ok(r) => r.map(|stream| Forwarded {
+                stream,
+                _permit: permit,
+            }),
             Err(_) => {
                 tracing::debug!(%sandbox, guest_port, "forwarded connection refused: not attached in time");
                 Err(io::Error::new(
@@ -230,5 +288,51 @@ impl Hub {
     /// `forward.reject` from `uid`: refuse the announced connection now.
     pub(crate) fn reject(&self, conn_id: &str, uid: u32) {
         drop(self.claim(conn_id, uid));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// M3: forwarded connections count against a server-wide cap from announcement to the
+    /// relay's end; one past it is refused at once, and a place frees when a relay ends.
+    #[tokio::test]
+    async fn forwarded_connections_are_capped_server_wide() {
+        let hub = Arc::new(Hub::new(1));
+        let (tx, mut rx) = mpsc::channel(8);
+        let control = hub.register(1000, tx);
+        let sandbox = SandboxId::new();
+        hub.serve(sandbox, control.id);
+
+        let first = tokio::spawn({
+            let hub = Arc::clone(&hub);
+            async move { hub.incoming(sandbox, 80).await }
+        });
+        let note: serde_json::Value = {
+            let f = rx.recv().await.unwrap();
+            serde_json::from_slice(&f[4..]).unwrap()
+        };
+        let conn_id = note["params"]["conn_id"].as_str().unwrap().to_owned();
+
+        let e = hub.incoming(sandbox, 80).await.err().unwrap();
+        assert!(e.to_string().contains("too many forwarded"), "{e}");
+
+        let (a, _b) = UnixStream::pair().unwrap();
+        hub.claim(&conn_id, 1000).unwrap().send(a).unwrap();
+        let relay = first.await.unwrap().unwrap();
+        let e = hub.incoming(sandbox, 80).await.err().unwrap();
+        assert!(
+            e.to_string().contains("too many forwarded"),
+            "still held: {e}"
+        );
+        drop(relay);
+        // The place is free again: this one is announced (and then times out unattached).
+        let again = tokio::spawn({
+            let hub = Arc::clone(&hub);
+            async move { hub.incoming(sandbox, 80).await }
+        });
+        assert!(rx.recv().await.is_some(), "announced");
+        again.abort();
     }
 }

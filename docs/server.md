@@ -44,6 +44,13 @@ Docker backend. **Add every read-write mount root to `ReadWritePaths=`**: with
 `ProtectSystem=strict` the server cannot write there otherwise, and the self-test makes its
 scratch directory in one.
 
+The server raises its soft `RLIMIT_NOFILE` to the hard limit (at most 65536; the unit sets
+`LimitNOFILE=65536`) and sizes its caps from it, so a busy server refuses with
+`LIMIT_EXCEEDED` instead of running out of descriptors: connections of all kinds (at most 1024,
+a quarter of the limit, the `max_connections` in `server.hello`) and forwarded connections
+across all sandboxes (at most 4096, an eighth of the limit; one past the cap is refused, so the
+program in the sandbox sees its connection closed).
+
 ### Config keys
 
 `sandcrab server --config FILE` reads TOML; flags override the file. Unknown keys are refused.
