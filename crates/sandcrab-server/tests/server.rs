@@ -2,187 +2,15 @@
 //! frame, `server.hello`, every sandbox call, mounts, bad frames, limits, shutdown and the
 //! lifeline. A raw client speaks the frames, so nothing here depends on an SDK.
 
+mod common;
+
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
-use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use common::*;
 use sandcrab_core::testing::{FakeBackend, FakeEvent};
-use sandcrab_sdk::Sandcrab;
-use sandcrab_server::{BackendName, MountRootConfig, Server, ServerConfig, ServerError};
+use sandcrab_server::{BackendName, MountRootConfig, ServerError};
 use serde_json::{Value, json};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::UnixStream;
-use tokio::sync::oneshot;
-use tokio::task::JoinHandle;
-
-fn me() -> u32 {
-    sandcrab_sdk::core::private_dir::current_uid()
-}
-
-/// The effective gid, as a new file in a plain temporary directory shows it (Linux).
-fn my_gid() -> u32 {
-    let f = tempfile::NamedTempFile::new().unwrap();
-    f.as_file().metadata().unwrap().gid()
-}
-
-fn write_template(dir: &Path) {
-    let d = dir.join("base");
-    std::fs::create_dir_all(&d).unwrap();
-    std::fs::write(d.join("Dockerfile"), "FROM scratch\n").unwrap();
-    std::fs::write(
-        d.join("sandcrab.toml"),
-        "[template]\nname = \"base\"\nversion = \"0.1.0\"\nimage = \"sandcrab/base:0.1.0\"\n\
-         [resources]\nvcpu = 1\nmemory_mb = 512\ndisk_mb = 2048\n",
-    )
-    .unwrap();
-}
-
-struct Harness {
-    tmp: tempfile::TempDir,
-    socket: PathBuf,
-    backend: FakeBackend,
-    stop: Option<oneshot::Sender<()>>,
-    task: Option<JoinHandle<Result<(), ServerError>>>,
-}
-
-fn base_config(tmp: &Path) -> ServerConfig {
-    write_template(&tmp.join("templates"));
-    ServerConfig {
-        socket: Some(tmp.join("sock/server.sock")),
-        backend: Some(BackendName::Docker),
-        state_dir: Some(tmp.join("state")),
-        templates_dirs: vec![tmp.join("templates")],
-        ..ServerConfig::default()
-    }
-}
-
-async fn try_start(
-    config: ServerConfig,
-    backend: &FakeBackend,
-) -> Result<(Server, oneshot::Sender<()>, oneshot::Receiver<()>), ServerError> {
-    let builder = Sandcrab::builder()
-        .backend(backend.clone())
-        .ready_timeout(Duration::from_secs(2));
-    let server = Server::start(config, builder, Vec::new()).await?;
-    let (tx, rx) = oneshot::channel();
-    Ok((server, tx, rx))
-}
-
-impl Harness {
-    async fn new(edit: impl FnOnce(&mut ServerConfig, &Path)) -> Self {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut config = base_config(tmp.path());
-        edit(&mut config, tmp.path());
-        let socket = config.socket.clone().unwrap();
-        let backend = FakeBackend::shared_kernel();
-        let (server, tx, rx) = try_start(config, &backend).await.unwrap();
-        let task = tokio::spawn(server.run(async move {
-            let _ = rx.await;
-        }));
-        Self {
-            tmp,
-            socket,
-            backend,
-            stop: Some(tx),
-            task: Some(task),
-        }
-    }
-
-    async fn client(&self) -> Client {
-        let mut c = Client::connect(&self.socket).await;
-        let r = c.call("server.hello", hello("1.0")).await;
-        assert!(r.get("result").is_some(), "{r}");
-        c
-    }
-
-    async fn stop(&mut self) -> Result<(), ServerError> {
-        let _ = self.stop.take().unwrap().send(());
-        self.task.take().unwrap().await.unwrap()
-    }
-
-    fn destroyed(&self) -> usize {
-        self.backend
-            .events()
-            .iter()
-            .filter(|e| matches!(e, FakeEvent::Destroyed(_)))
-            .count()
-    }
-}
-
-fn hello(version: &str) -> Value {
-    json!({"client": "test", "api_version": version})
-}
-
-struct Client {
-    s: UnixStream,
-    next: i64,
-}
-
-impl Client {
-    async fn connect(path: &Path) -> Self {
-        Self {
-            s: UnixStream::connect(path).await.unwrap(),
-            next: 1,
-        }
-    }
-
-    async fn send(&mut self, v: &Value) {
-        let body = serde_json::to_vec(v).unwrap();
-        self.raw(&u32::try_from(body.len()).unwrap().to_be_bytes())
-            .await;
-        self.raw(&body).await;
-    }
-
-    async fn raw(&mut self, bytes: &[u8]) {
-        self.s.write_all(bytes).await.unwrap();
-    }
-
-    /// The next frame, or `None` when the server closed.
-    async fn recv(&mut self) -> Option<Value> {
-        let read = async {
-            let mut h = [0u8; 4];
-            self.s.read_exact(&mut h).await.ok()?;
-            let mut body = vec![0u8; u32::from_be_bytes(h) as usize];
-            self.s.read_exact(&mut body).await.ok()?;
-            Some(serde_json::from_slice(&body).unwrap())
-        };
-        tokio::time::timeout(Duration::from_secs(10), read)
-            .await
-            .expect("an answer or a close in time")
-    }
-
-    async fn call(&mut self, method: &str, params: Value) -> Value {
-        let id = self.next;
-        self.next += 1;
-        self.send(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}))
-            .await;
-        let r = self.recv().await.expect("an answer");
-        assert_eq!(r["id"], json!(id), "{r}");
-        r
-    }
-
-    async fn ok(&mut self, method: &str, params: Value) -> Value {
-        let r = self.call(method, params).await;
-        r.get("result")
-            .cloned()
-            .unwrap_or_else(|| panic!("{method}: {r}"))
-    }
-
-    async fn err(&mut self, method: &str, params: Value) -> Value {
-        let r = self.call(method, params).await;
-        r.get("error")
-            .cloned()
-            .unwrap_or_else(|| panic!("{method} should fail: {r}"))
-    }
-
-    async fn closed(&mut self) -> bool {
-        self.recv().await.is_none()
-    }
-}
-
-fn code(e: &Value) -> i64 {
-    e["code"].as_i64().unwrap()
-}
 
 #[tokio::test]
 async fn hello_and_the_first_frame() {
@@ -192,7 +20,7 @@ async fn hello_and_the_first_frame() {
     let r = c.ok("server.hello", hello("1.0")).await;
     assert_eq!(r["api_version"], "1.0");
     assert_eq!(r["backend"], "docker");
-    assert_eq!(r["features"], json!(["mounts"]));
+    assert_eq!(r["features"], json!(["forwards", "mounts"]));
     assert_eq!(r["limits"]["max_sandboxes"], 64);
     assert_eq!(r["limits"]["max_mounts"], 16);
     assert_eq!(r["limits"]["default_ttl_secs"], 1800);
@@ -221,9 +49,10 @@ async fn hello_and_the_first_frame() {
     let mut c = Client::connect(&h.socket).await;
     assert_eq!(code(&c.err("sandbox.list", json!({})).await), -32600);
     assert!(c.closed().await);
+    // Process and forward connections with bad params: one error, then close.
     for m in ["process.spawn", "forward.attach"] {
         let mut c = Client::connect(&h.socket).await;
-        assert_eq!(code(&c.err(m, json!({})).await), -32007, "{m}");
+        assert_eq!(code(&c.err(m, json!({})).await), -32602, "{m}");
         assert!(c.closed().await);
     }
     let mut c = Client::connect(&h.socket).await;
@@ -483,13 +312,9 @@ async fn every_sandbox_call() {
     assert_eq!(caps["selftest"], Value::Null);
 
     // Not yet served on this step.
-    for m in [
-        "process.cancel",
-        "forward.serve",
-        "forward.reject",
-        "server.selftest",
-    ] {
-        assert_eq!(code(&c.err(m, json!({})).await), -32007, "{m}");
+    assert_eq!(code(&c.err("server.selftest", json!({})).await), -32007);
+    for m in ["process.cancel", "forward.serve", "forward.reject"] {
+        assert_eq!(code(&c.err(m, json!({})).await), -32602, "{m}");
     }
 }
 
@@ -714,7 +539,8 @@ async fn disconnect_keeps_sandboxes_and_shutdown_destroys_them() {
     h.stop().await.unwrap();
     assert_eq!(h.destroyed(), 2);
     assert!(!h.socket.exists(), "the socket is removed");
-    // The open connection is gone with the server.
+    // The open connection was told, then closed with the server.
+    assert_eq!(c.recv().await.unwrap()["method"], "server.shutdown");
     assert!(c.closed().await);
 }
 

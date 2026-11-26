@@ -11,11 +11,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+use std::time::Duration;
+
+use sandcrab_sdk::protocol::api;
 use sandcrab_sdk::{MountPolicy, MountRoot, SandcrabBuilder};
 use tokio::task::JoinSet;
 
 use crate::config::resolve_group;
 use crate::control::core_mode;
+use crate::process::SHUTDOWN_GRACE_MS;
 use crate::{MAX_CONNECTIONS, Server, ServerConfig, ServerError, Shared, listener};
 
 pub(crate) async fn start(
@@ -126,7 +130,7 @@ pub(crate) async fn run(
                 Ok((stream, _)) => {
                     if conns.len() >= MAX_CONNECTIONS as usize {
                         tracing::warn!(limit = MAX_CONNECTIONS, "connection refused: too many connections");
-                        drop(stream);
+                        tokio::spawn(listener::over_limit(stream, MAX_CONNECTIONS));
                         continue;
                     }
                     conns.spawn(listener::connection(Arc::clone(&shared), stream));
@@ -139,11 +143,25 @@ pub(crate) async fn run(
         }
     }
 
-    tracing::info!("sandcrab server stopping: destroying every sandbox");
+    tracing::info!("sandcrab server stopping: cancelling processes, destroying every sandbox");
     shared.shutting_down.store(true, Ordering::SeqCst);
     drop(listener);
+    shared.hub.notify(
+        None,
+        api::NOTIFY_SERVER_SHUTDOWN,
+        &api::ServerShutdown {
+            grace_ms: SHUTDOWN_GRACE_MS,
+        },
+    );
+    // Cancels answer when the trees are gone; then give the relays a moment to pass the
+    // `EXIT` records on before the connections are cut.
+    let bound = Duration::from_millis(SHUTDOWN_GRACE_MS) + Duration::from_secs(2);
+    shared.processes.cancel_all(SHUTDOWN_GRACE_MS, bound).await;
+    shared.processes.drained(Duration::from_secs(1)).await;
     let result = shared.sandcrab.shutdown().await;
     conns.abort_all();
+    // Their writers end and close the control connections.
+    shared.hub.clear();
     socket.remove();
     result.map_err(ServerError::from)
 }
