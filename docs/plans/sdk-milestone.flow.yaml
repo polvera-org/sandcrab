@@ -230,7 +230,7 @@ steps:
     agent: nova
     title: "Pilot in the adopter's repository (its own branch and worktree): a Sandcrab-backed launcher passes the adopter's launcher conformance suite on Docker and on libkrun, then a sandboxed check step and one agent run go through it. The milestone's exit test"
     depends_on: [live-linux, live-mac, adopter-flow]
-    status: todo
+    status: doing
 
   - id: docs
     phase: document
