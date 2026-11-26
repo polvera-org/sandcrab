@@ -9,6 +9,7 @@ members = [
     "crates/sandcrab-backend-firecracker",
     "crates/sandcrab-backend-libkrun",
     "crates/sandcrab-sdk",
+    "crates/sandcrab-server",
     "crates/sandcrab-cli",
     "crates/sandcrab-agent",
     "crates/sandcrab-bench",
@@ -31,6 +32,7 @@ sandcrab-rootfs = { path = "crates/sandcrab-rootfs" }
 sandcrab-backend-firecracker = { path = "crates/sandcrab-backend-firecracker" }
 sandcrab-backend-libkrun = { path = "crates/sandcrab-backend-libkrun" }
 sandcrab-sdk = { path = "crates/sandcrab-sdk" }
+sandcrab-server = { path = "crates/sandcrab-server", default-features = false }
 
 # Async & networking
 tokio = { version = "1", features = ["full"] }
