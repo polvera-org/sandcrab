@@ -150,6 +150,24 @@ async fn refuse(mut stream: UnixStream, id: Option<RequestId>, err: ApiError) {
     let _ = write_frame(&mut stream, &frame(&failure(id, &err))).await;
 }
 
+/// Answer one frame before the peer's first frame was read, then close. The peer is likely
+/// writing its first frame at this moment: a close right after the answer would turn that
+/// write into `EPIPE` and the peer would never read the answer. So the server half-closes and
+/// discards what arrives until the peer closes, at most [`FIRST_FRAME_TIMEOUT`].
+async fn refuse_early(mut stream: UnixStream, err: ApiError) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    if write_frame(&mut stream, &frame(&failure(None, &err)))
+        .await
+        .is_err()
+    {
+        return;
+    }
+    let _ = stream.shutdown().await;
+    let mut buf = [0u8; 4096];
+    let drain = async { while matches!(stream.read(&mut buf).await, Ok(n) if n > 0) {} };
+    let _ = tokio::time::timeout(FIRST_FRAME_TIMEOUT, drain).await;
+}
+
 /// Over the connection limit: one `LIMIT_EXCEEDED` frame, then close. Bounded, so a peer
 /// that does not read cannot hold the task.
 pub(crate) async fn over_limit(stream: UnixStream, limit: u32) {
@@ -157,7 +175,7 @@ pub(crate) async fn over_limit(stream: UnixStream, limit: u32) {
         what: "connections".into(),
         limit: u64::from(limit),
     });
-    let _ = tokio::time::timeout(Duration::from_secs(1), refuse(stream, None, err)).await;
+    let _ = tokio::time::timeout(Duration::from_secs(1), refuse_early(stream, err)).await;
 }
 
 /// A connection whose first frame was `forward.attach`: claim the announced connection,
@@ -194,7 +212,7 @@ pub(crate) async fn connection(shared: Arc<Shared>, mut stream: UnixStream) {
     };
     if !peer.admitted(&shared.allow_uids) {
         tracing::info!(uid = peer.uid, "connection refused: uid not allowed");
-        return refuse(stream, None, ApiError::Unauthorized).await;
+        return refuse_early(stream, ApiError::Unauthorized).await;
     }
     let payload = match tokio::time::timeout(FIRST_FRAME_TIMEOUT, read_frame(&mut stream)).await {
         Err(_) => {

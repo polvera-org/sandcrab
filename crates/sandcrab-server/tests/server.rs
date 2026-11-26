@@ -90,6 +90,20 @@ async fn a_peer_outside_the_allow_list_is_refused_even_on_an_open_socket() {
     assert_eq!(r["error"]["data"], json!({}));
     assert_eq!(r["id"], Value::Null);
     assert!(c.closed().await);
+
+    // A client that writes its hello after the answer was sent (as an SDK whose connect
+    // callback runs late does) still reads it: the server does not close under that write,
+    // which would fail it with EPIPE and lose the answer.
+    let mut c = Client::connect(&h.socket).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    c.send(&json!({"jsonrpc": "2.0", "id": 0, "method": "server.hello", "params": hello("1.0")}))
+        .await;
+    let r = c
+        .recv()
+        .await
+        .expect("one UNAUTHORIZED frame after a late hello");
+    assert_eq!(code(&r["error"]), -32008);
+    assert!(c.closed().await);
 }
 
 #[tokio::test]
