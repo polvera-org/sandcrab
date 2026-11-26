@@ -899,6 +899,7 @@ mod tests {
     fn fake_sandcrab(dir: &std::path::Path) -> sandcrab_sdk::Sandcrab {
         let t = dir.join("templates/base");
         std::fs::create_dir_all(&t).unwrap();
+        std::fs::write(t.join("Dockerfile"), "FROM scratch\n").unwrap();
         std::fs::write(
             t.join("sandcrab.toml"),
             "[template]\nname = \"base\"\nversion = \"0.1.0\"\nimage = \"sandcrab/base:0.1.0\"\n\
