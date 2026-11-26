@@ -223,7 +223,7 @@ steps:
     agent: nova
     title: "Live on the Mac (libkrun): server as a child of the client process, identity paths incl. one under a symlinked temp root, a folder edited from the host mid-run, forwards over vsock, a line-duplex process, guest clock after a host sleep, self-test green"
     depends_on: [ts-e2e]
-    status: doing
+    status: done
 
   - id: adopter-pilot
     phase: verify
