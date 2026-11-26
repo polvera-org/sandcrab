@@ -246,6 +246,13 @@ pub struct HelloResult {
     pub tools: Vec<String>,
     /// Default working directory for relative paths and commands.
     pub default_cwd: String,
+    /// What this daemon can do beyond the tools (see [`crate::features`]). Empty from a
+    /// `crabd` before 0.3.
+    #[serde(default)]
+    pub features: Vec<String>,
+    /// Loopback ports this daemon forwards (`--forward-port`). Empty from a `crabd` before 0.3.
+    #[serde(default)]
+    pub forward_ports: Vec<u16>,
 }
 
 /// Result of `ping`.

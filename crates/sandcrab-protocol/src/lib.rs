@@ -13,9 +13,12 @@
 //! <- {"jsonrpc":"2.0","id":2,"error":{"code":-32004,"message":"not found: ...","data":{...}}}
 //! ```
 //!
-//! `method` is a tool name ([`TOOL_NAMES`]) or [`METHOD_HELLO`] / [`METHOD_PING`]; the
-//! connection-level verbs [`METHOD_AUTH`] ([`auth`]) and [`METHOD_TUNNEL_OPEN`] ([`tunnel`])
-//! may only open a connection.
+//! `method` is a tool name ([`TOOL_NAMES`]), [`METHOD_HELLO`] / [`METHOD_PING`], or one of
+//! the non-tool methods [`METHOD_PROCESS_CANCEL`], [`METHOD_FS_IDENTITY`] and
+//! [`METHOD_FORWARD_STATS`]. The connection-level verbs [`METHOD_AUTH`] ([`auth`]),
+//! [`METHOD_TUNNEL_OPEN`] ([`tunnel`]), [`METHOD_PROCESS_OPEN`] ([`process`]) and
+//! [`METHOD_FORWARD_LISTEN`] / [`METHOD_FORWARD_ACCEPT`] ([`forward`]) may only open a
+//! connection. Process and forward connections then carry [`record`]s.
 //! Typed layers: [`Call`] / [`Reply`] (all methods), [`ToolCall`] / [`ToolResult`] (tools).
 //!
 //! # Host flow
@@ -41,9 +44,12 @@
 
 pub mod auth;
 mod error;
+pub mod forward;
 mod framing;
 pub mod init;
 mod params;
+pub mod process;
+pub mod record;
 mod results;
 mod rpc;
 mod schema;
@@ -52,26 +58,56 @@ pub mod tunnel;
 
 pub use auth::{AUTH_TOKEN_BYTES, AUTH_TOKEN_HEX_LEN, AuthAck, AuthParams, AuthToken, METHOD_AUTH};
 pub use error::{ProtocolError, RpcError, codes};
+pub use forward::{
+    ForwardAcceptAck, ForwardAcceptParams, ForwardIncoming, ForwardListenAck, ForwardListenParams,
+    ForwardPortStats, ForwardRefused, ForwardRejectParams, ForwardStatsParams, ForwardStatsResult,
+    METHOD_FORWARD_ACCEPT, METHOD_FORWARD_INCOMING, METHOD_FORWARD_LISTEN, METHOD_FORWARD_REJECT,
+    METHOD_FORWARD_STATS,
+};
 pub use framing::{
     FrameDecoder, FrameError, HEADER_LEN, MAX_FRAME_LEN, decode_frame, encode_frame, parse_header,
     read_frame, read_message, write_frame,
 };
 pub use params::*;
+pub use process::{
+    ExecLimits, METHOD_PROCESS_CANCEL, METHOD_PROCESS_OPEN, OutputCap, Overflow,
+    ProcessCancelParams, ProcessCancelResult, ProcessExit, ProcessOpenAck, ProcessOpenParams,
+    SpawnTarget, StderrMode, StdinMode,
+};
+pub use record::{
+    RECORD_HEADER_LEN, Record, RecordChannel, RecordDecoder, RecordError, RecordKind,
+    encode_record, encode_record_header, parse_record_header,
+};
 pub use results::*;
 pub use rpc::{
-    Call, JsonRpcVersion, METHOD_HELLO, METHOD_PING, METHOD_STREAM_EVENT, OutputStream, Reply,
-    RequestId, ResponsePayload, RpcMessage, RpcNotification, RpcRequest, RpcResponse, StreamEvent,
+    Call, FileIdentity, FsIdentityParams, FsIdentityResult, JsonRpcVersion, METHOD_FS_IDENTITY,
+    METHOD_HELLO, METHOD_PING, METHOD_STREAM_EVENT, OutputStream, Reply, RequestId,
+    ResponsePayload, RpcMessage, RpcNotification, RpcRequest, RpcResponse, StreamEvent,
 };
-pub use schema::{ToolDefinition, input_schema, output_schema};
+pub use schema::{MethodSchema, ToolDefinition, input_schema, method_schemas, output_schema};
 pub use tools::{TOOL_NAMES, ToolCall, ToolResult, tool_definitions};
 pub use tunnel::{METHOD_TUNNEL_OPEN, TunnelOpenAck, TunnelOpenParams};
 
 /// Version of this wire protocol, reported by `hello`.
 ///
 /// History: `0.1` initial; `0.2` adds the connection-level [`METHOD_AUTH`] frame and the
-/// `UNAUTHORIZED` (`-32008`) error code. A `0.2` `crabd` started without a token behaves
-/// exactly like `0.1`.
-pub const PROTOCOL_VERSION: &str = "0.2";
+/// `UNAUTHORIZED` (`-32008`) error code; `0.3` adds `process.open` / `process.cancel`,
+/// forwards, `fs.identity`, `hello` `features` and `forward_ports`, the error codes `-32009`
+/// to `-32012`, and refuses a `hello` that names another version
+/// ([`HelloParams::check_version`]).
+pub const PROTOCOL_VERSION: &str = "0.3";
+
+/// Values of `hello` [`HelloResult::features`].
+pub mod features {
+    /// `process.open` and `process.cancel` are served.
+    pub const PROCESS_OPEN: &str = "process.open";
+    /// `forward.listen`, `forward.accept` and `forward.stats` are served.
+    pub const FORWARD: &str = "forward";
+    /// Tree kill follows every descendant (`PR_SET_CHILD_SUBREAPER`).
+    pub const TREE_KILL_SUBREAPER: &str = "tree_kill:subreaper";
+    /// Fallback: tree kill reaches the process group only; a `setsid` escapes it.
+    pub const TREE_KILL_PROCESS_GROUP: &str = "tree_kill:process_group";
+}
 
 /// Default limits referenced by tool descriptions. `crabd` enforces them.
 pub mod limits {

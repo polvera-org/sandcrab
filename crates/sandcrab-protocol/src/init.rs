@@ -169,6 +169,22 @@ pub struct InitConfig {
     /// `CLOCK_REALTIME` from it (a Firecracker guest has no RTC to read the time from).
     #[serde(default)]
     pub host_time_unix_ms: Option<u64>,
+    /// Drop `noexec` from the `/tmp` tmpfs (`nosuid,nodev` stay).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub tmp_exec: bool,
+    /// Size of the `/tmp` tmpfs in MiB (counts against the sandbox's memory). Default
+    /// [`SANDBOX_TMP_SIZE_MB`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tmp_size_mb: Option<u64>,
+    /// `pids.max` of the sandbox cgroup. Default [`SANDBOX_PIDS_MAX`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pids_max: Option<u32>,
+    /// `RLIMIT_NOFILE` of `crabd serve` (and so of every tool process). Default: inherited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nofile: Option<u64>,
+    /// Loopback ports `crabd serve` listens on for forwards (`--forward-port`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub forward_ports: Vec<u16>,
 }
 
 fn default_tools_port() -> u32 {
@@ -496,6 +512,60 @@ mod tests {
         assert_eq!(cfg.mounts[0].drive_id(), Some("ws0"));
         let back: InitConfig = serde_json::from_value(serde_json::to_value(&cfg).unwrap()).unwrap();
         assert_eq!(back, cfg);
+    }
+
+    #[test]
+    fn configure_0_3_fields() {
+        let base = json!({
+            "sandbox_id": "sb-1",
+            "hostname": "sandcrab",
+            "user": { "uid": 1000, "gid": 1000 },
+            "default_cwd": "/workspace",
+        });
+        // Without the new fields: defaults, and none of them is written back, so the config
+        // stays byte-compatible with a guest that predates them.
+        let cfg: InitConfig = serde_json::from_value(base.clone()).unwrap();
+        assert!(!cfg.tmp_exec && cfg.forward_ports.is_empty());
+        assert_eq!(
+            (cfg.tmp_size_mb, cfg.pids_max, cfg.nofile),
+            (None, None, None)
+        );
+        let v = serde_json::to_value(&cfg).unwrap();
+        for k in [
+            "tmp_exec",
+            "tmp_size_mb",
+            "pids_max",
+            "nofile",
+            "forward_ports",
+        ] {
+            assert!(v.get(k).is_none(), "{k}: {v}");
+        }
+
+        let mut full = base;
+        full["tmp_exec"] = json!(true);
+        full["tmp_size_mb"] = json!(1024);
+        full["pids_max"] = json!(4096);
+        full["nofile"] = json!(65536);
+        full["forward_ports"] = json!([5432, 6379]);
+        let cfg: InitConfig = serde_json::from_value(full.clone()).unwrap();
+        assert!(cfg.tmp_exec);
+        assert_eq!(cfg.tmp_size_mb, Some(1024));
+        assert_eq!(cfg.pids_max, Some(4096));
+        assert_eq!(cfg.nofile, Some(65536));
+        assert_eq!(cfg.forward_ports, [5432, 6379]);
+        let back = serde_json::to_value(&cfg).unwrap();
+        for k in [
+            "tmp_exec",
+            "tmp_size_mb",
+            "pids_max",
+            "nofile",
+            "forward_ports",
+        ] {
+            assert_eq!(back[k], full[k], "{k}");
+        }
+
+        full["forward_ports"] = json!([70000]);
+        assert!(serde_json::from_value::<InitConfig>(full).is_err());
     }
 
     #[test]

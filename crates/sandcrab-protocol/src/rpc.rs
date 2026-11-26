@@ -2,13 +2,16 @@
 
 use std::fmt;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use serde_json::Value;
 use uuid::Uuid;
 
 use crate::{
-    ProtocolError, RpcError, ToolCall, ToolResult,
+    PROTOCOL_VERSION, ProtocolError, RpcError, ToolCall, ToolResult,
+    forward::{ForwardStatsParams, ForwardStatsResult, METHOD_FORWARD_STATS},
     params::{HelloParams, PingParams},
+    process::{METHOD_PROCESS_CANCEL, ProcessCancelParams, ProcessCancelResult},
     results::{HelloResult, PingResult},
     tools::{from_params, to_json},
 };
@@ -19,6 +22,62 @@ pub const METHOD_HELLO: &str = "hello";
 pub const METHOD_PING: &str = "ping";
 /// Notification method carrying a [`StreamEvent`].
 pub const METHOD_STREAM_EVENT: &str = "stream_event";
+/// Method that returns the `(dev, ino)` of paths in the sandbox. Not an LLM tool.
+pub const METHOD_FS_IDENTITY: &str = "fs.identity";
+
+/// `fs.identity` params.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FsIdentityParams {
+    /// Absolute paths in the sandbox. Not empty. Symlinks are followed, like `stat`.
+    pub paths: Vec<String>,
+}
+
+impl FsIdentityParams {
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        if self.paths.is_empty() {
+            return Err(ProtocolError::InvalidParams(
+                "`paths` must not be empty".into(),
+            ));
+        }
+        if let Some(p) = self
+            .paths
+            .iter()
+            .find(|p| !p.starts_with('/') || p.contains('\0'))
+        {
+            return Err(ProtocolError::InvalidParams(format!(
+                "`paths` must be absolute: {p:?}"
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// The identity of one file: device and inode numbers, as `stat` reports them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub struct FileIdentity {
+    pub dev: u64,
+    pub ino: u64,
+}
+
+/// `fs.identity` result: one identity per path, in order, as a JSON array.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(transparent)]
+pub struct FsIdentityResult(pub Vec<FileIdentity>);
+
+impl HelloParams {
+    /// The 0.3 version rule: a `hello` that names another protocol version is refused with
+    /// [`ProtocolError::UnsupportedVersion`]; a `hello` without a version is answered.
+    pub fn check_version(&self) -> Result<(), ProtocolError> {
+        match self.protocol_version.as_deref() {
+            Some(v) if v != PROTOCOL_VERSION => Err(ProtocolError::UnsupportedVersion {
+                crabd: PROTOCOL_VERSION.to_owned(),
+                host: v.to_owned(),
+            }),
+            _ => Ok(()),
+        }
+    }
+}
 
 /// The `"jsonrpc": "2.0"` marker. Deserialization rejects any other value.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
@@ -239,11 +298,15 @@ impl<'de> Deserialize<'de> for RpcMessage {
     }
 }
 
-/// Every method `crabd` accepts, typed.
+/// Every method `crabd` accepts on a tool connection, typed. Connection-level verbs
+/// (`auth`, `tunnel.open`, `process.open`, `forward.listen`, `forward.accept`) are not calls.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Call {
     Hello(HelloParams),
     Ping,
+    ProcessCancel(ProcessCancelParams),
+    FsIdentity(FsIdentityParams),
+    ForwardStats,
     Tool(ToolCall),
 }
 
@@ -253,6 +316,9 @@ impl Call {
         match self {
             Self::Hello(_) => METHOD_HELLO,
             Self::Ping => METHOD_PING,
+            Self::ProcessCancel(_) => METHOD_PROCESS_CANCEL,
+            Self::FsIdentity(_) => METHOD_FS_IDENTITY,
+            Self::ForwardStats => METHOD_FORWARD_STATS,
             Self::Tool(call) => call.name(),
         }
     }
@@ -262,6 +328,9 @@ impl Call {
         match self {
             Self::Hello(p) => to_json(p),
             Self::Ping => to_json(&PingParams {}),
+            Self::ProcessCancel(p) => to_json(p),
+            Self::FsIdentity(p) => to_json(p),
+            Self::ForwardStats => to_json(&ForwardStatsParams {}),
             Self::Tool(call) => call.to_params(),
         }
     }
@@ -271,6 +340,15 @@ impl Call {
         match method {
             METHOD_HELLO => from_params(params).map(Self::Hello),
             METHOD_PING => from_params::<PingParams>(params).map(|_| Self::Ping),
+            METHOD_PROCESS_CANCEL => from_params(params).map(Self::ProcessCancel),
+            METHOD_FS_IDENTITY => {
+                let p: FsIdentityParams = from_params(params)?;
+                p.validate()?;
+                Ok(Self::FsIdentity(p))
+            }
+            METHOD_FORWARD_STATS => {
+                from_params::<ForwardStatsParams>(params).map(|_| Self::ForwardStats)
+            }
             _ => ToolCall::from_method_params(method, params).map(Self::Tool),
         }
     }
@@ -298,6 +376,9 @@ impl From<ToolCall> for Call {
 pub enum Reply {
     Hello(HelloResult),
     Ping(PingResult),
+    ProcessCancel(ProcessCancelResult),
+    FsIdentity(FsIdentityResult),
+    ForwardStats(ForwardStatsResult),
     Tool(ToolResult),
 }
 
@@ -307,6 +388,9 @@ impl Reply {
         match self {
             Self::Hello(r) => to_json(r),
             Self::Ping(r) => to_json(r),
+            Self::ProcessCancel(r) => to_json(r),
+            Self::FsIdentity(r) => to_json(r),
+            Self::ForwardStats(r) => to_json(r),
             Self::Tool(r) => r.to_value(),
         }
     }
@@ -322,6 +406,15 @@ impl Reply {
                 .map_err(malformed),
             METHOD_PING => serde_json::from_value(value)
                 .map(Self::Ping)
+                .map_err(malformed),
+            METHOD_PROCESS_CANCEL => serde_json::from_value(value)
+                .map(Self::ProcessCancel)
+                .map_err(malformed),
+            METHOD_FS_IDENTITY => serde_json::from_value(value)
+                .map(Self::FsIdentity)
+                .map_err(malformed),
+            METHOD_FORWARD_STATS => serde_json::from_value(value)
+                .map(Self::ForwardStats)
                 .map_err(malformed),
             _ => ToolResult::from_method_value(method, value).map(Self::Tool),
         }
@@ -344,7 +437,7 @@ pub enum OutputStream {
 
 /// Server-pushed event, sent as a `stream_event` notification.
 ///
-/// Reserved for streaming output; Phase 1 `crabd` does not emit these yet.
+/// Reserved and never sent. Protocol 0.3 streams output with `process.open` records instead.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum StreamEvent {
