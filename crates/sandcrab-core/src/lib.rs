@@ -12,6 +12,7 @@ pub mod auth;
 pub mod backend;
 pub mod client;
 pub mod error;
+pub mod forward;
 pub(crate) mod fsx;
 pub mod hostmount;
 pub mod manager;
@@ -19,6 +20,7 @@ pub mod mounts;
 pub mod pins;
 pub mod policy;
 pub mod private_dir;
+pub mod process;
 pub mod registry;
 pub mod sandbox;
 pub mod template;
@@ -38,6 +40,7 @@ pub use client::{
     Endpoint, ReadyClient, effective_timeout, open_tunnel, wait_ready,
 };
 pub use error::{Result, SandboxError};
+pub use forward::{ForwardAcceptor, ForwardConfig, ForwardTarget};
 pub use hostmount::{HostMount, MAX_SANDBOX_MOUNTS, MountPolicy, MountRoot};
 pub use manager::{
     DestroyByLabel, ManagerConfig, Sandbox, SandboxFilter, SandboxInfo, SandboxManager,
@@ -53,6 +56,10 @@ pub use pins::{
 pub use policy::{
     ForwardSpec, MAX_FORWARDS, NetworkConfig, NetworkPolicy, PortSpec, PublishedPort,
     ResourceOverrides, SecretSource, SecretSpec, UserSpec,
+};
+pub use process::{
+    DEFAULT_PROCESS_OPEN_TIMEOUT, ProcessEvent, ProcessOutput, ProcessStdin, ProcessStream,
+    ProcessTable, open_process,
 };
 pub use registry::{
     DEFAULT_READ_LIMIT, FileEntry, FileKind, HostWriteOptions, STATE_ROOT_ENV, WorkspaceLease,

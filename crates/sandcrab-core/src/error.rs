@@ -78,6 +78,12 @@ pub enum SandboxError {
     #[error("unavailable: {0}")]
     Unavailable(String),
 
+    /// A process connection ended after its request was written and without an `EXIT`
+    /// record: the program may have run and its end is unknown. Do not retry as if
+    /// nothing ran.
+    #[error("process lost: {0}")]
+    Lost(String),
+
     /// A pinned image/rootfs digest does not match the artifact actually present.
     #[error("digest mismatch for `{image}`: expected {expected}, got {actual}")]
     DigestMismatch {
@@ -137,6 +143,7 @@ impl Clone for SandboxError {
                 cap: *cap,
             },
             Self::Unavailable(s) => Self::Unavailable(s.clone()),
+            Self::Lost(s) => Self::Lost(s.clone()),
             Self::DigestMismatch {
                 image,
                 expected,

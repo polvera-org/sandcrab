@@ -18,9 +18,11 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use sandcrab_protocol::{
-    Call, HEADER_LEN, HelloParams, HelloResult, METHOD_HELLO, PROTOCOL_VERSION, ProtocolError,
-    Reply, RequestId, RpcMessage, RpcResponse, ToolCall, ToolResult, TunnelOpenAck,
-    TunnelOpenParams, encode_frame, parse_header,
+    Call, FileIdentity, ForwardPortStats, FsIdentityParams, HEADER_LEN, HelloParams, HelloResult,
+    METHOD_FORWARD_STATS, METHOD_FS_IDENTITY, METHOD_HELLO, METHOD_PROCESS_CANCEL,
+    PROTOCOL_VERSION, ProcessCancelParams, ProcessCancelResult, ProtocolError, Reply, RequestId,
+    RpcMessage, RpcResponse, ToolCall, ToolResult, TunnelOpenAck, TunnelOpenParams, encode_frame,
+    parse_header, process::FORCE_LOOP_MS,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -288,6 +290,55 @@ impl CrabdClient {
         Ok(ToolResult::from_method_value(method, value)?)
     }
 
+    /// `process.cancel`: ask, wait `grace_ms` (default 5000), force. Answers when nothing of
+    /// the tree is left, so the call waits up to the grace plus the guest's force loop plus
+    /// [`CALL_TIMEOUT_GRACE`].
+    pub async fn process_cancel(&self, params: ProcessCancelParams) -> Result<ProcessCancelResult> {
+        let timeout = Duration::from_millis(params.effective_grace_ms())
+            + Duration::from_millis(FORCE_LOOP_MS)
+            + CALL_TIMEOUT_GRACE;
+        let value = self
+            .request(
+                &Call::ProcessCancel(params),
+                timeout.max(self.default_timeout),
+            )
+            .await?;
+        match Reply::from_method_value(METHOD_PROCESS_CANCEL, value)? {
+            Reply::ProcessCancel(r) => Ok(r),
+            other => Err(unexpected(METHOD_PROCESS_CANCEL, &other)),
+        }
+    }
+
+    /// `fs.identity`: `(dev, ino)` of each absolute guest path, in order.
+    pub async fn fs_identity(&self, paths: Vec<String>) -> Result<Vec<FileIdentity>> {
+        let params = FsIdentityParams { paths };
+        params.validate()?;
+        let n = params.paths.len();
+        let value = self
+            .request(&Call::FsIdentity(params), self.default_timeout)
+            .await?;
+        match Reply::from_method_value(METHOD_FS_IDENTITY, value)? {
+            Reply::FsIdentity(r) if r.0.len() == n => Ok(r.0),
+            Reply::FsIdentity(r) => Err(ProtocolError::Internal(format!(
+                "`fs.identity` answered {} identities for {n} paths",
+                r.0.len()
+            ))
+            .into()),
+            other => Err(unexpected(METHOD_FS_IDENTITY, &other)),
+        }
+    }
+
+    /// `forward.stats`: per forward port, connections accepted and refused since start.
+    pub async fn forward_stats(&self) -> Result<Vec<ForwardPortStats>> {
+        let value = self
+            .request(&Call::ForwardStats, self.default_timeout)
+            .await?;
+        match Reply::from_method_value(METHOD_FORWARD_STATS, value)? {
+            Reply::ForwardStats(r) => Ok(r.0),
+            other => Err(unexpected(METHOD_FORWARD_STATS, &other)),
+        }
+    }
+
     /// Close the connection: fail in-flight calls, flush and shut down the writer.
     pub async fn close(&self) {
         self.shared.close("client closed".into());
@@ -332,6 +383,10 @@ impl Drop for CrabdClient {
             task.abort();
         }
     }
+}
+
+fn unexpected(method: &str, reply: &Reply) -> SandboxError {
+    ProtocolError::Internal(format!("unexpected `{method}` reply {reply:?}")).into()
 }
 
 /// Timeout for a tool call: `bash` with an explicit `timeout_ms` gets that plus
@@ -455,11 +510,12 @@ pub async fn wait_ready(connector: &dyn Connector, deadline: Instant) -> Result<
                     Ok(hello) => {
                         let ready_at = Instant::now();
                         if hello.protocol_version != PROTOCOL_VERSION {
+                            // A crabd before 0.3 answers any version; refuse it here.
                             client.close().await;
-                            return Err(ProtocolError::InvalidRequest(format!(
-                                "crabd speaks protocol {}, host speaks {PROTOCOL_VERSION}",
-                                hello.protocol_version
-                            ))
+                            return Err(ProtocolError::UnsupportedVersion {
+                                crabd: hello.protocol_version,
+                                host: PROTOCOL_VERSION.to_owned(),
+                            }
                             .into());
                         }
                         return Ok(ReadyClient {
@@ -468,6 +524,11 @@ pub async fn wait_ready(connector: &dyn Connector, deadline: Instant) -> Result<
                             ready_at,
                             attempts,
                         });
+                    }
+                    // A 0.3 crabd refuses a host of another version: retrying cannot help.
+                    Err(e @ SandboxError::Protocol(ProtocolError::UnsupportedVersion { .. })) => {
+                        client.close().await;
+                        return Err(e);
                     }
                     Err(e) => {
                         last_err = e.to_string();
@@ -535,10 +596,10 @@ pub async fn open_tunnel(
         })?
 }
 
-/// Read exactly one response frame (header + payload, nothing more).
-pub(crate) async fn read_one_response<R: AsyncRead + Unpin + ?Sized>(
+/// Read exactly one frame (header + payload, nothing more) and decode it.
+pub(crate) async fn read_one_message<R: AsyncRead + Unpin + ?Sized>(
     reader: &mut R,
-) -> Result<RpcResponse> {
+) -> Result<RpcMessage> {
     let mut header = [0u8; HEADER_LEN];
     reader.read_exact(&mut header).await.map_err(|e| {
         SandboxError::Transport(if e.kind() == io::ErrorKind::UnexpectedEof {
@@ -553,7 +614,14 @@ pub(crate) async fn read_one_response<R: AsyncRead + Unpin + ?Sized>(
         .read_exact(&mut payload)
         .await
         .map_err(|e| SandboxError::Transport(format!("stream ended mid-frame: {e}")))?;
-    match RpcMessage::from_slice(&payload)? {
+    Ok(RpcMessage::from_slice(&payload)?)
+}
+
+/// Read exactly one response frame (header + payload, nothing more).
+pub(crate) async fn read_one_response<R: AsyncRead + Unpin + ?Sized>(
+    reader: &mut R,
+) -> Result<RpcResponse> {
+    match read_one_message(reader).await? {
         RpcMessage::Response(r) => Ok(r),
         other => Err(SandboxError::Transport(format!(
             "expected a response from crabd, got {other:?}"
@@ -783,14 +851,60 @@ mod tests {
 
     #[tokio::test]
     async fn wait_ready_rejects_protocol_mismatch() {
+        // A 0.2 guest answers `hello` with its own version; the host refuses it.
         let conn = MockConnector::new(MockCrabd {
-            protocol_version: "99.0".into(),
+            protocol_version: "0.2".into(),
             ..MockCrabd::default()
         });
         let err = wait_ready(&conn, Instant::now() + Duration::from_secs(5))
             .await
             .unwrap_err();
-        assert!(matches!(err, SandboxError::Protocol(_)), "{err:?}");
+        assert!(
+            matches!(&err, SandboxError::Protocol(ProtocolError::UnsupportedVersion { crabd, host })
+                if crabd == "0.2" && host == PROTOCOL_VERSION),
+            "{err:?}"
+        );
+        assert_eq!(conn.connects.load(Ordering::SeqCst), 1, "not retried");
+    }
+
+    /// A 0.3 guest refuses our `hello` with `-32009`: fatal at once, never retried.
+    #[derive(Debug, Default)]
+    struct RefusingGuest {
+        connects: AtomicU32,
+    }
+
+    #[async_trait]
+    impl Connector for RefusingGuest {
+        async fn connect(&self) -> io::Result<BoxedStream> {
+            self.connects.fetch_add(1, Ordering::SeqCst);
+            let (a, mut b) = tokio::io::duplex(1 << 16);
+            tokio::spawn(async move {
+                let RpcMessage::Request(req) = read_one_message(&mut b).await.unwrap() else {
+                    panic!("request")
+                };
+                let e = ProtocolError::UnsupportedVersion {
+                    crabd: "0.4".into(),
+                    host: PROTOCOL_VERSION.into(),
+                };
+                let frame = encode_frame(&RpcResponse::failure(Some(req.id), &e)).unwrap();
+                b.write_all(&frame).await.unwrap();
+                let _ = b.read_to_end(&mut Vec::new()).await;
+            });
+            Ok(Box::new(a))
+        }
+    }
+
+    #[tokio::test]
+    async fn wait_ready_does_not_retry_a_version_refusal() {
+        let conn = RefusingGuest::default();
+        let err = wait_ready(&conn, Instant::now() + Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, SandboxError::Protocol(e) if e.code() == sandcrab_protocol::codes::UNSUPPORTED_VERSION),
+            "{err:?}"
+        );
+        assert_eq!(conn.connects.load(Ordering::SeqCst), 1);
     }
 
     /// Connector whose single stream is served by a scripted fake `crabd`.

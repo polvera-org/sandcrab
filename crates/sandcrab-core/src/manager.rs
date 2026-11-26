@@ -8,13 +8,18 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
-use sandcrab_protocol::{HelloResult, ProtocolError, ToolCall, ToolResult};
+use sandcrab_protocol::{
+    FileIdentity, ForwardPortStats, HelloResult, ProcessCancelResult, ProcessOpenParams,
+    ProtocolError, ToolCall, ToolResult, features,
+};
 use serde::Serialize;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
-use crate::client::DEFAULT_CALL_TIMEOUT;
+use crate::client::{Connector, DEFAULT_CALL_TIMEOUT};
+use crate::forward::{ForwardAcceptor, ForwardConfig, ForwardTarget};
 use crate::pins::{PinStore, effective_pin};
+use crate::process::{DEFAULT_PROCESS_OPEN_TIMEOUT, ProcessStream, ProcessTable};
 use crate::template::ImageArch;
 use crate::{
     BackendCapabilities, BackendKind, CrabdClient, ForwardSpec, HostMount, LifecyclePhase,
@@ -298,6 +303,16 @@ impl SandboxManager {
             }
         };
         timings.mark_at(LifecyclePhase::Ready, ready.ready_at);
+        // Never a sandbox whose forwards nobody listens for (design §12.5).
+        if let Some(missing) = missing_forwards(&ready.hello, &config.forwards) {
+            ready.client.close().await;
+            if let Some(handle) = guard.0.take()
+                && let Err(de) = handle.destroy().await
+            {
+                tracing::warn!(%id, error = %de, "destroy after a refused spawn also failed");
+            }
+            return Err(SandboxError::PolicyUnenforceable(missing));
+        }
         let handle = guard.0.take().expect("handle present until readiness");
         let ports = handle.published_ports();
 
@@ -307,7 +322,10 @@ impl SandboxManager {
                 id,
                 template: config.template,
                 backend: backend.kind(),
-                client: ready.client.with_default_timeout(inner.config.call_timeout),
+                client: Arc::new(ready.client.with_default_timeout(inner.config.call_timeout)),
+                connector,
+                processes: ProcessTable::new(),
+                acceptor: Mutex::new(None),
                 hello: ready.hello,
                 timings,
                 ports,
@@ -482,6 +500,28 @@ impl SandboxManager {
     }
 }
 
+/// Why `crabd` cannot serve `forwards`, if it cannot: it does not speak forwards, or does not
+/// listen on one of the ports.
+fn missing_forwards(hello: &HelloResult, forwards: &[ForwardSpec]) -> Option<String> {
+    if forwards.is_empty() {
+        return None;
+    }
+    if !hello.features.iter().any(|f| f == features::FORWARD) {
+        return Some("crabd in this sandbox does not serve forwards".into());
+    }
+    let missing: Vec<String> = forwards
+        .iter()
+        .filter(|f| !hello.forward_ports.contains(&f.guest_port))
+        .map(|f| f.guest_port.to_string())
+        .collect();
+    (!missing.is_empty()).then(|| {
+        format!(
+            "crabd in this sandbox does not listen on forward port(s) {}",
+            missing.join(", ")
+        )
+    })
+}
+
 fn expired(inner: &ManagerInner) -> Vec<Sandbox> {
     let now = Instant::now();
     lock(&inner.active)
@@ -564,7 +604,12 @@ struct SandboxShared {
     id: SandboxId,
     template: String,
     backend: BackendKind,
-    client: CrabdClient,
+    client: Arc<CrabdClient>,
+    /// Opens the sandbox's dedicated connections (process, forwards); `auth` included.
+    connector: Arc<dyn Connector>,
+    processes: ProcessTable,
+    /// Serves the forwards once a target was given ([`Sandbox::serve_forwards`]).
+    acceptor: Mutex<Option<ForwardAcceptor>>,
     hello: HelloResult,
     timings: LifecycleTimings,
     ports: Vec<PublishedPort>,
@@ -604,6 +649,8 @@ impl SandboxShared {
         };
         self.destroyed.store(true, Ordering::SeqCst);
         self.timings.mark(LifecyclePhase::TeardownStarted);
+        // Forwards end with the sandbox: dropping the acceptor cuts every relayed connection.
+        drop(lock(&self.acceptor).take());
         let mut guard = TeardownGuard {
             shared: Arc::clone(self),
             leases: Some(leases),
@@ -851,6 +898,113 @@ impl Sandbox {
     /// Tear down (idempotent). Returns the final timing marks.
     pub async fn destroy(&self) -> Result<TimingMarks> {
         self.shared.destroy().await
+    }
+
+    /// Opens fresh transport connections to this sandbox's `crabd` (`auth` included).
+    #[must_use]
+    pub fn connector(&self) -> Arc<dyn Connector> {
+        Arc::clone(&self.shared.connector)
+    }
+
+    fn require_live(&self) -> Result<()> {
+        if self.is_destroyed() {
+            return Err(SandboxError::Unavailable(format!(
+                "sandbox {} is destroyed",
+                self.id()
+            )));
+        }
+        Ok(())
+    }
+
+    /// Run one program on a dedicated connection (`process.open`). See [`crate::process`]
+    /// for the outcomes: [`SandboxError::Unavailable`] when nothing could be sent (also for a
+    /// destroyed sandbox), the typed `crabd` error when it refused, [`SandboxError::Lost`]
+    /// when the connection ended after the request. A `process_id` that is still open here
+    /// is [`SandboxError::AlreadyExists`].
+    pub async fn open_process(&self, params: ProcessOpenParams) -> Result<ProcessStream> {
+        self.require_live()?;
+        if !self
+            .hello()
+            .features
+            .iter()
+            .any(|f| f == features::PROCESS_OPEN)
+        {
+            return Err(SandboxError::Unimplemented(
+                "crabd in this sandbox does not serve process.open",
+            ));
+        }
+        self.shared
+            .processes
+            .open(
+                self.shared.connector.as_ref(),
+                &params,
+                DEFAULT_PROCESS_OPEN_TIMEOUT,
+            )
+            .await
+    }
+
+    /// `process.cancel` on the tool connection: ask, wait `grace_ms` (default 5000, 0 =
+    /// force at once), force. Answers when nothing of the tree is left. A cancel that races
+    /// an [`Self::open_process`] of the same id always ends that process
+    /// ([`ProcessTable::cancel`]).
+    pub async fn cancel_process(
+        &self,
+        process_id: &str,
+        grace_ms: Option<u64>,
+    ) -> Result<ProcessCancelResult> {
+        self.require_live()?;
+        self.shared
+            .processes
+            .cancel(&self.shared.client, process_id, grace_ms)
+            .await
+    }
+
+    /// `fs.identity`: `(dev, ino)` of each absolute guest path, in order.
+    pub async fn fs_identity(&self, paths: Vec<String>) -> Result<Vec<FileIdentity>> {
+        self.require_live()?;
+        self.shared.client.fs_identity(paths).await
+    }
+
+    /// `forward.stats`: per forward port, connections accepted and refused since start.
+    pub async fn forward_stats(&self) -> Result<Vec<ForwardPortStats>> {
+        self.require_live()?;
+        self.shared.client.forward_stats().await
+    }
+
+    /// Start serving this sandbox's forwards: each connection a program makes to a forward
+    /// port goes to `target` ([`ForwardAcceptor`]). Once per sandbox; it stops when the
+    /// sandbox is destroyed.
+    pub fn serve_forwards(&self, target: Arc<dyn ForwardTarget>) -> Result<()> {
+        self.require_live()?;
+        let mut slot = lock(&self.shared.acceptor);
+        if slot.is_some() {
+            return Err(SandboxError::AlreadyExists {
+                kind: "forward acceptor",
+                id: self.id().to_string(),
+            });
+        }
+        *slot = Some(ForwardAcceptor::start(
+            self.id(),
+            Arc::clone(&self.shared.connector),
+            &self.shared.forwards,
+            target,
+            ForwardConfig::default(),
+            None,
+        )?);
+        drop(slot);
+        // A teardown that started meanwhile did not see the acceptor: stop it now.
+        if self.is_destroyed() {
+            drop(lock(&self.shared.acceptor).take());
+        }
+        Ok(())
+    }
+
+    /// Whether the forwards are served and the guest's listen connection is up.
+    #[must_use]
+    pub fn forwards_listening(&self) -> bool {
+        lock(&self.shared.acceptor)
+            .as_ref()
+            .is_some_and(ForwardAcceptor::is_listening)
     }
 }
 
@@ -1682,5 +1836,192 @@ mod tests {
             out.push(h.await.unwrap());
         }
         out
+    }
+
+    /// Echo target for forwards.
+    struct EchoTarget;
+
+    #[async_trait::async_trait]
+    impl crate::ForwardTarget for EchoTarget {
+        async fn connect(&self, _: SandboxId, _: u16) -> std::io::Result<crate::BoxedStream> {
+            let (a, b) = tokio::io::duplex(1 << 16);
+            tokio::spawn(async move {
+                let (mut r, mut w) = tokio::io::split(b);
+                let _ = tokio::io::copy(&mut r, &mut w).await;
+                let _ = tokio::io::AsyncWriteExt::shutdown(&mut w).await;
+            });
+            Ok(Box::new(a))
+        }
+    }
+
+    #[tokio::test]
+    async fn processes_through_the_sandbox() {
+        use crate::ProcessEvent;
+        let env = env();
+        let backend = FakeBackend::new();
+        let mgr = manager(&env, &backend, quick());
+        let sb = mgr
+            .spawn(SandboxConfig::from_template("base"))
+            .await
+            .unwrap();
+        let mock = backend.mock_of(sb.id()).unwrap();
+
+        let mut p = ProcessOpenParams::new(uuid::Uuid::new_v4().to_string(), vec!["env".into()]);
+        p.env.insert("A".into(), "1".into());
+        let mut ps = sb.open_process(p).await.unwrap();
+        assert_eq!(
+            ps.output().next().await.unwrap(),
+            Some(ProcessEvent::Stdout(b"A=1\n".to_vec()))
+        );
+        assert!(matches!(
+            ps.output().next().await.unwrap(),
+            Some(ProcessEvent::Exit(e)) if e.code == Some(0)
+        ));
+
+        let id = uuid::Uuid::new_v4().to_string();
+        let mut ps = sb
+            .open_process(ProcessOpenParams::new(id.clone(), vec!["sleep".into()]))
+            .await
+            .unwrap();
+        let r = sb.cancel_process(&id, Some(0)).await.unwrap();
+        assert!(r.was_running);
+        assert!(matches!(
+            ps.output().next().await.unwrap(),
+            Some(ProcessEvent::Exit(e)) if e.cancelled
+        ));
+        assert_eq!(mock.processes.opened.load(Ordering::SeqCst), 2);
+
+        // fs.identity answers what the kernel says about the path.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let path = env.project.to_str().unwrap().to_owned();
+            let ids = sb.fs_identity(vec![path]).await.unwrap();
+            let m = fs::metadata(&env.project).unwrap();
+            assert_eq!((ids[0].dev, ids[0].ino), (m.dev(), m.ino()));
+        }
+
+        // Destroyed: nothing runs, nothing could have.
+        let open = sb.open_process(ProcessOpenParams::new(
+            uuid::Uuid::new_v4().to_string(),
+            vec!["sleep".into()],
+        ));
+        let ps = open.await.unwrap();
+        sb.destroy().await.unwrap();
+        drop(ps);
+        let err = sb
+            .open_process(ProcessOpenParams::new(
+                uuid::Uuid::new_v4().to_string(),
+                vec!["echo".into()],
+            ))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SandboxError::Unavailable(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn forwards_through_the_sandbox() {
+        let env = env();
+        let backend = FakeBackend::new();
+        let mgr = manager(&env, &backend, quick());
+        let sb = mgr
+            .spawn(SandboxConfig::from_template("base").forward(5432))
+            .await
+            .unwrap();
+        let fwd = std::sync::Arc::clone(&backend.mock_of(sb.id()).unwrap().forwards);
+        sb.serve_forwards(Arc::new(EchoTarget)).unwrap();
+        assert!(matches!(
+            sb.serve_forwards(Arc::new(EchoTarget)),
+            Err(SandboxError::AlreadyExists { .. })
+        ));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !sb.forwards_listening() {
+            assert!(Instant::now() < deadline);
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let mut p = fwd.connect(5432).unwrap();
+        tokio::io::AsyncWriteExt::write_all(&mut p, b"hi")
+            .await
+            .unwrap();
+        tokio::io::AsyncWriteExt::shutdown(&mut p).await.unwrap();
+        let mut back = Vec::new();
+        tokio::io::AsyncReadExt::read_to_end(&mut p, &mut back)
+            .await
+            .unwrap();
+        assert_eq!(back, b"hi");
+        let stats = sb.forward_stats().await.unwrap();
+        assert_eq!(stats.len(), 1);
+        assert_eq!((stats[0].port, stats[0].accepted), (5432, 1));
+
+        // The forwards end with the sandbox.
+        sb.destroy().await.unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while fwd.has_listener() {
+            assert!(
+                Instant::now() < deadline,
+                "listen connection outlived the sandbox"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        // A sandbox without forwards has nothing to serve.
+        let plain = mgr
+            .spawn(SandboxConfig::from_template("base"))
+            .await
+            .unwrap();
+        assert!(matches!(
+            plain.serve_forwards(Arc::new(EchoTarget)),
+            Err(SandboxError::InvalidConfig(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn spawn_refuses_a_crabd_that_does_not_serve_the_forwards() {
+        let env = env();
+        let mut backend = FakeBackend::new();
+        backend.mock.features.clear();
+        let mgr = manager(&env, &backend, quick());
+        let err = mgr
+            .spawn(SandboxConfig::from_template("base").forward(5432))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, SandboxError::PolicyUnenforceable(m) if m.contains("forwards")),
+            "{err}"
+        );
+        assert!(matches!(
+            backend.events().last(),
+            Some(FakeEvent::Destroyed(_))
+        ));
+        // Without forwards it spawns, but process.open is refused up front.
+        let sb = mgr
+            .spawn(SandboxConfig::from_template("base"))
+            .await
+            .unwrap();
+        assert!(matches!(
+            sb.open_process(ProcessOpenParams::new(
+                uuid::Uuid::new_v4().to_string(),
+                vec!["echo".into()]
+            ))
+            .await,
+            Err(SandboxError::Unimplemented(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn spawn_refuses_a_0_2_guest() {
+        let env = env();
+        let mut backend = FakeBackend::new();
+        backend.mock.protocol_version = "0.2".into();
+        let mgr = manager(&env, &backend, quick());
+        let err = mgr
+            .spawn(SandboxConfig::from_template("base"))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, SandboxError::Protocol(ProtocolError::UnsupportedVersion { crabd, host })
+                if crabd == "0.2" && host == sandcrab_protocol::PROTOCOL_VERSION),
+            "{err:?}"
+        );
     }
 }
