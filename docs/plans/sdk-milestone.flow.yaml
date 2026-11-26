@@ -129,7 +129,7 @@ steps:
     title: "libkrun backend: forwards over vsock, the same options and limits through init.configure, ad-hoc virtio-fs shares at the same path with fd-pinned roots; e2e on macOS and Linux KVM"
     depends_on: [core-streams, guest-forwards, guest-caps, guest-init]
     artifacts: [crates/sandcrab-backend-libkrun/src]
-    status: doing
+    status: done
 
   - id: byo-image
     phase: implement
