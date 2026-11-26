@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { test } from "node:test";
 
 import { connectClient, versionMismatch } from "../../src/client.ts";
-import { ConnectionError, InvalidSpecError, SandcrabError, ServerError } from "../../src/errors.ts";
+import { ConnectionError, errorName, InvalidSpecError, SandcrabError, ServerError } from "../../src/errors.ts";
 import { connect } from "../../src/index.ts";
 import { FakeRpcError, FakeServer } from "../../src/testing/fake-server.ts";
 import { setup, sleep, until } from "./helpers.ts";
@@ -205,4 +205,11 @@ test("a feature the server does not list is a capability reason, and calls that 
   assert.ok(!server.calls.some((c) => c.method === "sandbox.create" || c.method === "server.selftest"), "nothing sent");
   // A create that needs neither still works.
   await client.createSandbox({ template: "base" });
+});
+
+test("every guest code that passes through has a name", () => {
+  assert.equal(errorName(-32003), "PATH_NOT_ALLOWED");
+  assert.equal(errorName(-32007), "UNIMPLEMENTED");
+  assert.equal(errorName(-32104), "LIMIT_EXCEEDED");
+  assert.equal(errorName(-1), "-1");
 });
