@@ -45,6 +45,12 @@ pub fn current_uid() -> u32 {
     rustix::process::getuid().as_raw()
 }
 
+/// The real gid of this process.
+#[must_use]
+pub fn current_gid() -> u32 {
+    rustix::process::getgid().as_raw()
+}
+
 /// A directory [`secure_dir`] or [`secure_state_tree`] tightened.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tightened {

@@ -184,7 +184,7 @@ async fn call(
         ))),
         api::METHOD_SERVER_CAPABILITIES => {
             let p: CapabilitiesParams = decode_params(params)?;
-            ok(&capabilities(shared, p.template.as_deref()))
+            ok(&capabilities(shared, peer, p.template.as_deref()))
         }
         api::METHOD_SANDBOX_CREATE => {
             ok(&create(shared, peer, control, decode_params(params)?).await?)
@@ -221,7 +221,7 @@ async fn call(
             ok(&Empty {})
         }
         api::METHOD_SERVER_SELFTEST => {
-            ok(&crate::selftest::call(shared, decode_params(params)?).await?)
+            ok(&crate::selftest::call(shared, peer, decode_params(params)?).await?)
         }
         other => Err(ApiError::Protocol(ProtocolError::MethodNotFound(
             other.to_owned(),
@@ -370,7 +370,7 @@ fn to_info(
 // ---------------------------------------------------------------------------------------------
 
 /// `template`: whose last self-test to include.
-fn capabilities(shared: &Shared, template: Option<&str>) -> Capabilities {
+fn capabilities(shared: &Shared, peer: Peer, template: Option<&str>) -> Capabilities {
     let caps = shared.sandcrab.backend_capabilities();
     // The guest names its tree-kill mode in `hello`. Until the self-test reports it, a live
     // sandbox that fell back to the process group is the evidence.
@@ -401,7 +401,7 @@ fn capabilities(shared: &Shared, template: Option<&str>) -> Capabilities {
         .to_owned(),
         mount_identity_checked: caps.mount_identity_checked,
         max_mounts: shared.limits.max_mounts,
-        selftest: template.and_then(|t| shared.selftests.summary(t)),
+        selftest: template.and_then(|t| shared.selftests.summary(t, peer)),
     }
 }
 
