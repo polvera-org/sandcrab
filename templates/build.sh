@@ -7,6 +7,8 @@
 #   templates/build.sh base ts-dev              # build a subset (base is still built first if listed)
 #   templates/build.sh --no-pin base            # build without recording host-local pins
 #
+# Templates with `external = true` (an image built elsewhere, no Dockerfile) are
+# skipped: pull the image and adopt it with `sandcrab template pin <name>`.
 # Tags: every build is tagged `sandcrab/<name>:<version>-<arch>` (amd64|arm64).
 # The plain `sandcrab/<name>:<version>` tag, which manifests and backends use, is
 # applied only when the target platform is the daemon's own, so a cross-arch
@@ -38,7 +40,7 @@ while [[ $# -gt 0 ]]; do
     --no-pin) pin=0 ;;
     --platform) [[ $# -ge 2 ]] || { echo "--platform needs a value" >&2; exit 2; }; platform="$2"; shift ;;
     --platform=*) platform="${1#--platform=}" ;;
-    -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,26p' "$0"; exit 0 ;;
     -*) echo "unknown option: $1" >&2; exit 2 ;;
     *) selected+=("$1") ;;
   esac
@@ -52,11 +54,20 @@ case "$platform" in
 esac
 [[ ${#selected[@]} -eq 0 ]] && selected=("${order[@]}")
 
+# `external = true` in a manifest's [template] table: the image is built elsewhere.
+is_external() {
+  awk '/^\[/ { in_tpl = ($0 == "[template]") } in_tpl && /^external *= *true *(#.*)?$/ { found = 1 } END { exit !found }' "$1"
+}
+
 for s in "${selected[@]}"; do
   [[ -d "$here/$s" ]] || { echo "unknown template: $s" >&2; exit 1; }
+  if [[ -f "$here/$s/sandcrab.toml" ]] && is_external "$here/$s/sandcrab.toml"; then
+    echo "skipping $s: external template (pull its image, then \`sandcrab template pin $s\`)" >&2
+  fi
 done
 targets=()
 for name in "${order[@]}"; do
+  is_external "$here/$name/sandcrab.toml" && continue
   for s in "${selected[@]}"; do [[ "$s" == "$name" ]] && targets+=("$name"); done
 done
 

@@ -22,6 +22,59 @@ pub struct ToolDefinition {
     pub output_schema: Value,
 }
 
+/// JSON Schemas of a `crabd` method that is not a tool: the methods on a tool connection,
+/// the connection-level verbs (except `auth`, whose token type has no schema), their
+/// notifications and the `EXIT` record payload.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MethodSchema {
+    /// Method name (or `record:EXIT` for the record payload).
+    pub method: &'static str,
+    /// How it is used: `call`, `connection`, `notification` or `record`.
+    pub kind: &'static str,
+    /// JSON Schema of the params object (or the payload).
+    pub params: Value,
+    /// JSON Schema of the result; `None` for notifications and records.
+    pub result: Option<Value>,
+}
+
+fn method<P: JsonSchema, R: JsonSchema>(method: &'static str, kind: &'static str) -> MethodSchema {
+    MethodSchema {
+        method,
+        kind,
+        params: input_schema::<P>(),
+        result: Some(output_schema::<R>()),
+    }
+}
+
+fn one_way<P: JsonSchema>(method: &'static str, kind: &'static str) -> MethodSchema {
+    MethodSchema {
+        method,
+        kind,
+        params: output_schema::<P>(),
+        result: None,
+    }
+}
+
+/// Schemas of every non-tool method of this protocol version, in a stable order.
+#[must_use]
+pub fn method_schemas() -> Vec<MethodSchema> {
+    use crate::*;
+    vec![
+        method::<HelloParams, HelloResult>(METHOD_HELLO, "call"),
+        method::<PingParams, PingResult>(METHOD_PING, "call"),
+        method::<ProcessCancelParams, ProcessCancelResult>(METHOD_PROCESS_CANCEL, "call"),
+        method::<FsIdentityParams, FsIdentityResult>(METHOD_FS_IDENTITY, "call"),
+        method::<ForwardStatsParams, ForwardStatsResult>(METHOD_FORWARD_STATS, "call"),
+        method::<TunnelOpenParams, TunnelOpenAck>(METHOD_TUNNEL_OPEN, "connection"),
+        method::<ProcessOpenParams, ProcessOpenAck>(METHOD_PROCESS_OPEN, "connection"),
+        method::<ForwardListenParams, ForwardListenAck>(METHOD_FORWARD_LISTEN, "connection"),
+        method::<ForwardAcceptParams, ForwardAcceptAck>(METHOD_FORWARD_ACCEPT, "connection"),
+        one_way::<ForwardIncoming>(METHOD_FORWARD_INCOMING, "notification"),
+        one_way::<ForwardRejectParams>(METHOD_FORWARD_REJECT, "notification"),
+        one_way::<ProcessExit>("record:EXIT", "record"),
+    ]
+}
+
 /// Clean input schema: `Option<T>` rendered as optional `T`.
 #[must_use]
 pub fn input_schema<T: JsonSchema>() -> Value {
@@ -47,8 +100,10 @@ fn schema_for<T: JsonSchema>(nullable_options: bool) -> Value {
             map.remove(key);
         }
         // Some providers require `properties` on every object root, even when empty.
-        map.entry("properties")
-            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        if map.get("type").and_then(Value::as_str) == Some("object") {
+            map.entry("properties")
+                .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        }
     }
     clean(&mut value);
     value
@@ -56,7 +111,7 @@ fn schema_for<T: JsonSchema>(nullable_options: bool) -> Value {
 
 /// Recursively clean a schema node, walking only schema-valued keywords so property
 /// names that collide with keywords are never touched.
-fn clean(node: &mut Value) {
+pub(crate) fn clean(node: &mut Value) {
     let Value::Object(map) = node else { return };
 
     if map.get("default") == Some(&Value::Null) {

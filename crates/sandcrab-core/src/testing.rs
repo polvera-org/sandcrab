@@ -2,7 +2,16 @@
 //! [`RuntimeBackend`] whose sandboxes are served by it.
 //!
 //! Compiled for this crate's tests and, with the `test-util` feature, for downstream crates.
+//!
+//! The mock also serves protocol 0.3's process and forward connections from scripts
+//! ([`MockProcesses`], [`MockForwards`]), so the server and SDK can be tested without a real
+//! guest.
 
+mod streams;
+
+pub use streams::{MockForwards, MockProcesses};
+
+use std::collections::HashMap;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -11,15 +20,16 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use sandcrab_protocol::{
-    BashParams, BashResult, Call, HEADER_LEN, HelloResult, METHOD_TUNNEL_OPEN, PROTOCOL_VERSION,
-    PingResult, ProtocolError, Reply, RpcMessage, RpcRequest, RpcResponse, TOOL_NAMES, ToolCall,
-    ToolResult, TunnelOpenAck, TunnelOpenParams, encode_frame, parse_header,
+    BashParams, BashResult, Call, HEADER_LEN, HelloResult, METHOD_FORWARD_ACCEPT,
+    METHOD_FORWARD_LISTEN, METHOD_PROCESS_OPEN, METHOD_TUNNEL_OPEN, PROTOCOL_VERSION, PingResult,
+    ProtocolError, Reply, RpcMessage, RpcRequest, RpcResponse, TOOL_NAMES, ToolCall, ToolResult,
+    TunnelOpenAck, TunnelOpenParams, encode_frame, features, parse_header,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::client::{BoxedStream, Connector};
 use crate::{
-    BackendCapabilities, BackendKind, LifecycleTimings, NetworkConfig, NetworkPolicy,
+    BackendCapabilities, BackendKind, LifecycleTimings, NetworkConfig, NetworkPolicy, NprocScope,
     PublishedPort, ResolvedSpec, Result, RuntimeBackend, SandboxError, SandboxHandle, SandboxId,
 };
 
@@ -56,16 +66,31 @@ fn consume(n: &AtomicU32) -> bool {
 /// `tunnel.open` as a connection's first frame dials `127.0.0.1:<port>` **on the test host**
 /// (standing in for guest loopback) and relays raw bytes like the real `crabd`; nothing
 /// listening → `-32004`.
+///
+/// `process.open` runs a scripted program and `process.cancel` stops it ([`MockProcesses`]
+/// lists the scripts). `forward.listen` / `forward.accept` / `forward.stats` serve the ports of
+/// [`MockForwards`]; [`MockForwards::connect`] plays a program in the sandbox. `fs.identity`
+/// answers the `(dev, ino)` of the path **on the test host** (like a bind mount on a shared
+/// kernel).
 #[derive(Debug, Clone)]
 pub struct MockCrabd {
     pub protocol_version: String,
     pub default_cwd: String,
+    /// `hello.features`. Default: `process.open`, `forward`, `tree_kill:subreaper`.
+    pub features: Vec<String>,
     /// The next N `hello` calls fail with an internal error.
     pub hello_failures: Arc<AtomicU32>,
     /// Tool calls served so far.
     pub tool_calls: Arc<AtomicU32>,
     /// Tunnels opened (acked) so far.
     pub tunnels: Arc<AtomicU32>,
+    /// Milliseconds to wait before reading the first frame of each new connection (a guest
+    /// that is slow to read a `process.open`).
+    pub first_frame_delay_ms: Arc<AtomicU64>,
+    /// `process.open` programs of this mock "sandbox".
+    pub processes: Arc<MockProcesses>,
+    /// Forward ports of this mock "sandbox" (none by default).
+    pub forwards: Arc<MockForwards>,
 }
 
 impl Default for MockCrabd {
@@ -73,9 +98,19 @@ impl Default for MockCrabd {
         Self {
             protocol_version: PROTOCOL_VERSION.to_owned(),
             default_cwd: "/workspace".to_owned(),
+            features: [
+                features::PROCESS_OPEN,
+                features::FORWARD,
+                features::TREE_KILL_SUBREAPER,
+            ]
+            .map(str::to_owned)
+            .to_vec(),
             hello_failures: Arc::new(AtomicU32::new(0)),
             tool_calls: Arc::new(AtomicU32::new(0)),
             tunnels: Arc::new(AtomicU32::new(0)),
+            first_frame_delay_ms: Arc::new(AtomicU64::new(0)),
+            processes: Arc::new(MockProcesses::default()),
+            forwards: Arc::new(MockForwards::new(&[])),
         }
     }
 }
@@ -89,6 +124,10 @@ impl MockCrabd {
         let (mut reader, writer) = tokio::io::split(stream);
         let writer = Arc::new(tokio::sync::Mutex::new(writer));
         let mut first = true;
+        let delay = self.first_frame_delay_ms.load(Ordering::SeqCst);
+        if delay > 0 {
+            tokio::time::sleep(Duration::from_millis(delay)).await;
+        }
         loop {
             let mut header = [0u8; HEADER_LEN];
             if reader.read_exact(&mut header).await.is_err() {
@@ -104,13 +143,26 @@ impl MockCrabd {
             let Ok(RpcMessage::Request(req)) = RpcMessage::from_slice(&payload) else {
                 return;
             };
-            if std::mem::take(&mut first) && req.method == METHOD_TUNNEL_OPEN {
+            if std::mem::take(&mut first)
+                && [
+                    METHOD_TUNNEL_OPEN,
+                    METHOD_PROCESS_OPEN,
+                    METHOD_FORWARD_LISTEN,
+                    METHOD_FORWARD_ACCEPT,
+                ]
+                .contains(&req.method.as_str())
+            {
                 // Nothing else holds the writer before the first request is dispatched.
                 let Ok(writer) = Arc::try_unwrap(writer) else {
                     return;
                 };
-                self.serve_tunnel(reader.unsplit(writer.into_inner()), req)
-                    .await;
+                let stream: BoxedStream = Box::new(reader.unsplit(writer.into_inner()));
+                match req.method.as_str() {
+                    METHOD_TUNNEL_OPEN => self.serve_tunnel(stream, req).await,
+                    METHOD_PROCESS_OPEN => self.processes.serve_open(stream, req).await,
+                    METHOD_FORWARD_LISTEN => self.forwards.serve_listen(stream, req).await,
+                    _ => self.forwards.serve_accept(stream, req).await,
+                }
                 return;
             }
             let call = Call::from_request(&req);
@@ -121,7 +173,14 @@ impl MockCrabd {
             let me = self.clone();
             let writer = Arc::clone(&writer);
             tokio::spawn(async move {
-                let (delay, outcome) = me.respond(call);
+                let (delay, outcome) = match call {
+                    // Answers when the program has ended: served off the connection loop.
+                    Ok(Call::ProcessCancel(p)) => (
+                        Duration::ZERO,
+                        Ok(Reply::ProcessCancel(me.processes.cancel(&p).await)),
+                    ),
+                    call => me.respond(call),
+                };
                 if !delay.is_zero() {
                     tokio::time::sleep(delay).await;
                 }
@@ -198,10 +257,27 @@ impl MockCrabd {
                         protocol_version: self.protocol_version.clone(),
                         tools: TOOL_NAMES.iter().map(|s| (*s).to_owned()).collect(),
                         default_cwd: self.default_cwd.clone(),
+                        features: self.features.clone(),
+                        forward_ports: self.forwards.ports().to_vec(),
                     })),
                 )
             }
             Call::Ping => (Duration::ZERO, Ok(Reply::Ping(PingResult {}))),
+            Call::ProcessCancel(p) => (
+                Duration::ZERO,
+                Err(ProtocolError::Internal(format!(
+                    "cancel of {} is served asynchronously",
+                    p.process_id
+                ))),
+            ),
+            Call::FsIdentity(p) => (
+                Duration::ZERO,
+                streams::fs_identity(&p.paths).map(Reply::FsIdentity),
+            ),
+            Call::ForwardStats => (
+                Duration::ZERO,
+                Ok(Reply::ForwardStats(self.forwards.stats())),
+            ),
             Call::Tool(tool) => {
                 self.tool_calls.fetch_add(1, Ordering::SeqCst);
                 match tool {
@@ -301,10 +377,14 @@ pub struct FakeBackend {
     pub destroy_delay_ms: Arc<AtomicU64>,
     events: Arc<Mutex<Vec<FakeEvent>>>,
     last_spec: Arc<Mutex<Option<ResolvedSpec>>>,
+    /// Each sandbox's own mock (shared counters, its own processes and forwards).
+    mocks: Arc<Mutex<HashMap<SandboxId, MockCrabd>>>,
 }
 
 impl FakeBackend {
-    /// Hardware-isolated (Firecracker-like) fake that enforces only `disabled`.
+    /// Hardware-isolated (Firecracker-like) fake that enforces only `disabled`. Unlike the
+    /// real Firecracker backend it accepts forwards, host mounts, the `/tmp` options and the
+    /// process limits (they reach [`Self::last_spec`]); clear them in `caps` to test refusals.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -314,6 +394,12 @@ impl FakeBackend {
                 multi_tenant_safe: false,
                 supports_snapshots: false,
                 supports_host_dir_mounts: false,
+                supports_forwards: true,
+                supports_host_mounts: true,
+                supports_tmp_options: true,
+                supports_process_limits: true,
+                mount_identity_checked: false,
+                nproc_scope: NprocScope::Sandbox,
             },
             enforced: vec![NetworkPolicy::Disabled],
             mock: MockCrabd::default(),
@@ -322,6 +408,7 @@ impl FakeBackend {
             destroy_delay_ms: Arc::new(AtomicU64::new(0)),
             events: Arc::default(),
             last_spec: Arc::default(),
+            mocks: Arc::default(),
         }
     }
 
@@ -335,6 +422,8 @@ impl FakeBackend {
                 multi_tenant_safe: false,
                 supports_snapshots: false,
                 supports_host_dir_mounts: true,
+                nproc_scope: NprocScope::HostUid,
+                ..Self::new().caps
             },
             enforced: vec![NetworkPolicy::Disabled, NetworkPolicy::Unrestricted],
             ..Self::new()
@@ -355,6 +444,17 @@ impl FakeBackend {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    /// The mock `crabd` of sandbox `id`: its processes and its forwards
+    /// ([`MockForwards::connect`] plays a program in that sandbox).
+    #[must_use]
+    pub fn mock_of(&self, id: SandboxId) -> Option<MockCrabd> {
+        self.mocks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&id)
+            .cloned()
     }
 
     fn push(&self, e: FakeEvent) {
@@ -387,6 +487,7 @@ impl RuntimeBackend for FakeBackend {
 
     async fn spawn(&self, spec: &ResolvedSpec) -> Result<Box<dyn SandboxHandle>> {
         spec.reject_secrets()?;
+        spec.reject_unsupported(self.kind, &self.caps)?;
         if !self.enforces_network_policy(&spec.network) {
             return Err(SandboxError::PolicyUnenforceable(
                 spec.network.policy.to_string(),
@@ -398,7 +499,7 @@ impl RuntimeBackend for FakeBackend {
             .unwrap_or_else(PoisonError::into_inner) = Some(spec.clone());
         self.push(FakeEvent::Spawned(spec.id));
         spec.timings.mark_custom("fake_started");
-        let ports = spec
+        let published = spec
             .ports
             .iter()
             .map(|p| PublishedPort {
@@ -406,13 +507,22 @@ impl RuntimeBackend for FakeBackend {
                 host: SocketAddr::from((Ipv4Addr::LOCALHOST, 40_000 + p.guest % 20_000)),
             })
             .collect();
+        let ports: Vec<u16> = spec.forwards.iter().map(|f| f.guest_port).collect();
+        let mock = MockCrabd {
+            processes: Arc::new(MockProcesses::default()),
+            forwards: Arc::new(MockForwards::new(&ports)),
+            ..self.mock.clone()
+        };
+        self.mocks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(spec.id, mock.clone());
         Ok(Box::new(FakeHandle {
             id: spec.id,
             connector: Arc::new(
-                MockConnector::new(self.mock.clone())
-                    .failing_first(Arc::clone(&self.connect_failures)),
+                MockConnector::new(mock).failing_first(Arc::clone(&self.connect_failures)),
             ),
-            ports,
+            ports: published,
             timings: spec.timings.clone(),
             backend: self.clone(),
         }))

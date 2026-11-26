@@ -1695,6 +1695,7 @@ dependencies = [
  "anyhow",
  "clap",
  "sandcrab-sdk",
+ "sandcrab-server",
  "serde",
  "serde_json",
  "tempfile",
@@ -1780,7 +1781,9 @@ dependencies = [
 name = "sandcrab-sdk"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "base64 0.22.1",
+ "chrono",
  "sandcrab-backend-docker",
  "sandcrab-backend-firecracker",
  "sandcrab-backend-libkrun",
@@ -1792,6 +1795,27 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "sandcrab-server"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "getrandom 0.4.3",
+ "rustix",
+ "sandcrab-core",
+ "sandcrab-sdk",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

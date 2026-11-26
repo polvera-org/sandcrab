@@ -216,7 +216,31 @@ pub struct PublishedPort {
     pub host: std::net::SocketAddr,
 }
 
-/// Per-sandbox overrides of the template's [`crate::ResourceLimits`].
+/// Forwards one sandbox may declare.
+pub const MAX_FORWARDS: usize = 16;
+
+/// A guest loopback port whose connections are forwarded to a target the host side chooses
+/// (design §4). The sandbox keeps its network policy; nothing is published on the host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ForwardSpec {
+    pub guest_port: u16,
+    /// Connections open at once through this forward. `None`: the guest's default (64).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_connections: Option<u32>,
+}
+
+impl ForwardSpec {
+    #[must_use]
+    pub fn new(guest_port: u16) -> Self {
+        Self {
+            guest_port,
+            max_connections: None,
+        }
+    }
+}
+
+/// Per-sandbox overrides of the template's [`crate::ResourceLimits`], plus the process limits
+/// that have no template default (`None`: the backend's default).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ResourceOverrides {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -225,11 +249,28 @@ pub struct ResourceOverrides {
     pub memory_mb: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk_mb: Option<u64>,
+    /// Processes in the whole sandbox (a pids cgroup limit).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pids_max: Option<u32>,
+    /// `RLIMIT_NOFILE` of the sandbox's processes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nofile: Option<u64>,
 }
 
 impl ResourceOverrides {
+    /// Whether a process limit (`pids_max`, `nofile`) is asked for.
+    #[must_use]
+    pub fn has_process_limits(&self) -> bool {
+        self.pids_max.is_some() || self.nofile.is_some()
+    }
+
     /// Apply onto the template limits and validate the result.
     pub fn apply(&self, base: &crate::ResourceLimits) -> Result<crate::ResourceLimits> {
+        if self.pids_max == Some(0) || self.nofile == Some(0) {
+            return Err(SandboxError::InvalidConfig(
+                "pids_max and nofile must be positive".into(),
+            ));
+        }
         let merged = crate::ResourceLimits {
             vcpu: self.vcpu.unwrap_or(base.vcpu),
             memory_mb: self.memory_mb.unwrap_or(base.memory_mb),
@@ -300,14 +341,30 @@ mod tests {
         .unwrap();
         assert_eq!(merged.vcpu, 4);
         assert_eq!(merged.memory_mb, base.memory_mb);
-        assert!(
+        for bad in [
             ResourceOverrides {
                 memory_mb: Some(1),
                 ..Default::default()
-            }
-            .apply(&base)
-            .is_err()
-        );
+            },
+            ResourceOverrides {
+                pids_max: Some(0),
+                ..Default::default()
+            },
+            ResourceOverrides {
+                nofile: Some(0),
+                ..Default::default()
+            },
+        ] {
+            assert!(bad.apply(&base).is_err(), "{bad:?}");
+        }
+        let limits = ResourceOverrides {
+            pids_max: Some(64),
+            nofile: Some(4096),
+            ..Default::default()
+        };
+        assert!(limits.has_process_limits());
+        limits.apply(&base).unwrap();
+        assert!(!ResourceOverrides::default().has_process_limits());
     }
 
     #[test]

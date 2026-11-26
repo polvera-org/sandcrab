@@ -303,6 +303,12 @@ pub async fn template(g: &Global, cmd: TemplateCmd) -> anyhow::Result<u8> {
             } else {
                 let mut script = None;
                 for n in &names {
+                    if templates.get(n)?.manifest.template.external {
+                        bail!(
+                            "template `{n}` is external (its image is built elsewhere): pull \
+                             the image, then adopt it with `sandcrab template pin {n}`"
+                        );
+                    }
                     let dir = templates.dir(n)?;
                     let parent = dir.parent().unwrap_or(Path::new("."));
                     let s = find_build_script(&[parent])?;
@@ -347,7 +353,7 @@ pub async fn template(g: &Global, cmd: TemplateCmd) -> anyhow::Result<u8> {
 #[cfg(feature = "docker")]
 async fn adopt(g: &Global, selected: &[Template]) -> anyhow::Result<u8> {
     use sandcrab_sdk::core::ImageVerifier;
-    use sandcrab_sdk::core::pins::{PinSource, TemplatePin};
+    use sandcrab_sdk::core::pins::{Adopted, obtain_hint};
     use sandcrab_sdk::docker::DockerImageVerifier;
 
     let Some(arch) = ImageArch::host() else {
@@ -363,36 +369,26 @@ async fn adopt(g: &Global, selected: &[Template]) -> anyhow::Result<u8> {
         let image = t.image();
         let id = verifier.image_digest(image).await.with_context(|| {
             format!(
-                "`{image}` is not present on this host; build it with `sandcrab template build {}`",
-                t.name()
+                "`{image}` is not present on this host; {}",
+                obtain_hint(&t.manifest)
             )
         })?;
-        let previous = store.get(&t.manifest, arch)?;
-        if previous.as_ref().is_some_and(|p| p.image_id == id) {
-            if !g.json {
-                println!("{}: already pinned to {id}", t.name());
-            }
-        } else {
-            eprintln!(
-                "warning: adopting the existing local image `{image}` ({id}) as this host's pin \
-                 for template `{}` {} {arch} without rebuilding it{}. From now on spawns only \
-                 check that it stays unchanged (local integrity); this does not establish how \
-                 the image was built (not provenance).",
-                t.name(),
-                t.manifest.template.version,
-                previous
-                    .as_ref()
-                    .map_or_else(String::new, |p| format!(", replacing pin {}", p.image_id)),
-            );
-            let path = store.record(&TemplatePin::new(
-                &t.manifest,
-                arch,
-                image,
-                &id,
-                PinSource::Adopt,
-            ))?;
-            if !g.json {
-                println!("{}: pinned {id} -> {}", t.name(), path.display());
+        match store.adopt(&t.manifest, arch, &id)? {
+            Adopted::Unchanged if !g.json => println!("{}: already pinned to {id}", t.name()),
+            Adopted::Unchanged => {}
+            Adopted::Recorded { path, replaced } => {
+                eprintln!(
+                    "warning: adopted the existing local image `{image}` ({id}) as this host's \
+                     pin for template `{}` {} {arch} without rebuilding it{}. From now on spawns \
+                     only check that it stays unchanged (local integrity); this does not \
+                     establish how the image was built (not provenance).",
+                    t.name(),
+                    t.manifest.template.version,
+                    replaced.map_or_else(String::new, |r| format!(", replacing pin {r}")),
+                );
+                if !g.json {
+                    println!("{}: pinned {id} -> {}", t.name(), path.display());
+                }
             }
         }
         out.push(json!({"name": t.name(), "arch": arch, "image_id": id}));

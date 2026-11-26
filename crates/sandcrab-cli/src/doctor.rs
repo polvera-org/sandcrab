@@ -312,13 +312,22 @@ async fn docker(g: &Global, r: &mut Report, reap: Reap) {
             Ok(PinStatus::Unpinned { digest }) => r.add(
                 name,
                 Status::Warn,
-                format!(
-                    "{} present ({digest}) but not pinned on this host: spawns are refused; \
-                     `sandcrab template build {n}` rebuilds and pins it, \
-                     `sandcrab template pin {n}` adopts the existing image",
-                    t.image(),
-                    n = t.name()
-                ),
+                if t.manifest.template.external {
+                    format!(
+                        "{} present ({digest}) but not pinned on this host: spawns are \
+                         refused; `sandcrab template pin {}` adopts it",
+                        t.image(),
+                        t.name()
+                    )
+                } else {
+                    format!(
+                        "{} present ({digest}) but not pinned on this host: spawns are refused; \
+                         `sandcrab template build {n}` rebuilds and pins it, \
+                         `sandcrab template pin {n}` adopts the existing image",
+                        t.image(),
+                        n = t.name()
+                    )
+                },
             ),
             Err(SandboxError::DigestMismatch {
                 expected, actual, ..
@@ -335,9 +344,9 @@ async fn docker(g: &Global, r: &mut Report, reap: Reap) {
                 name,
                 Status::Fail,
                 format!(
-                    "{} not built; run `sandcrab template build {}`",
+                    "{} not present; {}",
                     t.image(),
-                    t.name()
+                    sandcrab_sdk::core::pins::obtain_hint(&t.manifest)
                 ),
             ),
             Err(e) => r.add(name, Status::Fail, e.to_string()),
@@ -389,8 +398,109 @@ async fn docker(g: &Global, r: &mut Report, reap: Reap) {
     }
 }
 
-pub async fn doctor(g: &Global, fix: bool, reap: Reap) -> anyhow::Result<u8> {
+/// With `--server-config`: the config's checks, and the backend, state and template
+/// directories it names for the checks that follow. `None`: the file did not load.
+fn server_config(
+    g: &Global,
+    path: &std::path::Path,
+    r: &mut Report,
+) -> Option<(Global, sandcrab_server::ServerConfig)> {
+    let c = match crate::doctor_server::load(path) {
+        Ok(c) => c,
+        Err(e) => {
+            r.add("server:config", Status::Fail, e);
+            return None;
+        }
+    };
+    let mut g = g.clone();
+    if let Some(b) = c.backend {
+        match crate::args::parse_backend(b.as_str()) {
+            Ok(b) => g.backend = Some(b),
+            Err(e) => {
+                r.add("server:config", Status::Fail, e);
+                return None;
+            }
+        }
+    }
+    if let Some(d) = &c.state_dir {
+        g.state_dir = Some(d.clone());
+    }
+    if !c.templates_dirs.is_empty() {
+        g.templates_dirs.clone_from(&c.templates_dirs);
+    } else if let Ok(state) = util::state_root(&g) {
+        g.templates_dirs = crate::args::default_templates_dirs(&state);
+    }
+    r.add(
+        "server:config",
+        Status::Ok,
+        format!(
+            "{} parses ({} backend)",
+            path.display(),
+            c.backend.map_or("no", |b| b.as_str())
+        ),
+    );
+    Some((g, c))
+}
+
+/// The server's own checks, after the backend and template checks ran with its directories.
+fn server_checks(g: &Global, c: &sandcrab_server::ServerConfig, r: &mut Report) {
+    let uid = sandcrab_sdk::core::private_dir::current_uid();
+    match util::state_root(g) {
+        Ok(state) => {
+            for (name, status, detail) in crate::doctor_server::checks(c, uid, &state) {
+                r.add(name, status, detail);
+            }
+        }
+        Err(e) => r.add("server:state_dir", Status::Fail, e.to_string()),
+    }
+    // Backend: its preflight, and the summary line of its checks above.
+    let backend = c.backend.map_or("none", |b| b.as_str());
+    match util::backend_builder(g) {
+        Err(e) => r.add("server:backend", Status::Fail, format!("{backend}: {e:#}")),
+        Ok(_) => {
+            let summary = r.0.iter().find(|c| c.name == backend);
+            let (status, detail) = summary.map_or_else(
+                || (Status::Ok, "preflight passed".to_owned()),
+                |c| (c.status, c.detail.clone()),
+            );
+            r.add("server:backend", status, format!("{backend}: {detail}"));
+        }
+    }
+    // The templates the server names: present, and pinned on this host.
+    let known = util::templates(g).map(|t| t.list()).unwrap_or_default();
+    for t in crate::doctor_server::named_templates(c) {
+        let name = format!("server:template:{t}");
+        if !known.iter().any(|k| k.name() == t) {
+            r.add(
+                name,
+                Status::Fail,
+                format!("not found in {:?}", g.templates_dirs),
+            );
+            continue;
+        }
+        match r.0.iter().find(|c| c.name == format!("template:{t}")) {
+            Some(c) => {
+                let (status, detail) = (c.status, c.detail.clone());
+                r.add(name, status, detail);
+            }
+            None => r.add(
+                name,
+                Status::Info,
+                "found; its pin was not checked in this build",
+            ),
+        }
+    }
+}
+
+pub async fn doctor(
+    g: &Global,
+    fix: bool,
+    reap: Reap,
+    server: Option<&std::path::Path>,
+) -> anyhow::Result<u8> {
     let mut r = Report::default();
+    let server = server.and_then(|p| server_config(g, p, &mut r));
+    let g = server.as_ref().map_or(g, |(g, _)| g);
     rust(&mut r);
     #[cfg(feature = "docker")]
     docker(g, &mut r, reap).await;
@@ -415,6 +525,9 @@ pub async fn doctor(g: &Global, fix: bool, reap: Reap) -> anyhow::Result<u8> {
         "libkrun: not compiled into this build (macOS aarch64 and Linux only)",
     );
     state_dir(g, &mut r, fix);
+    if let Some((g, c)) = &server {
+        server_checks(g, c, &mut r);
+    }
 
     let ok = r.0.iter().all(|c| c.status != Status::Fail);
     if g.json {

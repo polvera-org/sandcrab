@@ -6,11 +6,14 @@ This document captures the detailed technical blueprint for executing Sandcrab a
 
 ## Status
 
-State on branch `feat/phase-1`: Phase 1 (V1) is done, and Phase 2 is partly done (the
-libkrun backend, plus the Firecracker backend validated on real KVM). Execution flows:
-[`plans/phase-1-mvp.flow.yaml`](plans/phase-1-mvp.flow.yaml) and
-[`plans/libkrun-backend.flow.yaml`](plans/libkrun-backend.flow.yaml). Decisions:
-[ADR 0001](decisions/0001-phase-1-decisions.md), [design/libkrun-backend.md](design/libkrun-backend.md).
+State on branch `feat/sdk-milestone`: Phase 1 (V1) is done, Phase 2 is partly done (the
+libkrun backend, plus the Firecracker backend validated on real KVM), and the server and
+TypeScript SDK milestone, pulled ahead from Phase 3, is done. Execution flows:
+[`plans/phase-1-mvp.flow.yaml`](plans/phase-1-mvp.flow.yaml),
+[`plans/libkrun-backend.flow.yaml`](plans/libkrun-backend.flow.yaml) and
+[`plans/sdk-milestone.flow.yaml`](plans/sdk-milestone.flow.yaml). Decisions:
+[ADR 0001](decisions/0001-phase-1-decisions.md), [ADR 0002](decisions/0002-server-and-sdk.md),
+[design/libkrun-backend.md](design/libkrun-backend.md), [design/server-and-sdk.md](design/server-and-sdk.md).
 
 ### V1 (Phase 1): done
 
@@ -67,7 +70,44 @@ Final review verdict: **ship with follow-ups** (no critical, high or open medium
 - **Benchmarks** on three hosts (dev-vps, kvm-dedicated, mac-m2) with a per-host report;
   all runs are indicative (none is marked valid).
 
+### Server and SDK milestone: done
+
+Results per host, and what was not verified: [reviews/sdk-milestone-results.md](reviews/sdk-milestone-results.md).
+Review: [reviews/sdk-milestone-review.md](reviews/sdk-milestone-review.md).
+
+- **`sandcrab server`** (`sandcrab-server`): one explicitly chosen backend (Docker or libkrun),
+  a Unix socket with a peer-uid check, sandboxes owned per uid, a sandbox user rule, labels and
+  TTLs, allowed mount roots with host folders at the same path, limits sized from the fd limit,
+  notifications, graceful shutdown, removal of a predecessor's sandboxes. A systemd unit for
+  Linux; on macOS a child of the client with `--lifeline-stdin`. Guide: [server.md](server.md).
+- **Server API 1.0**: control, process and forward connections, records end to end, a JSON Schema
+  snapshot from which the SDK generates its types ([protocol.md](protocol.md#server-api-client--sandcrab-server)).
+- **Protocol 0.3** between host and `crabd`: `process.open` with a supervisor per process that
+  kills the whole tree, exact env and argv, per-process limits; forwards announced by `crabd`,
+  never dialled by it; `fs.identity`.
+- **TypeScript SDK** (`sdk/typescript`, `@sandcrab/sdk`): spawn, bounded exec with five
+  outcomes, mounts, forwards to a TCP port, a Unix socket or an in-process handler, events,
+  capabilities and a self-test that runs as the caller. A fake server for unit tests.
+- **Self-test**: 15 named lines per template, a pass only on a specific refusal.
+- **Bring-your-own-image templates** (`external = true`), pinned like built ones.
+- Verified: 1037 Rust tests; TS unit 64/64; TS e2e 52 pass, 2 skipped on Docker and libkrun
+  (Linux KVM and Apple Silicon); live on `dev-vps` (root systemd service, client in a container)
+  and `mac-m2` (server as a child); the adopter's conformance suite through a pilot adapter on
+  both backends. Targets (forward 50 MB/s, warm Docker exec p50 30 ms) met on every host.
+
 ### Next
+
+Next milestone candidates, in order:
+
+1. **Python SDK** on the same server API.
+2. **The egress allowlist** and the secret-injection proxy (Phase 3), so `egress_restricted` and
+   `secrets` stop being refused.
+3. **Open items from the milestone's reports**: the review backlog below; `unrestricted` network
+   and the macOS Docker `tcp` transport through the server end to end; a `sandbox.destroyed` with
+   reason `backend_exit`; the default log level hides refused connections and sandbox events (F8);
+   `doctor --server-config` runs every backend's checks (F9); `doctor --backend libkrun` exits 1
+   for unbuilt templates it does not need; a libkrun systemd unit on Linux; the libkrun netstack
+   e2e on a host whose libkrun has the `net` feature.
 
 In progress (flow step `integrity-fixes`): the top three items of the review backlog below
 (R18, N2, N3).
@@ -93,9 +133,27 @@ Review backlog, in priority order ([reviews/libkrun-backend-review.md](reviews/l
 11. Docs only: R13 (DNS via the host resolver), R15 (uplink snapshot), R17 (tool processes
     share `crabd serve`'s uid).
 
+Server and SDK milestone review backlog ([reviews/sdk-milestone-review.md](reviews/sdk-milestone-review.md)):
+
+- **M1:** `crabd serve` as a subreaper that kills what a dead supervisor leaves (today:
+  `tree_clean: false`, the client destroys the sandbox; stated in [server.md](server.md)).
+- **m2:** two codes named `LIMIT_EXCEEDED` (server -32104, guest -32011).
+- **m3:** `server.capabilities` says `tree_kill: "subreaper"` with no live sandbox or self-test
+  behind it; report `"unknown"` until there is evidence.
+- **m4:** `destroy_by_label` can answer `empty: true` while a create of that uid is between
+  spawn and `set_owner`.
+- **m5:** refuse `/`, `/run`, `/var/run` as mount roots; protect the Docker socket's directory;
+  catch a protected directory bind-mounted below a requested mount.
+- **m6:** a Linux e2e for the cross-uid guarantee (a second uid on the build host).
+- **m7:** sleeps used as synchronisation in server and TS unit tests.
+- **m8:** one run of the server under the systemd unit before the pilot. (Done on `dev-vps` in
+  `live-linux`; the hardening options were not tested one by one.)
+- **m9:** self-test sandboxes are not counted against `max_sandboxes`.
+- Nits: process ids share one namespace across uids; `server.hello` does not advertise
+  `max_disk_mb`; `sandbox.destroyed` can be sent twice in a race.
+
 Also next:
 
-- `doctor`'s libkrun summary still says "e2e pending"; drop the note.
 - Benchmarks: Docker on mac-m2 (`--backends docker,libkrun`) in an idle weekend window; one
   interleaved, valid `docker,firecracker,libkrun` run on an SSD/NVMe KVM host (kvm-dedicated's
   HDDs skew Docker); rerun Firecracker with its memory/CPU probes ([bench/README.md](bench/README.md#open-bench-todo)).
@@ -108,18 +166,19 @@ Also next:
 
 ### Later
 
-- **Phase 2 remainder:** Cloud Hypervisor backend; Firecracker `jailer` confinement (until
+- **Phase 2 remainder (on hold):** the focus is Docker and libkrun. Cloud Hypervisor backend; Firecracker `jailer` confinement (until
   then `multi_tenant_safe = false`) and snapshots; libkrun helper confinement (Seatbelt on
   macOS, Landlock + seccomp + per-sandbox uid on Linux); `tar.zst` transfers,
   `stream_event` output streaming; Tier 3 browser tools.
 - **Phase 3:** the egress allowlist and secret-injection proxy (`egress_restricted` and
-  `secrets` are refused at spawn time until then), server, MCP, other-language SDKs.
+  `secrets` are refused at spawn time until then). `sandcrab-server` and the TypeScript SDK were
+  pulled forward and are done; the Python SDK is next (see Phase 3).
 
 ---
 
 ## Tool Catalog (Target Agent Interface)
 
-Every tool exports a JSON Schema via `schemars` so LLM tool-calling (Anthropic, OpenAI, Gemini) and MCP servers bind directly to `sandcrab-protocol`.
+Every tool exports a JSON Schema via `schemars` so LLM tool-calling (Anthropic, OpenAI, Gemini) binds directly to `sandcrab-protocol`.
 
 ### Tier 1 — Core Computer-Use Tools (Phase 1 MVP)
 | Tool | Capabilities |
@@ -204,10 +263,13 @@ Every tool exports a JSON Schema via `schemars` so LLM tool-calling (Anthropic, 
 **Goal**: Turn Sandcrab into a deployable self-hosted platform consumable from any language or agent framework.
 
 ### Deliverables
-1. **`sandcrab-server`**: Axum REST + WebSocket + OpenAPI daemon, API key auth, workspace & sandbox lifecycle endpoints, TTL reaper, signed preview-URL reverse proxy.
-2. **`sandcrab-mcp`**: Model Context Protocol server exposing Sandcrab sandboxes and tools directly to MCP clients.
-3. **Egress & Secret-Injection Proxy**: Per-sandbox domain allowlists plus host-side HTTP proxy that injects API credentials on outbound requests so secrets never exist inside sandbox memory/env.
-4. **TypeScript & Python SDKs**: Thin clients generated from OpenAPI + streaming WebSocket/SSE helpers.
+1. **`sandcrab-server`**: *done in the server and SDK milestone, differently from this plan:* JSON-RPC over a Unix socket with a peer-uid check, no HTTP, no API key, no TCP listener ([ADR 0002](decisions/0002-server-and-sdk.md)). A remote listener, workspace endpoints and a preview-URL proxy remain open.
+2. **Egress & Secret-Injection Proxy**: Per-sandbox domain allowlists plus host-side HTTP proxy that injects API credentials on outbound requests so secrets never exist inside sandbox memory/env.
+3. **TypeScript & Python SDKs**: first-class clients so existing TypeScript and Python agent products can
+   replace their homegrown sandbox managers with Sandcrab. The TypeScript SDK is done (over the server API);
+   the Python SDK is next, on the same API.
+
+An MCP server is no longer planned: tools are consumed through the SDKs, the CLI and the exported JSON Schemas.
 
 ---
 

@@ -1,0 +1,38 @@
+[package]
+name = "sandcrab-server"
+description = "Sandcrab host daemon: a Unix-socket JSON-RPC API over one explicitly chosen backend"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+default = ["docker"]
+# Backends come only through the SDK's features, like `sandcrab-cli`. `docker` adds the removal
+# of a predecessor's containers at start.
+docker = ["sandcrab-sdk/docker"]
+firecracker = ["sandcrab-sdk/firecracker"]
+libkrun = ["sandcrab-sdk/libkrun"]
+
+[dependencies]
+sandcrab-sdk = { workspace = true, default-features = false }
+chrono.workspace = true
+getrandom.workspace = true
+rustix = { workspace = true, features = ["fs"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+toml.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+sandcrab-core = { workspace = true, features = ["test-util"] }
+tempfile.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

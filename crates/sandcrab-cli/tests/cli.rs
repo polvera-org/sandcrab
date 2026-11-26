@@ -344,7 +344,7 @@ fn firecracker_doctor_section() {
     }
     let summary = find(&v, "firecracker");
     let detail = summary["detail"].as_str().unwrap();
-    assert!(detail.contains("e2e pending"), "{detail}");
+    assert!(!detail.contains("e2e pending"), "{detail}");
     if !kvm_usable() {
         assert!(
             detail.starts_with("Firecracker: unavailable (") && detail.contains("/dev/kvm"),
@@ -393,6 +393,7 @@ fn docker_unpinned_template_is_refused_by_default() {
         })
         .collect();
     std::fs::write(dir.join("sandcrab.toml"), manifest).unwrap();
+    std::fs::write(dir.join("Dockerfile"), "FROM scratch\n").unwrap();
     let tpl = cli.state.path().join("tpl");
     let tpl = tpl.to_str().unwrap();
 
@@ -452,6 +453,100 @@ fn docker_unpinned_template_is_refused_by_default() {
         "true",
     ]);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+}
+
+/// A public third-party image with Node, git and Python (`node:24-bookworm`), pinned by its
+/// multi-arch index digest. Pulled by the test when missing.
+const EXTERNAL_NODE_IMAGE: &str =
+    "node@sha256:49f7adaf9f1574bc45c20ea317139b39a59d7e758d0e93745e112fd85cb42623";
+
+/// An external template (bring your own image): refused until pinned, not buildable, then
+/// `template pin` adopts it and it runs with the image's own programs.
+#[test]
+#[ignore = "needs Docker, network access to pull node:24-bookworm, and a static crabd"]
+fn docker_external_template_pin_and_run() {
+    let pull = Command::new("docker")
+        .args(["pull", "-q", EXTERNAL_NODE_IMAGE])
+        .status()
+        .unwrap();
+    assert!(pull.success(), "docker pull {EXTERNAL_NODE_IMAGE}");
+    let cli = Cli::new(true);
+    let dir = cli.state.path().join("tpl/node-ext");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("sandcrab.toml"),
+        format!(
+            "[template]\nname = \"node-ext\"\nversion = \"1.0.0\"\nimage = \"{EXTERNAL_NODE_IMAGE}\"\n\
+             external = true\n\n[resources]\nvcpu = 1\nmemory_mb = 512\ndisk_mb = 2048\n\n\
+             [tools]\ntiers = [\"core\", \"process\"]\n"
+        ),
+    )
+    .unwrap();
+    let tpl = cli.state.path().join("tpl");
+    let tpl = tpl.to_str().unwrap();
+    let pins = cli.state.path().join("pins");
+    let with_pins = |args: &[&str]| {
+        let mut all = vec!["--templates-dir", tpl];
+        all.extend_from_slice(args);
+        let out = cli
+            .cmd(&all)
+            .env("SANDCRAB_TEMPLATE_PINS", &pins)
+            .output()
+            .unwrap();
+        eprintln!(
+            "$ {args:?} -> {:?}\n{}{}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout),
+            stderr(&out)
+        );
+        out
+    };
+    let probe = [
+        "run",
+        "-t",
+        "node-ext",
+        "--",
+        "bash",
+        "-c",
+        "node --version && git --version && python3 --version",
+    ];
+
+    // Unpinned: refused, and the message says how to pin it (not how to build it).
+    let out = with_pins(&probe);
+    assert_eq!(out.status.code(), Some(1));
+    let err = stderr(&out);
+    assert!(err.contains("UnpinnedImage"), "{err}");
+    assert!(err.contains("external template `node-ext`"), "{err}");
+    assert!(err.contains("sandcrab template pin node-ext"), "{err}");
+    assert!(!err.contains("build.sh"), "{err}");
+
+    // Not buildable.
+    let out = with_pins(&["template", "build", "node-ext"]);
+    assert_ne!(out.status.code(), Some(0));
+    assert!(stderr(&out).contains("is external"), "{}", stderr(&out));
+
+    // Adopt the pulled image, then it runs.
+    let out = with_pins(&["template", "pin", "node-ext"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(stderr(&out).contains("not provenance"), "{}", stderr(&out));
+    let arch = match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        _ => "amd64",
+    };
+    let pin: Value = serde_json::from_str(
+        &std::fs::read_to_string(pins.join(format!("node-ext/1.0.0/{arch}.json"))).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(pin["source"], "adopt");
+    assert_eq!(pin["image"], EXTERNAL_NODE_IMAGE);
+
+    let out = with_pins(&probe);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert!(lines[0].starts_with('v'), "{stdout}");
+    assert!(lines[1].starts_with("git version"), "{stdout}");
+    assert!(lines[2].starts_with("Python 3"), "{stdout}");
 }
 
 #[test]

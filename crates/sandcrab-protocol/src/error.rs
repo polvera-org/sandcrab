@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
 
+use crate::process::SpawnTarget;
+
 /// JSON-RPC 2.0 standard and Sandcrab application error codes.
 pub mod codes {
     /// Invalid JSON was received.
@@ -32,6 +34,14 @@ pub mod codes {
     pub const UNIMPLEMENTED: i64 = -32007;
     /// The connection did not authenticate (missing, wrong or late `auth` frame).
     pub const UNAUTHORIZED: i64 = -32008;
+    /// The peer speaks another protocol version (`hello` from a host of another version).
+    pub const UNSUPPORTED_VERSION: i64 = -32009;
+    /// `process.open`: the program could not be started. Retrying will not help.
+    pub const SPAWN_FAILED: i64 = -32010;
+    /// `process.open`: a sandbox-wide limit (e.g. processes open at once) is reached.
+    pub const LIMIT_EXCEEDED: i64 = -32011;
+    /// `process.open`: a `process.cancel` for this id arrived before the program started.
+    pub const CANCELLED: i64 = -32012;
 }
 
 /// JSON-RPC 2.0 error object (`{"code", "message", "data"?}`).
@@ -92,6 +102,23 @@ pub enum ProtocolError {
     #[error("unauthorized: {0}")]
     Unauthorized(String),
 
+    /// The peer speaks another protocol version. `crabd` answers `hello` with this.
+    #[error("unsupported protocol version: crabd speaks {crabd}, host speaks {host}")]
+    UnsupportedVersion { crabd: String, host: String },
+
+    /// `process.open`: the program could not be started (`errno` such as `ENOENT`, and
+    /// whether the `program` or the `cwd` failed). The sandbox works; retrying will not help.
+    #[error("could not start the {what}: {errno}")]
+    SpawnFailed { errno: String, what: SpawnTarget },
+
+    /// `process.open`: a sandbox-wide limit is reached (`what`, e.g. `processes`).
+    #[error("limit exceeded: at most {limit} {what}")]
+    LimitExceeded { what: String, limit: u64 },
+
+    /// `process.open`: cancelled by `process.cancel` before the program started.
+    #[error("cancelled: {0}")]
+    Cancelled(String),
+
     /// Any error code this crate does not model; preserved verbatim.
     #[error("error {code}: {message}")]
     Other {
@@ -119,6 +146,10 @@ impl ProtocolError {
             Self::TooLarge { .. } => codes::TOO_LARGE,
             Self::Unimplemented(_) => codes::UNIMPLEMENTED,
             Self::Unauthorized(_) => codes::UNAUTHORIZED,
+            Self::UnsupportedVersion { .. } => codes::UNSUPPORTED_VERSION,
+            Self::SpawnFailed { .. } => codes::SPAWN_FAILED,
+            Self::LimitExceeded { .. } => codes::LIMIT_EXCEEDED,
+            Self::Cancelled(_) => codes::CANCELLED,
             Self::Other { code, .. } => *code,
         }
     }
@@ -136,7 +167,13 @@ impl ProtocolError {
             | Self::PathNotAllowed(d)
             | Self::NotFound(d)
             | Self::Unimplemented(d)
-            | Self::Unauthorized(d) => Some(json!({ "detail": d })),
+            | Self::Unauthorized(d)
+            | Self::Cancelled(d) => Some(json!({ "detail": d })),
+            Self::UnsupportedVersion { crabd, host } => {
+                Some(json!({ "crabd": crabd, "host": host }))
+            }
+            Self::SpawnFailed { errno, what } => Some(json!({ "errno": errno, "what": what })),
+            Self::LimitExceeded { what, limit } => Some(json!({ "what": what, "limit": limit })),
             Self::TimedOut { timeout_ms } => Some(json!({ "timeout_ms": timeout_ms })),
             Self::AmbiguousEdit { path, occurrences } => {
                 Some(json!({ "path": path, "occurrences": occurrences }))
@@ -184,6 +221,32 @@ impl ProtocolError {
             codes::NOT_FOUND => Some(Self::NotFound(detail())),
             codes::UNIMPLEMENTED => Some(Self::Unimplemented(detail())),
             codes::UNAUTHORIZED => Some(Self::Unauthorized(detail())),
+            codes::CANCELLED => Some(Self::Cancelled(detail())),
+            codes::UNSUPPORTED_VERSION => {
+                str_field("crabd")
+                    .zip(str_field("host"))
+                    .map(|(crabd, host)| Self::UnsupportedVersion {
+                        crabd: crabd.to_owned(),
+                        host: host.to_owned(),
+                    })
+            }
+            codes::SPAWN_FAILED => str_field("errno")
+                .zip(data.and_then(|d| d.get("what")))
+                .and_then(|(errno, what)| {
+                    let what = serde_json::from_value(what.clone()).ok()?;
+                    Some(Self::SpawnFailed {
+                        errno: errno.to_owned(),
+                        what,
+                    })
+                }),
+            codes::LIMIT_EXCEEDED => {
+                str_field("what")
+                    .zip(u64_field("limit"))
+                    .map(|(what, limit)| Self::LimitExceeded {
+                        what: what.to_owned(),
+                        limit,
+                    })
+            }
             codes::TIMED_OUT => {
                 u64_field("timeout_ms").map(|timeout_ms| Self::TimedOut { timeout_ms })
             }

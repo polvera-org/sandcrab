@@ -352,6 +352,12 @@ fn hello_and_ping() {
         protocol_version: PROTOCOL_VERSION.into(),
         tools: TOOL_NAMES.iter().map(|s| s.to_string()).collect(),
         default_cwd: "/workspace".into(),
+        features: vec![
+            features::PROCESS_OPEN.into(),
+            features::FORWARD.into(),
+            features::TREE_KILL_SUBREAPER.into(),
+        ],
+        forward_ports: vec![5432],
     });
     assert_eq!(
         Reply::from_method_value("hello", reply.to_value()).unwrap(),
@@ -425,4 +431,130 @@ fn stream_event_round_trip() {
         panic!()
     };
     assert_eq!(StreamEvent::from_notification(&n).unwrap(), ev);
+}
+
+#[test]
+fn protocol_version_is_0_3() {
+    assert_eq!(PROTOCOL_VERSION, "0.3");
+}
+
+#[test]
+fn hello_version_rule() {
+    // A hello without a version is still answered; the same version is accepted.
+    HelloParams::default().check_version().unwrap();
+    HelloParams {
+        protocol_version: Some(PROTOCOL_VERSION.into()),
+        client: None,
+    }
+    .check_version()
+    .unwrap();
+    // A 0.2 host is refused with UNSUPPORTED_VERSION naming both versions.
+    let err = HelloParams {
+        protocol_version: Some("0.2".into()),
+        client: Some("sandcrab-core/0.1.0".into()),
+    }
+    .check_version()
+    .unwrap_err();
+    assert_eq!(
+        err,
+        ProtocolError::UnsupportedVersion {
+            crabd: "0.3".into(),
+            host: "0.2".into()
+        }
+    );
+    assert_eq!(err.code(), codes::UNSUPPORTED_VERSION);
+}
+
+#[test]
+fn hello_from_a_0_2_crabd_still_parses() {
+    // No `features` / `forward_ports`: the host can read the version and refuse it cleanly
+    // instead of failing on a malformed result.
+    let v = json!({
+        "crabd_version": "0.1.0",
+        "protocol_version": "0.2",
+        "tools": ["bash"],
+        "default_cwd": "/workspace",
+    });
+    let Reply::Hello(h) = Reply::from_method_value("hello", v).unwrap() else {
+        panic!("hello")
+    };
+    assert_eq!(h.protocol_version, "0.2");
+    assert!(h.features.is_empty() && h.forward_ports.is_empty());
+}
+
+#[test]
+fn non_tool_calls_round_trip() {
+    let calls = [
+        Call::ProcessCancel(ProcessCancelParams {
+            process_id: "6f1c2a43-8a51-4c43-9d3e-2b0a8e9c1f00".into(),
+            grace_ms: Some(0),
+        }),
+        Call::FsIdentity(FsIdentityParams {
+            paths: vec!["/workspace".into(), "/data".into()],
+        }),
+        Call::ForwardStats,
+    ];
+    for call in calls {
+        assert!(!TOOL_NAMES.contains(&call.method()), "{}", call.method());
+        let frame = encode_frame(&call.to_request(9)).unwrap();
+        let mut dec = FrameDecoder::new();
+        dec.push(&frame);
+        let RpcMessage::Request(req) =
+            RpcMessage::from_slice(&dec.next_frame().unwrap().unwrap()).unwrap()
+        else {
+            panic!("request")
+        };
+        assert_eq!(Call::from_request(&req).unwrap(), call);
+    }
+    assert_eq!(
+        Call::from_method_params("forward.stats", Value::Null).unwrap(),
+        Call::ForwardStats
+    );
+
+    for (method, params) in [
+        ("process.cancel", json!({})),
+        ("process.cancel", json!({"process_id": "x", "force": true})),
+        ("fs.identity", json!({"paths": []})),
+        ("fs.identity", json!({"paths": ["relative"]})),
+        ("fs.identity", json!({"paths": ["/a"], "follow": false})),
+        ("forward.stats", json!({"port": 1})),
+    ] {
+        assert_eq!(
+            Call::from_method_params(method, params.clone())
+                .unwrap_err()
+                .code(),
+            codes::INVALID_PARAMS,
+            "{method} {params}"
+        );
+    }
+
+    let replies = [
+        (
+            "process.cancel",
+            Reply::ProcessCancel(ProcessCancelResult {
+                was_running: true,
+                tree_clean: true,
+            }),
+        ),
+        (
+            "fs.identity",
+            Reply::FsIdentity(FsIdentityResult(vec![FileIdentity { dev: 2049, ino: 7 }])),
+        ),
+        (
+            "forward.stats",
+            Reply::ForwardStats(ForwardStatsResult(vec![ForwardPortStats {
+                port: 80,
+                accepted: 1,
+                refused: ForwardRefused::default(),
+            }])),
+        ),
+    ];
+    for (method, reply) in replies {
+        let v = reply.to_value();
+        assert_eq!(Reply::from_method_value(method, v).unwrap(), reply);
+    }
+    assert_eq!(
+        Reply::FsIdentity(FsIdentityResult(vec![FileIdentity { dev: 1, ino: 2 }])).to_value(),
+        json!([{"dev": 1, "ino": 2}])
+    );
 }

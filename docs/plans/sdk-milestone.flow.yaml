@@ -1,0 +1,241 @@
+# ministack execution flow: sdk-milestone
+# Validate with: node <ministack>/scripts/validate-flow.mjs docs/plans/sdk-milestone.flow.yaml
+
+slug: sdk-milestone
+name: "Server, TypeScript SDK and socket forwards"
+summary: >-
+  Make Sandcrab usable from a non-Rust application that has no backend access of its own: a host daemon
+  (`sandcrab-server`) on a Unix socket (JSON-RPC 2.0 control, raw byte streams beside it), a TypeScript SDK that talks to it, and the generic
+  primitives a first adopter needs to put Sandcrab behind its own process-launcher interface (spawn, exec, sweep,
+  reap, capabilities): argv exec with an exact env, byte streams both ways, tree kill with grace, per-process
+  limits, folders mounted at the same absolute path, forwards from a sandbox with no network back to endpoints the
+  client names, labels that survive a client restart, and a self-test that earns the isolation claim. Docker and libkrun only. The adopter keeps its own
+  egress proxy and reaches it through a forward; Sandcrab's own egress proxy stays Phase 3.
+phases: [plan, implement, verify, document]
+
+steps:
+  - id: contract-research
+    phase: plan
+    agent: nova
+    title: "Derive the adopter contract: from its code, then from its launcher spec and the interface as built (spawn / exec / sweep / reap / capabilities, nine invariants, a conformance suite). Private notes only"
+    depends_on: []
+    status: done
+
+  - id: design
+    phase: plan
+    agent: turing
+    title: "Design doc + ADR 0002: every field and invariant of the adopter's launcher interface mapped to a Sandcrab primitive; server API, protocol 0.3, forwards that end at the client, same-path mounts, self-test, bring-your-own-image"
+    depends_on: [contract-research]
+    artifacts: [docs/design/server-and-sdk.md, docs/decisions/0002-server-and-sdk.md]
+    status: done
+
+  - id: design-review
+    phase: plan
+    agent: nebula
+    title: "Review of plan and design from the adopter's side (3 blockers, 9 major, 10 minor; kept private: it names the adopter)"
+    depends_on: [design]
+    status: done
+
+  - id: design-rev
+    phase: plan
+    agent: turing
+    title: "Revise design + ADR for the review and the MVP scope: records end to end on one connection per process (no second stderr connection, no process.wait, no unary exec); labels in server memory and a new server removes what its predecessor left (no orphan state); allowed roots with the identity path only (no path map); no cross-sandbox nesting rule; server as root on Linux, socket directory mounted, socket group; allowed uids default to the server's own; version + features in server.hello; cancel / abort / unavailable rules; env never logged; API cut to what a launcher needs"
+    depends_on: [design-review]
+    artifacts: [docs/design/server-and-sdk.md, docs/decisions/0002-server-and-sdk.md]
+    status: done
+
+  - id: adopter-flow
+    phase: plan
+    agent: nova
+    title: "Author the adopter-side flow in the adopter's own repository: suite changes first (program path option, pid assertions skipped without a recovery record, sweep by grouping key), folder sets and grouping key for short execs, a Sandcrab-backed launcher around the local one, deployment changes, then deletions. Not tracked in this repo"
+    depends_on: [design-rev]
+    status: done
+
+  - id: protocol-03
+    phase: implement
+    agent: ada
+    title: "sandcrab-protocol 0.3 (crabd side): process.open with argv, exact env, cwd, rlimits, stderr tail / merge / stream, caps, timeout; the record format (stdin, stdin EOF, stdout, stderr, exit); cancel; forward.listen / incoming / accept; init.configure options (exec /tmp, pids, nofile, forward ports); hello features; 0.2 refused cleanly; schema snapshots"
+    depends_on: [design-rev]
+    artifacts: [crates/sandcrab-protocol/src, docs/protocol.md]
+    status: done
+
+  - id: api-types
+    phase: implement
+    agent: ada
+    title: "Server API types and their exported JSON Schema in sandcrab-protocol (`api` module): server.hello with version and features, sandbox create / get / list / destroy / destroy by label, process spawn and cancel, forward attach, capabilities, self-test; error codes"
+    depends_on: [protocol-03]
+    artifacts: [crates/sandcrab-protocol/src/api.rs]
+    status: done
+
+  - id: guest-supervisor
+    phase: implement
+    agent: ada
+    title: "crabd: one `supervise` child per process as a subreaper (no capability, no unsafe), spec handed over out of band, exact env and argv, records on the connection, tree kill (ask, grace, force) that gets a grandchild which ignores TERM or left the group; first on Docker and libkrun as a spike, then the real thing"
+    depends_on: [protocol-03]
+    artifacts: [crates/sandcrab-guest/src/supervise.rs, crates/sandcrab-guest/src/proctree.rs, crates/sandcrab-guest/src/server.rs]
+    status: done
+
+  - id: guest-caps
+    phase: implement
+    agent: ada
+    title: "crabd supervisor limits: rlimits before exec, oom preference, guest-side timeout, output cap with kill or tail, stderr tail / merge / stream, exit after the last byte, nothing left when the call returns; env and stdin never logged"
+    depends_on: [guest-supervisor]
+    artifacts: [crates/sandcrab-guest/src/supervise.rs]
+    status: done
+
+  - id: guest-forwards
+    phase: implement
+    agent: ada
+    title: "crabd forwards: listen on guest 127.0.0.1:<port> for each port set at spawn, announce each connection on the host-held listen connection, relay on the accept connection; loopback only, caps, refusal counters, fails closed"
+    depends_on: [guest-supervisor]
+    artifacts: [crates/sandcrab-guest/src/forward.rs, crates/sandcrab-guest/src/server.rs, crates/sandcrab-guest/src/main.rs]
+    status: done
+
+  - id: guest-init
+    phase: implement
+    agent: ada
+    title: "crabd init (microVM): exec-capable /tmp and its size, pids and nofile limits, forward ports through init.configure"
+    depends_on: [protocol-03]
+    artifacts: [crates/sandcrab-guest/src/init]
+    status: done
+
+  - id: core-config
+    phase: implement
+    agent: ada
+    title: "sandcrab-core: forwards, exec /tmp, pids / nofile on SandboxConfig; ad-hoc host-dir mounts (ro / rw) at the client's own path under allowed roots, opened beneath a held root fd, no symlinks, no nesting inside one sandbox; labels in the manager, list by label and creation time, destroy by label with a confirmed-empty answer; Firecracker refuses forwards and ad-hoc mounts explicitly; fix the struct literals in every backend crate and the bench"
+    depends_on: [protocol-03]
+    artifacts: [crates/sandcrab-core/src, crates/sandcrab-backend-firecracker/src]
+    status: done
+
+  - id: core-streams
+    phase: implement
+    agent: ada
+    title: "sandcrab-core host side: process.open client with records and backpressure, cancel; forward listen / accept with a target resolver; FakeBackend coverage"
+    depends_on: [core-config]
+    artifacts: [crates/sandcrab-core/src/process.rs, crates/sandcrab-core/src/forward.rs, crates/sandcrab-core/src/client.rs]
+    status: done
+
+  - id: docker-backend
+    phase: implement
+    agent: ada
+    title: "Docker backend: forwards with network `none`, exec /tmp option, limits, ad-hoc same-path binds with an identity re-check after start, a sandbox user different from the server's (root server), labels; e2e: no network except the forwards"
+    depends_on: [core-streams, guest-forwards, guest-caps]
+    artifacts: [crates/sandcrab-backend-docker/src]
+    status: done
+
+  - id: libkrun-backend
+    phase: implement
+    agent: ada
+    title: "libkrun backend: forwards over vsock, the same options and limits through init.configure, ad-hoc virtio-fs shares at the same path with fd-pinned roots; e2e on macOS and Linux KVM"
+    depends_on: [core-streams, guest-forwards, guest-caps, guest-init]
+    artifacts: [crates/sandcrab-backend-libkrun/src]
+    status: done
+
+  - id: byo-image
+    phase: implement
+    agent: ada
+    title: "Templates from an existing OCI image: manifest with `external = true` and no Dockerfile, crabd injected, pinned host-locally by `sandcrab template pin`; Docker and the rootfs pipeline; unpinned is refused"
+    depends_on: [design-rev]
+    artifacts: [crates/sandcrab-core/src/template.rs, crates/sandcrab-rootfs/src, crates/sandcrab-cli/src, docs/template-pins.md]
+    status: done
+
+  - id: rust-sdk
+    phase: implement
+    agent: ada
+    title: "sandcrab-sdk, only what the server and the self-test need: process handle (records in, records out, cancel, exit), forwards with a resolver, mounts, labels, list and destroy by label"
+    depends_on: [core-streams, guest-caps]
+    artifacts: [crates/sandcrab-sdk/src]
+    status: done
+
+  - id: selftest
+    phase: implement
+    agent: ada
+    title: "`crabd probe` + self-test in the SDK: named lines in a fresh sandbox of a named template (no capabilities, no new privileges, no user namespace, loopback only, DNS / gateway / metadata refused, a forward reaches its target and nothing else, nothing readable outside the mounts, tree kill is real). A line passes only on a specific refusal; a timeout is inconclusive"
+    depends_on: [rust-sdk, docker-backend]
+    artifacts: [crates/sandcrab-guest/src/probe.rs, crates/sandcrab-sdk/src/selftest.rs]
+    status: done
+
+  - id: server-core
+    phase: implement
+    agent: ada
+    title: "New crate sandcrab-server + `sandcrab server`: Unix socket in a private directory, peer-uid check (default: the server's own uid), socket mode and optional group, one explicit backend, allowed mount roots, server.hello, sandbox lifecycle and labels, removal of a predecessor's sandboxes at start, TTL"
+    depends_on: [rust-sdk, api-types, byo-image]
+    artifacts: [crates/sandcrab-server, crates/sandcrab-cli/src]
+    status: done
+
+  - id: server-streams
+    phase: implement
+    agent: ada
+    title: "sandcrab-server streams: a connection per process carrying the records, cancel that cannot lose a race with spawn, a closed connection stops its tree; forward notifications and attach connections relayed to the client"
+    depends_on: [server-core]
+    artifacts: [crates/sandcrab-server/src]
+    status: done
+
+  - id: server-ops
+    phase: implement
+    agent: ada
+    title: "sandcrab-server operations: capabilities and self-test calls (per template), graceful shutdown, doctor checks, systemd unit example (root, hardened), how to run it as a child process on a Mac"
+    depends_on: [server-streams, selftest]
+    artifacts: [crates/sandcrab-server/src, crates/sandcrab-cli/src, docs/hosting.md]
+    status: done
+
+  - id: ts-sdk
+    phase: implement
+    agent: ada
+    title: "TypeScript SDK package (Node 26, no native code): socket client, types generated from the exported schemas, version check against server.hello; process handle returned at once (stdout AsyncIterable<Uint8Array>, write that never drops, end, cancel, exit that never rejects); bounded exec (AbortSignal, Readable in, Writable out, caps, live onOutput with a client-side tail); forward targets: loopback port, Unix socket, in-process handler; labels, list, destroy; capabilities and self-test; unit tests on an in-process fake server, one a minor behind"
+    depends_on: [api-types]
+    artifacts: [sdk/typescript]
+    status: done
+
+  - id: ts-contract
+    phase: implement
+    agent: ada
+    title: "Walking skeleton: the process-contract suite in TypeScript against a real server on Docker, mirroring the adopter's launcher invariants (exact env and argv; 1 MiB mixed UTF-8 and CRLF; stdin end / open; cancel kills a TERM-ignoring grandchild, twice is fine; could-not-start; bound vs. abort incl. a pre-aborted signal; cap with kill and tail, live output under a tail cap; streams in and out; abandoned reader). Warm-exec latency measured"
+    depends_on: [server-streams, ts-sdk]
+    artifacts: [sdk/typescript/test]
+    status: done
+
+  - id: ts-e2e
+    phase: implement
+    agent: ada
+    title: "Full e2e as a matrix on Docker and libkrun: mounts at the same path, forwards (TCP port, Unix socket, handler; undeclared port refused; throughput and 16 parallel connections), a pipeline between two sandboxes with a paused reader, destroy by label confirmed empty, client killed then reaped by a new client, server restart (exit is not `unavailable`, client reconnects), 16 concurrent sandboxes; CI job for the SDK; server and SDK tarball in the release packaging"
+    depends_on: [ts-contract, server-ops, docker-backend, libkrun-backend]
+    artifacts: [sdk/typescript/test, .github/workflows/ci.yml, scripts/package-release.sh]
+    status: done
+
+  - id: review
+    phase: verify
+    agent: nebula
+    title: "QA + security review, MVP posture (fix medium and up, backlog the rest): peer-uid check and socket modes, no mount outside the allowed roots or of the server's own directories, a forward reaches only what the client named, no network besides forwards, exact env and nothing logged, bounded memory, nothing outlives a command, no backend downgrade, self-test cannot pass on a timeout; fmt / clippy / unit / e2e green"
+    depends_on: [ts-e2e, byo-image]
+    artifacts: [docs/reviews/sdk-milestone-review.md]
+    status: done
+
+  - id: live-linux
+    phase: verify
+    agent: nova
+    title: "Live on the Linux VPS (Docker, no KVM): root server as a systemd service; client in a hardened container with the socket directory and a host data directory bound at the same path; external template; a monorepo install + build + test through a forward to a proxy in the client's container; server restart without a container restart. Targets: a forwarded stream at 50 MB/s, 16 parallel connections with no reset, warm exec p50 at or under 30 ms; self-test green"
+    depends_on: [ts-e2e]
+    status: done
+
+  - id: live-mac
+    phase: verify
+    agent: nova
+    title: "Live on the Mac (libkrun): server as a child of the client process, identity paths incl. one under a symlinked temp root, a folder edited from the host mid-run, forwards over vsock, a line-duplex process, guest clock after a host sleep, self-test green"
+    depends_on: [ts-e2e]
+    status: done
+
+  - id: adopter-pilot
+    phase: verify
+    agent: nova
+    title: "Pilot in the adopter's repository (its own branch and worktree): a Sandcrab-backed launcher passes the adopter's launcher conformance suite on Docker and on libkrun, then a sandboxed check step and one agent run go through it. The milestone's exit test"
+    depends_on: [live-linux, live-mac, adopter-flow]
+    status: done
+
+  - id: docs
+    phase: document
+    agent: rosetta
+    title: "docs/server.md, docs/sdk-typescript.md, protocol.md 0.3, hosting.md (server per platform; socket directory, allowed uids, mount roots; drain before a server upgrade), bring-your-own-image guide, self-test reference, ROADMAP, AGENTS.md crate map, README, CHANGELOG"
+    depends_on: [review, live-linux, live-mac, adopter-pilot]
+    artifacts: [docs/server.md, docs/sdk-typescript.md, docs/protocol.md, docs/hosting.md, docs/ROADMAP.md, AGENTS.md, README.md, CHANGELOG.md]
+    status: done

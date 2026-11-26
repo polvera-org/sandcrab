@@ -913,6 +913,12 @@ mod tests {
             multi_tenant_safe: false,
             supports_snapshots: false,
             supports_host_dir_mounts: true,
+            supports_forwards: false,
+            supports_host_mounts: false,
+            supports_tmp_options: false,
+            supports_process_limits: false,
+            mount_identity_checked: false,
+            nproc_scope: sandcrab_sdk::core::NprocScope::HostUid,
         };
         let l = backend_line("docker", docker, false);
         assert!(l.starts_with("warning: backend `docker`:"), "{l}");

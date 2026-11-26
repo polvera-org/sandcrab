@@ -15,17 +15,27 @@
 //! - [`hardening`] — `no_new_privs` for `crabd serve` and everything it spawns.
 //! - [`tools`] — [`tools::dispatch`] plus one module per tool family.
 //! - [`tunnel`] — `tunnel.open`: raw relay to a guest loopback TCP port.
+//! - [`forward`] — `forward.listen` / `forward.accept` / `forward.stats`: guest loopback ports
+//!   whose connections the host routes.
+//! - [`supervise`] — `process.open` / `process.cancel` and `crabd supervise`, the per-program
+//!   supervisor that owns the connection and stops the program's whole tree.
+//! - [`proctree`] — the process tree of a supervisor, read from `/proc`.
+//! - [`probe`] — `crabd probe`, the self-test's in-sandbox half: one check, one JSON line.
 //! - [`vsock`] — AF_VSOCK listener (Linux only).
 //! - [`init`] — `crabd init`, PID 1 of a microVM (control port, mounts, workspace export).
 
 pub mod auth;
 pub mod codec;
 pub mod context;
+pub mod forward;
 pub mod hardening;
 pub mod init;
 pub mod preauth;
+pub mod probe;
+pub mod proctree;
 pub mod relay;
 pub mod server;
+pub mod supervise;
 pub mod tools;
 pub mod tunnel;
 pub mod vsock;

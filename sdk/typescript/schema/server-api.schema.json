@@ -1,0 +1,1595 @@
+{
+  "$defs": {
+    "Capabilities": {
+      "description": "`server.capabilities` result.",
+      "properties": {
+        "backend": {
+          "type": "string"
+        },
+        "hardware_isolated": {
+          "type": "boolean"
+        },
+        "max_mounts": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "mount_identity_checked": {
+          "description": "Whether the mount identity is checked again after start (design §6.3).",
+          "type": "boolean"
+        },
+        "multi_tenant_safe": {
+          "type": "boolean"
+        },
+        "nproc_scope": {
+          "description": "What `RLIMIT_NPROC` counts: `host_uid` (Docker: every process of the uid on the host) or `sandbox`.",
+          "type": "string"
+        },
+        "selftest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SelftestSummary"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "For the template named in the request. `null`: no template named, or never run."
+        },
+        "supports_forwards": {
+          "type": "boolean"
+        },
+        "supports_host_dir_mounts": {
+          "type": "boolean"
+        },
+        "tree_kill": {
+          "description": "`subreaper` or `process_group` (the named fallback).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "backend",
+        "hardware_isolated",
+        "max_mounts",
+        "mount_identity_checked",
+        "multi_tenant_safe",
+        "nproc_scope",
+        "supports_forwards",
+        "supports_host_dir_mounts",
+        "tree_kill"
+      ],
+      "type": "object"
+    },
+    "CapabilitiesParams": {
+      "additionalProperties": false,
+      "description": "`server.capabilities` params.",
+      "properties": {
+        "template": {
+          "description": "The template whose self-test summary to include.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "DestroyByLabelParams": {
+      "additionalProperties": false,
+      "description": "`sandbox.destroy_by_label` params.",
+      "properties": {
+        "labels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Not empty. Every label must match exactly.",
+          "type": "object"
+        }
+      },
+      "required": [
+        "labels"
+      ],
+      "type": "object"
+    },
+    "DestroyByLabelResult": {
+      "description": "`sandbox.destroy_by_label` result (design §7).",
+      "properties": {
+        "destroyed": {
+          "description": "Of those, destroyed.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "empty": {
+          "description": "True only when every destroy succeeded and a second look finds no match.",
+          "type": "boolean"
+        },
+        "matched": {
+          "description": "Sandboxes that matched at the first look.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "remaining": {
+          "description": "Sandbox ids that still match: a failed destroy, or one created meanwhile.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "destroyed",
+        "empty",
+        "matched",
+        "remaining"
+      ],
+      "type": "object"
+    },
+    "DestroyReason": {
+      "description": "Why a sandbox ended.",
+      "oneOf": [
+        {
+          "description": "`sandbox.destroy`, `sandbox.destroy_by_label` or a server stop.",
+          "enum": [
+            "destroyed"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Its TTL passed.",
+          "enum": [
+            "ttl"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The backend lost it (container or VM gone).",
+          "enum": [
+            "backend_exit"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "DetailData": {
+      "description": "`data` of `UNAVAILABLE`, `POLICY_UNENFORCEABLE` and `CONFLICT`.",
+      "properties": {
+        "detail": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "detail"
+      ],
+      "type": "object"
+    },
+    "Empty": {
+      "description": "An empty object: the result of `forward.reject` and `forward.attach`, and the error data of `SHUTTING_DOWN` and `UNAUTHORIZED`.",
+      "type": "object"
+    },
+    "ExecLimits": {
+      "additionalProperties": false,
+      "description": "Resource limits applied to the program before it starts. Each `None` inherits the sandbox's limit. A value above the sandbox's own hard limit is `-32602`, never clamped.",
+      "properties": {
+        "data_bytes": {
+          "description": "`RLIMIT_DATA`, at least 32 MiB.",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "fsize_bytes": {
+          "description": "`RLIMIT_FSIZE`.",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "nofile": {
+          "description": "`RLIMIT_NOFILE`, at least 64.",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "nproc": {
+          "description": "`RLIMIT_NPROC`. On Docker it counts every process of the uid on the host.",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "ForwardAttachParams": {
+      "additionalProperties": false,
+      "description": "`forward.attach` params: the first frame of a forwarded connection. Raw bytes follow the answer. Not attached within 10 s: the connection is rejected.",
+      "properties": {
+        "conn_id": {
+          "description": "From `forward.incoming`. Used once.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "conn_id"
+      ],
+      "type": "object"
+    },
+    "ForwardIncoming": {
+      "description": "`forward.incoming` notification: a program connected to a forward. The client connects its target, then attaches, or rejects.",
+      "properties": {
+        "conn_id": {
+          "description": "128 random bits, hex.",
+          "type": "string"
+        },
+        "guest_port": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sandbox_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "conn_id",
+        "guest_port",
+        "sandbox_id"
+      ],
+      "type": "object"
+    },
+    "ForwardInfo": {
+      "description": "A forward of a sandbox with its counters since start (design §4.2).",
+      "properties": {
+        "accepted": {
+          "description": "Connections handed to the serving client.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "guest_port": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "refused": {
+          "$ref": "#/$defs/ForwardRefused",
+          "description": "Connections closed, by reason. A refusal looks like a flaky network from inside."
+        }
+      },
+      "required": [
+        "accepted",
+        "guest_port",
+        "refused"
+      ],
+      "type": "object"
+    },
+    "ForwardRefused": {
+      "description": "Why connections to a forward port were closed, counted since start.",
+      "properties": {
+        "cap": {
+          "description": "Over a connection cap.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "no_listener": {
+          "description": "No `forward.listen` connection.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "rejected": {
+          "description": "`forward.reject` from the host.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "unclaimed": {
+          "description": "Announced but not accepted within 10 s.",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "cap",
+        "no_listener",
+        "rejected",
+        "unclaimed"
+      ],
+      "type": "object"
+    },
+    "ForwardRejectParams": {
+      "additionalProperties": false,
+      "description": "`forward.reject` params: the client could not reach its target.",
+      "properties": {
+        "conn_id": {
+          "description": "From `forward.incoming`.",
+          "type": "string"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "conn_id"
+      ],
+      "type": "object"
+    },
+    "ForwardServeParams": {
+      "additionalProperties": false,
+      "description": "`forward.serve` params: this control connection now serves the sandbox's forwards.",
+      "properties": {
+        "sandbox_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sandbox_id"
+      ],
+      "type": "object"
+    },
+    "ForwardServeResult": {
+      "description": "`forward.serve` result.",
+      "properties": {
+        "ports": {
+          "description": "The sandbox's forward ports.",
+          "items": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "ports"
+      ],
+      "type": "object"
+    },
+    "ForwardSpec": {
+      "additionalProperties": false,
+      "description": "A forward: a loopback port in the sandbox whose connections the serving client routes. The target is not part of the API.",
+      "properties": {
+        "guest_port": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_connections": {
+          "description": "Connections at once. Default 64.",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "guest_port"
+      ],
+      "type": "object"
+    },
+    "LimitExceededData": {
+      "description": "`data` of `LIMIT_EXCEEDED`.",
+      "properties": {
+        "limit": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "what": {
+          "description": "`sandboxes`, `processes`, `connections`, `vcpu`, ...",
+          "type": "string"
+        }
+      },
+      "required": [
+        "limit",
+        "what"
+      ],
+      "type": "object"
+    },
+    "MountMode": {
+      "description": "Read-only or read-write.",
+      "enum": [
+        "ro",
+        "rw"
+      ],
+      "type": "string"
+    },
+    "MountNotAllowedData": {
+      "description": "`data` of `MOUNT_NOT_ALLOWED`.",
+      "properties": {
+        "cap": {
+          "description": "The mount cap, when that is the reason.",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "path": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "MountSpec": {
+      "additionalProperties": false,
+      "description": "A host folder in the sandbox, at the same absolute path (design §6).",
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/MountMode"
+        },
+        "path": {
+          "description": "Absolute, resolved, no symlink on the way. The client's path, the host path and the guest path.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "mode",
+        "path"
+      ],
+      "type": "object"
+    },
+    "NetworkMode": {
+      "description": "The sandbox's network.",
+      "oneOf": [
+        {
+          "enum": [
+            "unrestricted"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Loopback only; forwards are the way out.",
+          "enum": [
+            "disabled"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "OutputCap": {
+      "additionalProperties": false,
+      "description": "A bound on stdout (and stderr with [`StderrMode::Merge`]).",
+      "properties": {
+        "max_bytes": {
+          "description": "At least 1. At most 8 MiB with `tail`.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "on_overflow": {
+          "$ref": "#/$defs/Overflow"
+        }
+      },
+      "required": [
+        "max_bytes",
+        "on_overflow"
+      ],
+      "type": "object"
+    },
+    "Overflow": {
+      "description": "What happens when stdout passes [`OutputCap::max_bytes`].",
+      "oneOf": [
+        {
+          "description": "Stream as usual; cut the record at the cap and stop the tree.",
+          "enum": [
+            "kill"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Do not stream; keep the last `max_bytes` and send them when the program has ended.",
+          "enum": [
+            "tail"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "ProcessCancelParams": {
+      "additionalProperties": false,
+      "description": "`process.cancel` params.",
+      "properties": {
+        "grace_ms": {
+          "description": "Grace between ask and force. Default 5000; 0 forces at once.",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "process_id": {
+          "description": "The `process_id` of a `process.open`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "process_id"
+      ],
+      "type": "object"
+    },
+    "ProcessCancelResult": {
+      "description": "`process.cancel` result, sent when the supervisor has exited. An unknown or finished id answers `was_running: false`.",
+      "properties": {
+        "tree_clean": {
+          "description": "False: something of the tree could not be stopped.",
+          "type": "boolean"
+        },
+        "was_running": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "tree_clean",
+        "was_running"
+      ],
+      "type": "object"
+    },
+    "ProcessExit": {
+      "description": "Payload of the `EXIT` record: how the program ended. Always the last record.",
+      "properties": {
+        "cancelled": {
+          "type": "boolean"
+        },
+        "code": {
+          "description": "Exit code, or `None` when a signal ended the leader.",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "duration_ms": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "overflow": {
+          "description": "stdout went over `output_cap.max_bytes`.",
+          "type": "boolean"
+        },
+        "signal": {
+          "description": "Signal that ended the leader.",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "stderr_tail": {
+          "description": "Last bytes of stderr, lossy UTF-8, cut at a character boundary. Empty with `merge`.",
+          "type": "string"
+        },
+        "timed_out": {
+          "type": "boolean"
+        },
+        "tree_clean": {
+          "description": "False: something of the tree could not be stopped. The caller should destroy the sandbox.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "cancelled",
+        "duration_ms",
+        "overflow",
+        "stderr_tail",
+        "timed_out",
+        "tree_clean"
+      ],
+      "type": "object"
+    },
+    "ProcessSpawnAck": {
+      "description": "`process.spawn` result, sent after the guest's ack. Records follow. No pid leaves the server.",
+      "properties": {
+        "process_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "process_id"
+      ],
+      "type": "object"
+    },
+    "ProcessSpawnParams": {
+      "additionalProperties": false,
+      "description": "`process.spawn` params: the first frame of a process connection. `sandbox_id`, then the fields of [`ProcessOpenParams`] at the same level. Unknown fields are rejected.",
+      "properties": {
+        "argv": {
+          "description": "`argv[0]` is the program. Not empty. No element contains NUL.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "cwd": {
+          "description": "Absolute. Default: the sandbox's default cwd.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "The exact environment. Nothing is added, nothing inherited.",
+          "type": "object"
+        },
+        "kill_grace_ms": {
+          "description": "Grace between ask and force at the bound, at the cap and on a closed connection. Default 500.",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "limits": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExecLimits"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "oom_score_adj": {
+          "description": "0..=1000. Only raises the score. Default: unchanged.",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "output_cap": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OutputCap"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "process_id": {
+          "description": "Chosen by the caller: a UUID. Lets a cancel arrive before the ack.",
+          "type": "string"
+        },
+        "sandbox_id": {
+          "type": "string"
+        },
+        "stderr": {
+          "$ref": "#/$defs/StderrMode",
+          "default": "tail"
+        },
+        "stderr_tail_bytes": {
+          "description": "Bytes of stderr kept for the exit with `tail` and `stream`. Default 4096, max 65536.",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "stdin": {
+          "$ref": "#/$defs/StdinMode",
+          "default": "null"
+        },
+        "timeout_ms": {
+          "description": "Wall-clock bound, timed in the guest. None: no bound.",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "argv",
+        "process_id",
+        "sandbox_id"
+      ],
+      "type": "object"
+    },
+    "Resources": {
+      "additionalProperties": false,
+      "description": "Sandbox resources. Each one left out is the server's default.",
+      "properties": {
+        "disk_mb": {
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "memory_mb": {
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "nofile": {
+          "description": "`RLIMIT_NOFILE` of the sandbox.",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "pids_max": {
+          "description": "The sandbox's pids limit (a cgroup limit).",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "vcpu": {
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "SandboxCreate": {
+      "additionalProperties": false,
+      "description": "`sandbox.create` params.",
+      "properties": {
+        "forwards": {
+          "default": [],
+          "description": "At most 16.",
+          "items": {
+            "$ref": "#/$defs/ForwardSpec"
+          },
+          "type": "array"
+        },
+        "labels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "At most 16. Key `[a-z0-9][a-z0-9._-]{0,62}`, not starting with `sandcrab.`. Value at most 256 bytes.",
+          "type": "object"
+        },
+        "mounts": {
+          "default": [],
+          "description": "At most 16, none nested in another.",
+          "items": {
+            "$ref": "#/$defs/MountSpec"
+          },
+          "type": "array"
+        },
+        "network": {
+          "$ref": "#/$defs/NetworkMode",
+          "default": "disabled"
+        },
+        "resources": {
+          "$ref": "#/$defs/Resources",
+          "default": {}
+        },
+        "template": {
+          "type": "string"
+        },
+        "tmp_exec": {
+          "default": false,
+          "description": "Drop `noexec` from `/tmp`.",
+          "type": "boolean"
+        },
+        "tmp_size_mb": {
+          "description": "Size of `/tmp` (counts against the sandbox's memory). Default 256.",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "ttl_secs": {
+          "description": "Absent: the server's default. Explicit `null`: no TTL.",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "user": {
+          "description": "`\"uid:gid\"`. Default: the connecting peer's.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "template"
+      ],
+      "type": "object"
+    },
+    "SandboxDestroyParams": {
+      "additionalProperties": false,
+      "description": "`sandbox.destroy` params.",
+      "properties": {
+        "sandbox_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sandbox_id"
+      ],
+      "type": "object"
+    },
+    "SandboxDestroyResult": {
+      "description": "`sandbox.destroy` result.",
+      "properties": {
+        "destroyed": {
+          "description": "False: it was already gone.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "destroyed"
+      ],
+      "type": "object"
+    },
+    "SandboxDestroyed": {
+      "description": "`sandbox.destroyed` notification.",
+      "properties": {
+        "reason": {
+          "$ref": "#/$defs/DestroyReason"
+        },
+        "sandbox_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "reason",
+        "sandbox_id"
+      ],
+      "type": "object"
+    },
+    "SandboxGetParams": {
+      "additionalProperties": false,
+      "description": "`sandbox.get` params.",
+      "properties": {
+        "sandbox_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sandbox_id"
+      ],
+      "type": "object"
+    },
+    "SandboxInfo": {
+      "description": "A sandbox, as `sandbox.create`, `sandbox.get`, `sandbox.list` and `sandbox.set_ttl` answer it.",
+      "properties": {
+        "backend": {
+          "type": "string"
+        },
+        "created_at": {
+          "description": "RFC 3339.",
+          "type": "string"
+        },
+        "expires_at": {
+          "description": "RFC 3339. `null`: no TTL.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "forwards": {
+          "items": {
+            "$ref": "#/$defs/ForwardInfo"
+          },
+          "type": "array"
+        },
+        "forwards_served": {
+          "description": "Whether a control connection serves the forwards now.",
+          "type": "boolean"
+        },
+        "labels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "mounts": {
+          "items": {
+            "$ref": "#/$defs/MountSpec"
+          },
+          "type": "array"
+        },
+        "sandbox_id": {
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/SandboxState"
+        },
+        "template": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "backend",
+        "created_at",
+        "forwards",
+        "forwards_served",
+        "labels",
+        "mounts",
+        "sandbox_id",
+        "state",
+        "template"
+      ],
+      "type": "object"
+    },
+    "SandboxListParams": {
+      "additionalProperties": false,
+      "description": "`sandbox.list` params. Every filter given must match.",
+      "properties": {
+        "created_after": {
+          "description": "RFC 3339. Only sandboxes created after this.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "created_before": {
+          "description": "RFC 3339. Only sandboxes created before this.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "labels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Every label given must match exactly.",
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "SandboxNotFoundData": {
+      "description": "`data` of `SANDBOX_NOT_FOUND`.",
+      "properties": {
+        "sandbox_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sandbox_id"
+      ],
+      "type": "object"
+    },
+    "SandboxSetTtlParams": {
+      "additionalProperties": false,
+      "description": "`sandbox.set_ttl` params.",
+      "properties": {
+        "sandbox_id": {
+          "type": "string"
+        },
+        "ttl_secs": {
+          "description": "Required: seconds from now, or `null` for no TTL.",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "sandbox_id",
+        "ttl_secs"
+      ],
+      "type": "object"
+    },
+    "SandboxState": {
+      "description": "Whether a sandbox runs or is on its way out.",
+      "enum": [
+        "running",
+        "destroying"
+      ],
+      "type": "string"
+    },
+    "SelftestLine": {
+      "description": "One line of a self-test report.",
+      "properties": {
+        "detail": {
+          "description": "One sentence for a reader.",
+          "type": "string"
+        },
+        "evidence": {
+          "description": "What the probe tried and the `errno` it got, as the probe reported it."
+        },
+        "id": {
+          "description": "The line, e.g. `net-external-refused`.",
+          "type": "string"
+        },
+        "required": {
+          "description": "Whether `ok` depends on this line.",
+          "type": "boolean"
+        },
+        "status": {
+          "$ref": "#/$defs/SelftestStatus"
+        }
+      },
+      "required": [
+        "detail",
+        "evidence",
+        "id",
+        "required",
+        "status"
+      ],
+      "type": "object"
+    },
+    "SelftestParams": {
+      "additionalProperties": false,
+      "description": "`server.selftest` params.",
+      "properties": {
+        "max_age_secs": {
+          "description": "Return the last report for this template when it is younger than this. Default: always run a fresh one.",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "template": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "template"
+      ],
+      "type": "object"
+    },
+    "SelftestReport": {
+      "description": "`server.selftest` result: a report for one template (design §8).",
+      "properties": {
+        "backend": {
+          "type": "string"
+        },
+        "duration_ms": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "lines": {
+          "items": {
+            "$ref": "#/$defs/SelftestLine"
+          },
+          "type": "array"
+        },
+        "ok": {
+          "description": "True only when every required line is `pass`.",
+          "type": "boolean"
+        },
+        "reason": {
+          "description": "One sentence naming the first line that did not pass; `null` when `ok`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "started_at": {
+          "description": "RFC 3339.",
+          "type": "string"
+        },
+        "template": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "backend",
+        "duration_ms",
+        "lines",
+        "ok",
+        "started_at",
+        "template"
+      ],
+      "type": "object"
+    },
+    "SelftestStatus": {
+      "description": "How one self-test line ended. A timeout is never a pass.",
+      "oneOf": [
+        {
+          "enum": [
+            "pass",
+            "fail"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The probe hit its deadline, hung or never started.",
+          "enum": [
+            "inconclusive"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "SelftestSummary": {
+      "description": "The last self-test of one template, in short.",
+      "properties": {
+        "age_secs": {
+          "description": "Age of the report.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "ok": {
+          "description": "True only when every required line passed.",
+          "type": "boolean"
+        },
+        "reason": {
+          "description": "One sentence naming the first line that did not pass; `null` when `ok`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "template": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "age_secs",
+        "ok",
+        "template"
+      ],
+      "type": "object"
+    },
+    "ServerHelloParams": {
+      "additionalProperties": false,
+      "description": "`server.hello` params: the first frame of a control connection.",
+      "properties": {
+        "api_version": {
+          "description": "API version the client speaks, `\"major.minor\"`.",
+          "type": "string"
+        },
+        "client": {
+          "description": "Free-form client identifier, e.g. `@sandcrab/sdk/1.0.0`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "api_version",
+        "client"
+      ],
+      "type": "object"
+    },
+    "ServerHelloResult": {
+      "description": "`server.hello` result.",
+      "properties": {
+        "api_version": {
+          "description": "API version the server speaks ([`API_VERSION`]).",
+          "type": "string"
+        },
+        "backend": {
+          "description": "The backend this server runs: `docker`, `libkrun` or `firecracker`.",
+          "type": "string"
+        },
+        "features": {
+          "description": "Optional abilities ([`features`]).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "limits": {
+          "$ref": "#/$defs/ServerLimits"
+        },
+        "server_version": {
+          "description": "`sandcrab-server` build version.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "api_version",
+        "backend",
+        "features",
+        "limits",
+        "server_version"
+      ],
+      "type": "object"
+    },
+    "ServerLimits": {
+      "description": "The server's limits (design §5.6). Over a limit is `LIMIT_EXCEEDED`; nothing queues.",
+      "properties": {
+        "default_ttl_secs": {
+          "description": "TTL of a sandbox created without `ttl_secs`.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_connections": {
+          "description": "Connections of all kinds.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_memory_mb": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_mounts": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_nofile": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_pids": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_processes_per_sandbox": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_requests_in_flight": {
+          "description": "Requests in flight per control connection; beyond that the server stops reading.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_sandboxes": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_ttl_secs": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_vcpu": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "default_ttl_secs",
+        "max_connections",
+        "max_memory_mb",
+        "max_mounts",
+        "max_nofile",
+        "max_pids",
+        "max_processes_per_sandbox",
+        "max_requests_in_flight",
+        "max_sandboxes",
+        "max_ttl_secs",
+        "max_vcpu"
+      ],
+      "type": "object"
+    },
+    "ServerShutdown": {
+      "description": "`server.shutdown` notification: the server stops; every sandbox will be destroyed.",
+      "properties": {
+        "grace_ms": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "grace_ms"
+      ],
+      "type": "object"
+    },
+    "StderrMode": {
+      "description": "What happens to the program's stderr.",
+      "oneOf": [
+        {
+          "description": "Not streamed; the last `stderr_tail_bytes` are in [`ProcessExit::stderr_tail`].",
+          "enum": [
+            "tail"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Sent with stdout, on one pipe, as `STDOUT` records. The tail is empty.",
+          "enum": [
+            "merge"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Streamed as `STDERR` records; the tail is kept too.",
+          "enum": [
+            "stream"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "StdinMode": {
+      "description": "What the program's stdin is.",
+      "oneOf": [
+        {
+          "description": "`/dev/null`.",
+          "enum": [
+            "null"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A pipe fed by `STDIN` records and closed by `STDIN_EOF`.",
+          "enum": [
+            "pipe"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "TemplateErrorData": {
+      "description": "`data` of `TEMPLATE_ERROR`.",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/TemplateErrorKind"
+        },
+        "template": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "template"
+      ],
+      "type": "object"
+    },
+    "TemplateErrorKind": {
+      "description": "What is wrong with a template.",
+      "enum": [
+        "not_found",
+        "unpinned",
+        "pin_mismatch"
+      ],
+      "type": "string"
+    },
+    "UnsupportedVersionData": {
+      "description": "`data` of `UNSUPPORTED_VERSION`.",
+      "properties": {
+        "client": {
+          "description": "The client's, as it sent it.",
+          "type": "string"
+        },
+        "server": {
+          "description": "The server's API version.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "client",
+        "server"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2019-09/schema",
+  "api_version": "1.0",
+  "errors": {
+    "CONFLICT": {
+      "code": -32108,
+      "data": {
+        "$ref": "#/$defs/DetailData"
+      }
+    },
+    "LIMIT_EXCEEDED": {
+      "code": -32104,
+      "data": {
+        "$ref": "#/$defs/LimitExceededData"
+      }
+    },
+    "MOUNT_NOT_ALLOWED": {
+      "code": -32103,
+      "data": {
+        "$ref": "#/$defs/MountNotAllowedData"
+      }
+    },
+    "POLICY_UNENFORCEABLE": {
+      "code": -32105,
+      "data": {
+        "$ref": "#/$defs/DetailData"
+      }
+    },
+    "SANDBOX_NOT_FOUND": {
+      "code": -32102,
+      "data": {
+        "$ref": "#/$defs/SandboxNotFoundData"
+      }
+    },
+    "SHUTTING_DOWN": {
+      "code": -32107,
+      "data": {
+        "$ref": "#/$defs/Empty"
+      }
+    },
+    "TEMPLATE_ERROR": {
+      "code": -32106,
+      "data": {
+        "$ref": "#/$defs/TemplateErrorData"
+      }
+    },
+    "UNAUTHORIZED": {
+      "code": -32008,
+      "data": {
+        "$ref": "#/$defs/Empty"
+      }
+    },
+    "UNAVAILABLE": {
+      "code": -32101,
+      "data": {
+        "$ref": "#/$defs/DetailData"
+      }
+    },
+    "UNSUPPORTED_VERSION": {
+      "code": -32009,
+      "data": {
+        "$ref": "#/$defs/UnsupportedVersionData"
+      }
+    }
+  },
+  "features": [
+    "forwards",
+    "mounts",
+    "selftest"
+  ],
+  "methods": {
+    "forward.attach": {
+      "kind": "connection",
+      "params": {
+        "$ref": "#/$defs/ForwardAttachParams"
+      },
+      "result": {
+        "$ref": "#/$defs/Empty"
+      }
+    },
+    "forward.reject": {
+      "kind": "control",
+      "params": {
+        "$ref": "#/$defs/ForwardRejectParams"
+      },
+      "result": {
+        "$ref": "#/$defs/Empty"
+      }
+    },
+    "forward.serve": {
+      "kind": "control",
+      "params": {
+        "$ref": "#/$defs/ForwardServeParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ForwardServeResult"
+      }
+    },
+    "process.cancel": {
+      "kind": "control",
+      "params": {
+        "$ref": "#/$defs/ProcessCancelParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ProcessCancelResult"
+      }
+    },
+    "process.spawn": {
+      "kind": "connection",
+      "params": {
+        "$ref": "#/$defs/ProcessSpawnParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ProcessSpawnAck"
+      }
+    },
+    "sandbox.create": {
+      "kind": "control",
+      "params": {
+        "$ref": "#/$defs/SandboxCreate"
+      },
+      "result": {
+        "$ref": "#/$defs/SandboxInfo"
+      }
+    },
+    "sandbox.destroy": {
+      "kind": "control",
+      "params": {
+        "$ref": "#/$defs/SandboxDestroyParams"
+      },
+      "result": {
+        "$ref": "#/$defs/SandboxDestroyResult"
+      }
+    },
+    "sandbox.destroy_by_label": {
+      "kind": "control",
+      "params": {
+        "$ref": "#/$defs/DestroyByLabelParams"
+      },
+      "result": {
+        "$ref": "#/$defs/DestroyByLabelResult"
+      }
+    },
+    "sandbox.get": {
+      "kind": "control",
+      "params": {
+        "$ref": "#/$defs/SandboxGetParams"
+      },
+      "result": {
+        "$ref": "#/$defs/SandboxInfo"
+      }
+    },
+    "sandbox.list": {
+      "kind": "control",
+      "params": {
+        "$ref": "#/$defs/SandboxListParams"
+      },
+      "result": {
+        "items": {
+          "$ref": "#/$defs/SandboxInfo"
+        },
+        "type": "array"
+      }
+    },
+    "sandbox.set_ttl": {
+      "kind": "control",
+      "params": {
+        "$ref": "#/$defs/SandboxSetTtlParams"
+      },
+      "result": {
+        "$ref": "#/$defs/SandboxInfo"
+      }
+    },
+    "server.capabilities": {
+      "kind": "control",
+      "params": {
+        "$ref": "#/$defs/CapabilitiesParams"
+      },
+      "result": {
+        "$ref": "#/$defs/Capabilities"
+      }
+    },
+    "server.hello": {
+      "kind": "control",
+      "params": {
+        "$ref": "#/$defs/ServerHelloParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ServerHelloResult"
+      }
+    },
+    "server.selftest": {
+      "kind": "control",
+      "params": {
+        "$ref": "#/$defs/SelftestParams"
+      },
+      "result": {
+        "$ref": "#/$defs/SelftestReport"
+      }
+    }
+  },
+  "notifications": {
+    "forward.incoming": {
+      "params": {
+        "$ref": "#/$defs/ForwardIncoming"
+      }
+    },
+    "sandbox.destroyed": {
+      "params": {
+        "$ref": "#/$defs/SandboxDestroyed"
+      }
+    },
+    "server.shutdown": {
+      "params": {
+        "$ref": "#/$defs/ServerShutdown"
+      }
+    }
+  },
+  "records": {
+    "EXIT": {
+      "kind": 31,
+      "payload": {
+        "$ref": "#/$defs/ProcessExit"
+      }
+    }
+  },
+  "title": "Sandcrab server API"
+}

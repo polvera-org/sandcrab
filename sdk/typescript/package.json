@@ -1,0 +1,44 @@
+{
+  "name": "@sandcrab/sdk",
+  "version": "0.1.0",
+  "description": "TypeScript client for sandcrab-server: sandboxes, processes with exact argv and env, forwards.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/polvera-org/sandcrab",
+    "directory": "sdk/typescript"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=26"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./testing": {
+      "types": "./dist/testing/fake-server.d.ts",
+      "default": "./dist/testing/fake-server.js"
+    }
+  },
+  "files": [
+    "dist",
+    "schema",
+    "README.md"
+  ],
+  "scripts": {
+    "sync-schema": "cp ../../crates/sandcrab-protocol/tests/snapshots/server-api.schema.json schema/server-api.schema.json",
+    "generate": "node scripts/generate-types.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json && node scripts/fix-declarations.mjs",
+    "test": "node --test --test-timeout=30000 \"test/unit/*.test.ts\"",
+    "test:e2e": "node --test --test-concurrency=1 --test-timeout=600000 \"test/e2e/*.test.ts\"",
+    "prepack": "pnpm build"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.11",
+    "typescript": "^7.0.2"
+  },
+  "packageManager": "pnpm@10.30.3"
+}

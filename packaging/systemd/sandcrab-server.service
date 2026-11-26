@@ -1,0 +1,65 @@
+# sandcrab server as a root service (Linux). See docs/server.md.
+#
+# Install: copy to /etc/systemd/system/, put the config at /etc/sandcrab/server.toml
+# (packaging/systemd/server.toml is a sample), then
+#   systemctl daemon-reload && systemctl enable --now sandcrab-server
+#
+# A restart ends every sandbox: let clients drain their runs first.
+
+[Unit]
+Description=Sandcrab server (sandbox API on a Unix socket)
+Documentation=https://github.com/polvera-org/sandcrab/blob/main/docs/server.md
+# The Docker backend needs the daemon. Drop these two lines for libkrun or Firecracker.
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=exec
+ExecStart=/usr/local/bin/sandcrab server --config /etc/sandcrab/server.toml
+Restart=on-failure
+RestartSec=2
+# The stop cancels processes (5 s grace) and destroys every sandbox.
+TimeoutStopSec=60
+# Connections and forwarded connections take two descriptors each; the server sizes its caps
+# from this limit (1024 connections, 4096 forwarded connections at 65536).
+LimitNOFILE=65536
+
+# State root: the backend's run directories and the host-local template pins
+# (/var/lib/sandcrab/template-pins). Build and pin templates with the same SANDCRAB_HOME.
+Environment=SANDCRAB_HOME=/var/lib/sandcrab
+# The static musl crabd injected into every sandbox.
+Environment=SANDCRAB_CRABD=/usr/local/lib/sandcrab/crabd
+StateDirectory=sandcrab
+StateDirectoryMode=0700
+
+# The socket lives in /run/sandcrab-server. A containerised client bind-mounts this DIRECTORY (not
+# the socket file): the server replaces the socket at every start, and the directory must
+# outlive a restart for the client's mount to stay valid. Not /run/sandcrab: every sandbox has
+# its own /run/sandcrab (crabd's socket), so the self-test's "server socket not reachable" line
+# would fail on it.
+RuntimeDirectory=sandcrab-server
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+# Read-write mount roots must be writable by the server (the self-test makes its scratch
+# directory under one). List each here, separated by spaces, e.g.:
+# ReadWritePaths=/srv/sandcrab
+ProtectHome=read-only
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

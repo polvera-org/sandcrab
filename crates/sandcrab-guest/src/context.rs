@@ -4,7 +4,7 @@ use std::path::{Component, Path, PathBuf};
 
 use sandcrab_protocol::limits;
 
-use crate::tools::process::ProcessRegistry;
+use crate::{supervise::ProcessTable, tools::process::ProcessRegistry};
 
 /// Size / count / time limits enforced by the tool modules.
 ///
@@ -67,6 +67,8 @@ pub struct ToolContext {
     pub limits: Limits,
     /// Background processes started by `process_start` (owned by `tools::process`).
     pub processes: ProcessRegistry,
+    /// `process.open` programs and their supervisors (owned by `supervise`).
+    pub supervisors: ProcessTable,
 }
 
 impl ToolContext {
@@ -89,6 +91,7 @@ impl ToolContext {
             default_cwd: normalize_lexical(&cwd),
             limits,
             processes: ProcessRegistry::default(),
+            supervisors: ProcessTable::default(),
         }
     }
 

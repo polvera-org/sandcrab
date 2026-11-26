@@ -19,7 +19,7 @@ use rustix::{
 };
 use tracing::{debug, info, warn};
 
-use super::dirs;
+use super::{config::TmpMount, dirs};
 
 fn ctx(e: impl Into<io::Error>, what: impl std::fmt::Display) -> io::Error {
     let e: io::Error = e.into();
@@ -212,6 +212,16 @@ pub fn late_mounts() -> io::Result<()> {
 /// `/tmp` mount flags: the Docker backend's `nosuid,nodev,noexec` tmpfs.
 pub const TMP_FLAGS: MountFlags = NOSUID_NODEV_NOEXEC;
 
+/// `/tmp` mount flags for `tmp`: [`TMP_FLAGS`], without `noexec` when `exec` is set.
+#[must_use]
+pub fn tmp_flags(tmp: TmpMount) -> MountFlags {
+    if tmp.exec {
+        TMP_FLAGS.difference(MountFlags::NOEXEC)
+    } else {
+        TMP_FLAGS
+    }
+}
+
 /// `/tmp` tmpfs data: `mode=1777` and the Docker backend's size cap.
 #[must_use]
 pub fn tmp_mount_data(size_mb: u64) -> String {
@@ -222,7 +232,8 @@ pub fn tmp_mount_data(size_mb: u64) -> String {
 /// (`HostConfig.tmpfs`): nothing under `/tmp` can be executed or `mmap`ed `PROT_EXEC`, and
 /// filling it cannot exhaust the scratch drive. It counts against guest RAM, as Docker's
 /// counts against the container's memory limit. Always mounted (stacked over whatever the
-/// image had in `/tmp`, which Docker hides the same way).
+/// image had in `/tmp`, which Docker hides the same way). `init.configure` may change the
+/// size and drop `noexec` with [`remount_tmp`].
 fn mount_tmp() -> io::Result<()> {
     let tmp = Path::new("/tmp");
     mkdir_p(tmp)?;
@@ -230,9 +241,18 @@ fn mount_tmp() -> io::Result<()> {
         "tmpfs",
         tmp,
         "tmpfs",
-        TMP_FLAGS,
-        &tmp_mount_data(sandcrab_protocol::init::SANDBOX_TMP_SIZE_MB),
+        tmp_flags(TmpMount::DEFAULT),
+        &tmp_mount_data(TmpMount::DEFAULT.size_mb),
     )
+}
+
+/// Remount the boot-time `/tmp` tmpfs as `tmp` (`init.configure`'s `tmp_exec` and
+/// `tmp_size_mb`), before any sandbox code runs, so nothing in it can block a smaller size.
+/// The remount replaces the per-mount flags, so `nosuid,nodev` are passed again; `mode`
+/// is kept by the tmpfs.
+pub fn remount_tmp(tmp: TmpMount) -> io::Result<()> {
+    rustix::mount::mount_remount("/tmp", tmp_flags(tmp), format!("size={}m", tmp.size_mb))
+        .map_err(|e| ctx(e, "remount /tmp"))
 }
 
 /// cgroup v2 mount point.
@@ -273,8 +293,14 @@ pub fn setup_pids_cgroup(pids_max: u32) -> io::Result<PathBuf> {
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
         Err(e) => return Err(ctx(e, format!("mkdir {}", dir.display()))),
     }
-    fs::write(dir.join("pids.max"), pids_max.to_string()).map_err(|e| ctx(e, "write pids.max"))?;
+    set_pids_max(dir, pids_max)?;
     Ok(dir.to_path_buf())
+}
+
+/// Change `pids.max` of a cgroup made by [`setup_pids_cgroup`] (`init.configure`'s
+/// `pids_max`). Only before the cgroupfs is sealed.
+pub fn set_pids_max(dir: &Path, pids_max: u32) -> io::Result<()> {
+    fs::write(dir.join("pids.max"), pids_max.to_string()).map_err(|e| ctx(e, "write pids.max"))
 }
 
 /// Move this whole process (every thread) into cgroup `dir`.
@@ -333,6 +359,27 @@ pub fn limit_nproc(max: u32) -> io::Result<()> {
     };
     rustix::process::setrlimit(rustix::process::Resource::Nproc, lim)
         .map_err(|e| ctx(e, "setrlimit(RLIMIT_NPROC)"))
+}
+
+/// Set `RLIMIT_NOFILE` of this process (soft and hard) to `n`, returning the previous
+/// limit for [`restore_nofile`]. PID 1 sets it just around the `crabd serve` spawn, so the
+/// child inherits it (as Docker's `nofile` ulimit applies to the container's processes).
+pub fn set_nofile(n: u64) -> io::Result<rustix::process::Rlimit> {
+    let old = rustix::process::getrlimit(rustix::process::Resource::Nofile);
+    let lim = rustix::process::Rlimit {
+        current: Some(n),
+        maximum: Some(n),
+    };
+    rustix::process::setrlimit(rustix::process::Resource::Nofile, lim)
+        .map_err(|e| ctx(e, format!("setrlimit(RLIMIT_NOFILE, {n})")))?;
+    Ok(old)
+}
+
+/// Put back the `RLIMIT_NOFILE` that [`set_nofile`] replaced (PID 1 is root, so it may raise
+/// the hard limit again).
+pub fn restore_nofile(old: rustix::process::Rlimit) -> io::Result<()> {
+    rustix::process::setrlimit(rustix::process::Resource::Nofile, old)
+        .map_err(|e| ctx(e, "restore RLIMIT_NOFILE"))
 }
 
 pub fn set_hostname(name: &str) -> io::Result<()> {
@@ -493,6 +540,18 @@ mod tests {
             tmp_mount_data(sandcrab_protocol::init::SANDBOX_TMP_SIZE_MB),
             "mode=1777,size=256m"
         );
+    }
+
+    #[test]
+    fn tmp_exec_drops_noexec_only() {
+        assert_eq!(tmp_flags(TmpMount::DEFAULT), TMP_FLAGS);
+        let exec = tmp_flags(TmpMount {
+            exec: true,
+            size_mb: 1024,
+        });
+        assert!(exec.contains(MountFlags::NOSUID | MountFlags::NODEV));
+        assert!(!exec.contains(MountFlags::NOEXEC));
+        assert!(!exec.contains(MountFlags::RDONLY));
     }
 
     #[test]

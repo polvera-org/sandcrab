@@ -492,7 +492,8 @@ struct ExportContainer {
 
 impl ExportContainer {
     fn create(image: &str, arch: Arch) -> Result<Self> {
-        // Images carry no CMD (see templates/base); the command is never run. `--platform` selects
+        // The command is never run, so the image needs no shell, CMD or working ENTRYPOINT, and
+        // its USER does not matter (an export reads the files). `--platform` selects
         // the arch from a multi-arch image and fails (rather than silently exporting the wrong
         // arch) when the local image only has another platform.
         let id = mkfs::run(Command::new("docker").args([
@@ -515,7 +516,8 @@ impl ExportContainer {
 impl Drop for ExportContainer {
     fn drop(&mut self) {
         let _ = Command::new("docker")
-            .args(["rm", "-f", &self.id])
+            // `-v`: also the anonymous volumes `docker create` made for the image's `VOLUME`s.
+            .args(["rm", "-f", "-v", &self.id])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -538,9 +540,12 @@ pub fn create_scratch(path: &Path, size_mib: u64) -> Result<Duration> {
             "scratch drive of {size_mib} MiB is too small (min 8)"
         )));
     }
+    let bytes = size_mib.checked_mul(MIB).ok_or_else(|| {
+        Error::Unsupported(format!("scratch drive of {size_mib} MiB is too large"))
+    })?;
     {
         let f = File::create(path).at(path)?;
-        f.set_len(size_mib * MIB).at(path)?;
+        f.set_len(bytes).at(path)?;
     }
     let res = mkfs::run(
         Command::new("mke2fs")
@@ -823,5 +828,16 @@ mod tests {
             meta.blocks()
         );
         assert!(create_scratch(&p, 1).is_err());
+    }
+
+    #[test]
+    fn scratch_size_overflow_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("scratch.ext4");
+        assert!(matches!(
+            create_scratch(&p, u64::MAX),
+            Err(Error::Unsupported(_))
+        ));
+        assert!(!p.exists(), "nothing made");
     }
 }

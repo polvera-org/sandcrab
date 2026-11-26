@@ -12,7 +12,9 @@ use super::config::ValidatedConfig;
 /// `PATH` when the config does not set one.
 pub const DEFAULT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
-/// Build `crabd serve --vsock <tools_port> --default-cwd <cwd>` running as the sandbox user.
+/// Build `crabd serve --vsock <tools_port> --default-cwd <cwd> [--forward-port <p>]...`
+/// running as the sandbox user. The `RLIMIT_NOFILE` of `nofile` is not set here (that would
+/// need `pre_exec`): PID 1 sets it around the spawn so the child inherits it.
 ///
 /// Privilege drop is done by `std` in the child between `fork` and `exec`, in the safe order:
 /// `setgroups(0, NULL)` (std does this itself when the parent is root and no supplementary
@@ -28,8 +30,11 @@ pub fn serve_command(exe: &Path, v: &ValidatedConfig) -> Command {
         .arg("--vsock")
         .arg(cfg.tools_port.to_string())
         .arg("--default-cwd")
-        .arg(&v.default_cwd)
-        .current_dir(&v.default_cwd)
+        .arg(&v.default_cwd);
+    for port in &cfg.forward_ports {
+        cmd.arg("--forward-port").arg(port.to_string());
+    }
+    cmd.current_dir(&v.default_cwd)
         .env_clear()
         .env("PATH", DEFAULT_PATH)
         .env(
@@ -57,7 +62,11 @@ mod tests {
     use std::{collections::BTreeMap, ffi::OsString};
 
     fn validated(env: &[(&str, &str)], home: Option<&str>) -> ValidatedConfig {
-        validate_config(InitConfig {
+        validate_config(config(env, home)).unwrap()
+    }
+
+    fn config(env: &[(&str, &str)], home: Option<&str>) -> InitConfig {
+        InitConfig {
             sandbox_id: "sb-1".into(),
             hostname: "box".into(),
             user: InitUser {
@@ -76,8 +85,12 @@ mod tests {
             dns: vec![],
             tools_port: 2048,
             host_time_unix_ms: None,
-        })
-        .unwrap()
+            tmp_exec: false,
+            tmp_size_mb: None,
+            pids_max: None,
+            nofile: None,
+            forward_ports: Vec::new(),
+        }
     }
 
     fn envs(cmd: &Command) -> BTreeMap<OsString, Option<OsString>> {
@@ -112,6 +125,28 @@ mod tests {
         assert_eq!(
             e[OsStr::new("PATH")].as_deref(),
             Some(OsStr::new(DEFAULT_PATH))
+        );
+    }
+
+    #[test]
+    fn forward_ports_become_flags() {
+        let mut c = config(&[], None);
+        c.forward_ports = vec![5432, 6379];
+        let cmd = serve_command(Path::new("/sbin/crabd"), &validate_config(c).unwrap());
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(
+            args,
+            [
+                "serve",
+                "--vsock",
+                "2048",
+                "--default-cwd",
+                "/workspace",
+                "--forward-port",
+                "5432",
+                "--forward-port",
+                "6379"
+            ]
         );
     }
 

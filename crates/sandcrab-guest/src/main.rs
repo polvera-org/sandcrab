@@ -2,9 +2,11 @@
 //!
 //! ```text
 //! crabd serve (--unix <path> | --tcp <addr> | --vsock <port>) [--default-cwd /workspace]
-//!             [--auth-token-file <path>]
+//!             [--auth-token-file <path>] [--forward-port <port>]... [--max-forward-conns N]
 //! crabd relay --tcp <addr> --unix <path>   # TCP -> Unix socket pump (Docker TCP transport)
 //! crabd init        # PID 1 of a microVM (also selected automatically when PID == 1)
+//! crabd supervise   # started by `serve` for each `process.open`; not for humans
+//! crabd probe       # the self-test's in-sandbox half
 //! ```
 //!
 //! Subcommands:
@@ -66,6 +68,19 @@ struct ServeArgs {
     #[arg(long, value_name = "N", default_value_t = 64, value_parser = clap::value_parser!(u32).range(1..))]
     max_tunnels: u32,
 
+    /// Max `process.open` programs running at once.
+    #[arg(long, value_name = "N", default_value_t = sandcrab_protocol::process::DEFAULT_MAX_PROCESSES, value_parser = clap::value_parser!(u32).range(1..))]
+    max_processes: u32,
+
+    /// Forward this guest loopback port to the host (`forward.listen`). Repeatable; at most
+    /// 16 ports, no duplicates. Bound on 127.0.0.1 (and [::1]) before serving.
+    #[arg(long = "forward-port", value_name = "PORT", value_parser = clap::value_parser!(u16).range(1..))]
+    forward_ports: Vec<u16>,
+
+    /// Max forwarded connections open at once, all forward ports.
+    #[arg(long, value_name = "N", default_value_t = sandcrab_protocol::forward::DEFAULT_MAX_FORWARD_CONNS, value_parser = clap::value_parser!(u32).range(1..))]
+    max_forward_conns: u32,
+
     /// Grace period for in-flight requests on SIGTERM / SIGINT, in milliseconds.
     #[arg(long, value_name = "MS", default_value_t = 10_000)]
     shutdown_grace_ms: u64,
@@ -126,6 +141,14 @@ fn main() -> ExitCode {
     if sandcrab_guest::init::is_init_invocation(std::process::id(), &args) {
         return runtime().block_on(sandcrab_guest::init::run());
     }
+    // Before clap and before any runtime: they parse their own arguments and set up their own
+    // runtime (`supervise` needs a single-thread one). `supervise` inherits `no_new_privs`
+    // from `serve`.
+    match args.get(1).and_then(|a| a.to_str()) {
+        Some("supervise") => return sandcrab_guest::supervise::main(),
+        Some("probe") => return sandcrab_guest::probe::main(&args[2..]),
+        _ => {}
+    }
     // Before the runtime starts any thread: `no_new_privs` is per thread, inherited by every
     // thread and process created afterwards (all tool processes). Fail closed.
     if let Err(e) = sandcrab_guest::hardening::forbid_privilege_gain() {
@@ -175,6 +198,9 @@ async fn serve(args: ServeArgs) -> std::io::Result<()> {
     config.max_connections = args.max_connections as usize;
     config.max_inflight_per_connection = args.max_inflight as usize;
     config.tunnels.max_tunnels = args.max_tunnels as usize;
+    config.supervisor.max_processes = args.max_processes as usize;
+    config.forwards.ports = args.forward_ports;
+    config.forwards.max_conns = args.max_forward_conns as usize;
     config.shutdown_grace = Duration::from_millis(args.shutdown_grace_ms);
     if let Some(path) = &args.auth_token_file {
         config.auth = Some(AuthConfig::new(sandcrab_guest::auth::load_token_file(

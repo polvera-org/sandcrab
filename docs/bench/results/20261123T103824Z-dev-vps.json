@@ -70,7 +70,7 @@
       0.61
     ],
     "other_guests": [],
-    "declared": "VPS shared with idle containers: polvo-db-1, polvo-test-db-1 (pgvector), polvo-workspace-1, caddy (all <1% CPU); a docs-only agent session (no builds); no other benchmarks",
+    "declared": "VPS shared with idle containers: db-1, db-2 (pgvector), app-1, caddy (all <1% CPU); a docs-only agent session (no builds); no other benchmarks",
     "top_cpu": [
       "72376  3.3  7.5 dockerd",
       "71777  1.4  0.5 containerd",
@@ -17997,7 +17997,7 @@
       "--warmups",
       "5",
       "--noise-declared",
-      "VPS shared with idle containers: polvo-db-1, polvo-test-db-1 (pgvector), polvo-workspace-1, caddy (all <1% CPU); a docs-only agent session (no builds); no other benchmarks",
+      "VPS shared with idle containers: db-1, db-2 (pgvector), app-1, caddy (all <1% CPU); a docs-only agent session (no builds); no other benchmarks",
       "--out",
       "docs/bench/results/"
     ],

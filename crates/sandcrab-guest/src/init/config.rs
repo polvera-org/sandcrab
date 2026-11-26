@@ -9,9 +9,13 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use sandcrab_protocol::init::{
-    CONTROL_PORT, GuestMount, InitConfig, MAX_DRIVE_ID_LEN, MAX_EXT4_LABEL_LEN,
-    MAX_VIRTIOFS_TAG_LEN, MountSource, ROOT_DRIVE_ID, SCRATCH_DRIVE_ID,
+use sandcrab_protocol::{
+    forward::MAX_FORWARDS,
+    init::{
+        CONTROL_PORT, GuestMount, InitConfig, MAX_DRIVE_ID_LEN, MAX_EXT4_LABEL_LEN,
+        MAX_VIRTIOFS_TAG_LEN, MountSource, ROOT_DRIVE_ID, SANDBOX_PIDS_MAX, SANDBOX_TMP_SIZE_MB,
+        SCRATCH_DRIVE_ID,
+    },
 };
 
 /// Guest paths that may never be (or contain) a workspace mount point.
@@ -25,6 +29,14 @@ pub const FORBIDDEN_MOUNT_PREFIXES: &[&str] = &[
 ];
 
 const MAX_HOSTNAME_LEN: usize = 64;
+
+/// Smallest `nofile` accepted: below this `crabd serve` itself cannot run.
+pub const MIN_NOFILE: u64 = 64;
+/// Largest `nofile` accepted: the kernel's default `fs.nr_open`, above which `setrlimit`
+/// fails anyway.
+pub const MAX_NOFILE: u64 = 1_048_576;
+/// Largest `pids_max` accepted: the kernel's `PID_MAX_LIMIT`.
+pub const MAX_PIDS: u32 = 4_194_304;
 
 pub(crate) fn invalid(msg: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, msg.into())
@@ -240,12 +252,73 @@ pub fn plan_mounts(mounts: &[GuestMount]) -> io::Result<Vec<MountStep>> {
     Ok(steps)
 }
 
+/// The `/tmp` tmpfs the sandbox gets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TmpMount {
+    /// No `noexec` (`nosuid,nodev` always stay).
+    pub exec: bool,
+    pub size_mb: u64,
+}
+
+impl TmpMount {
+    /// The tmpfs `crabd init` mounts at boot (the Docker backend's default).
+    pub const DEFAULT: Self = Self {
+        exec: false,
+        size_mb: SANDBOX_TMP_SIZE_MB,
+    };
+}
+
 /// A validated config plus its mount plan.
 #[derive(Debug, Clone)]
 pub struct ValidatedConfig {
     pub config: InitConfig,
     pub default_cwd: PathBuf,
     pub mounts: Vec<MountStep>,
+    /// `/tmp` as configured; [`TmpMount::DEFAULT`] when the config leaves it alone.
+    pub tmp: TmpMount,
+    /// `pids.max` of the sandbox cgroup (or the `RLIMIT_NPROC` fallback).
+    pub pids_max: u32,
+}
+
+impl ValidatedConfig {
+    /// The `/tmp` remount `init.configure` must do, or `None` to keep the boot-time tmpfs
+    /// untouched (no option set, the behaviour before protocol 0.3).
+    #[must_use]
+    pub fn tmp_remount(&self) -> Option<TmpMount> {
+        (self.tmp != TmpMount::DEFAULT).then_some(self.tmp)
+    }
+}
+
+/// The 0.3 resource options: `tmp_size_mb`, `pids_max`, `nofile`, `forward_ports`.
+fn validate_resources(cfg: &InitConfig) -> io::Result<()> {
+    if cfg.tmp_size_mb == Some(0) {
+        return Err(invalid("tmp_size_mb must be at least 1"));
+    }
+    if let Some(n) = cfg.pids_max
+        && !(1..=MAX_PIDS).contains(&n)
+    {
+        return Err(invalid(format!("pids_max {n} must be 1..={MAX_PIDS}")));
+    }
+    if let Some(n) = cfg.nofile
+        && !(MIN_NOFILE..=MAX_NOFILE).contains(&n)
+    {
+        return Err(invalid(format!(
+            "nofile {n} must be {MIN_NOFILE}..={MAX_NOFILE}"
+        )));
+    }
+    if cfg.forward_ports.len() > MAX_FORWARDS {
+        return Err(invalid(format!("at most {MAX_FORWARDS} forward_ports")));
+    }
+    let mut seen = BTreeSet::new();
+    for &p in &cfg.forward_ports {
+        if p == 0 {
+            return Err(invalid("forward port 0 is not a port"));
+        }
+        if !seen.insert(p) {
+            return Err(invalid(format!("duplicate forward port {p}")));
+        }
+    }
+    Ok(())
 }
 
 /// Validate everything `crabd init` acts on as root.
@@ -269,11 +342,19 @@ pub fn validate_config(cfg: InitConfig) -> io::Result<ValidatedConfig> {
     {
         return Err(invalid(format!("invalid user name `{name}`")));
     }
+    validate_resources(&cfg)?;
     let mounts = plan_mounts(&cfg.mounts)?;
+    let tmp = TmpMount {
+        exec: cfg.tmp_exec,
+        size_mb: cfg.tmp_size_mb.unwrap_or(SANDBOX_TMP_SIZE_MB),
+    };
+    let pids_max = cfg.pids_max.unwrap_or(SANDBOX_PIDS_MAX);
     Ok(ValidatedConfig {
         config: cfg,
         default_cwd,
         mounts,
+        tmp,
+        pids_max,
     })
 }
 
@@ -313,6 +394,11 @@ mod tests {
             dns: vec![],
             tools_port: 1024,
             host_time_unix_ms: None,
+            tmp_exec: false,
+            tmp_size_mb: None,
+            pids_max: None,
+            nofile: None,
+            forward_ports: Vec::new(),
         }
     }
 
@@ -451,6 +537,99 @@ mod tests {
         let mut c = cfg(vec![]);
         c.user.home = Some("../x".into());
         assert!(validate_config(c).is_err());
+    }
+
+    #[test]
+    fn resource_defaults_match_the_boot_state() {
+        let v = validate_config(cfg(vec![])).unwrap();
+        assert_eq!(v.tmp, TmpMount::DEFAULT);
+        assert_eq!(v.tmp_remount(), None);
+        assert_eq!(v.pids_max, SANDBOX_PIDS_MAX);
+        assert_eq!(v.config.nofile, None);
+        assert!(v.config.forward_ports.is_empty());
+        // Spelling out the defaults is still no remount.
+        let mut c = cfg(vec![]);
+        c.tmp_size_mb = Some(SANDBOX_TMP_SIZE_MB);
+        c.pids_max = Some(SANDBOX_PIDS_MAX);
+        assert_eq!(validate_config(c).unwrap().tmp_remount(), None);
+    }
+
+    #[test]
+    fn resource_options_are_applied() {
+        let mut c = cfg(vec![]);
+        c.tmp_exec = true;
+        assert_eq!(
+            validate_config(c).unwrap().tmp_remount(),
+            Some(TmpMount {
+                exec: true,
+                size_mb: SANDBOX_TMP_SIZE_MB
+            })
+        );
+        let mut c = cfg(vec![]);
+        c.tmp_size_mb = Some(1024);
+        c.pids_max = Some(4096);
+        c.nofile = Some(65_536);
+        c.forward_ports = vec![5432, 6379];
+        let v = validate_config(c).unwrap();
+        assert_eq!(
+            v.tmp_remount(),
+            Some(TmpMount {
+                exec: false,
+                size_mb: 1024
+            })
+        );
+        assert_eq!(v.pids_max, 4096);
+        assert_eq!(v.config.nofile, Some(65_536));
+    }
+
+    #[test]
+    fn resource_options_are_bounded() {
+        let edge = |f: &dyn Fn(&mut InitConfig)| {
+            let mut c = cfg(vec![]);
+            f(&mut c);
+            validate_config(c).map(|_| ()).map_err(|e| e.to_string())
+        };
+        for (f, why) in [
+            (
+                &(|c: &mut InitConfig| c.tmp_size_mb = Some(0)) as &dyn Fn(&mut InitConfig),
+                "tmp_size_mb",
+            ),
+            (&|c: &mut InitConfig| c.pids_max = Some(0), "pids_max"),
+            (
+                &|c: &mut InitConfig| c.pids_max = Some(MAX_PIDS + 1),
+                "pids_max",
+            ),
+            (
+                &|c: &mut InitConfig| c.nofile = Some(MIN_NOFILE - 1),
+                "nofile",
+            ),
+            (
+                &|c: &mut InitConfig| c.nofile = Some(MAX_NOFILE + 1),
+                "nofile",
+            ),
+            (&|c: &mut InitConfig| c.forward_ports = vec![0], "port 0"),
+            (
+                &|c: &mut InitConfig| c.forward_ports = vec![80, 80],
+                "duplicate forward port",
+            ),
+            (
+                &|c: &mut InitConfig| c.forward_ports = (1..=17).collect(),
+                "at most",
+            ),
+        ] {
+            let err = edge(f).unwrap_err();
+            assert!(err.contains(why), "{err}");
+        }
+        for f in [
+            &(|c: &mut InitConfig| c.tmp_size_mb = Some(1)) as &dyn Fn(&mut InitConfig),
+            &|c: &mut InitConfig| c.pids_max = Some(1),
+            &|c: &mut InitConfig| c.pids_max = Some(MAX_PIDS),
+            &|c: &mut InitConfig| c.nofile = Some(MIN_NOFILE),
+            &|c: &mut InitConfig| c.nofile = Some(MAX_NOFILE),
+            &|c: &mut InitConfig| c.forward_ports = (1..=16).collect(),
+        ] {
+            edge(f).unwrap();
+        }
     }
 
     #[test]

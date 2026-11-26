@@ -32,12 +32,16 @@ use std::time::{Duration, Instant};
 use sandcrab_backend_libkrun::{KrunLibs, helper_proto::PinnedFile};
 use sandcrab_backend_libkrun::{LibkrunBackend, LibkrunConfig, artifacts::Artifacts};
 use sandcrab_core::{
-    ManagerConfig, MountMode, NetworkConfig, RuntimeBackend, Sandbox, SandboxConfig, SandboxError,
-    SandboxManager, TemplateRegistry, TimingMarks, WorkspaceRegistry,
+    BoxedStream, ForwardTarget, ManagerConfig, MountMode, MountPolicy, MountRoot, NetworkConfig,
+    NprocScope, ProcessEvent, ProcessOutput, ResourceOverrides, RuntimeBackend, Sandbox,
+    SandboxConfig, SandboxError, SandboxManager, TemplateRegistry, TimingMarks, UserSpec,
+    WorkspaceRegistry,
 };
 use sandcrab_protocol::{
-    BashParams, BashResult, FileWriteParams, FileWriteResult, ListDirParams, ListDirResult,
-    ProcessPollParams, ProcessPollResult, ProcessStartParams, ProcessStartResult,
+    BashParams, BashResult, ExecLimits, FileWriteParams, FileWriteResult, ListDirParams,
+    ListDirResult, OutputCap, Overflow, ProcessExit, ProcessOpenParams, ProcessPollParams,
+    ProcessPollResult, ProcessStartParams, ProcessStartResult, ProtocolError, StderrMode,
+    StdinMode,
 };
 
 fn root() -> PathBuf {
@@ -1583,4 +1587,1134 @@ fn vm_survives_the_thread_that_spawned_it() {
     });
     assert!(leftovers(&env).is_empty());
     assert!(no_helper_left());
+}
+
+/// Third-party images for external templates, pinned by multi-arch index digest: Node, git and
+/// Python (`node:24-bookworm`), and one with no shell whose `USER` is not root
+/// (`distroless/static-debian12:nonroot`).
+const EXTERNAL_NODE_IMAGE: &str =
+    "node@sha256:49f7adaf9f1574bc45c20ea317139b39a59d7e758d0e93745e112fd85cb42623";
+const EXTERNAL_NOSHELL_IMAGE: &str = "gcr.io/distroless/static-debian12@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab";
+
+/// External templates (bring your own image) boot through the rootfs pipeline: refused until
+/// this host pins them, then a Node + git + Python image runs its programs, and an image with
+/// no shell still serves the file tools.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "real libkrun: signed helper, pinned libkrun, static crabd, network to pull public images"]
+async fn external_templates_boot_after_pin() {
+    let tmp = tempfile::Builder::new()
+        .prefix("sclk")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let (cfg, libs) = config(tmp.path(), false, false);
+    let backend = Arc::new(LibkrunBackend::new(cfg, libs).unwrap());
+    let tdir = tmp.path().join("templates");
+    for (name, image, tiers) in [
+        ("node-ext", EXTERNAL_NODE_IMAGE, r#"["core", "process"]"#),
+        ("noshell-ext", EXTERNAL_NOSHELL_IMAGE, r#"["core"]"#),
+    ] {
+        let pull = std::process::Command::new("docker")
+            .args(["pull", "-q", image])
+            .status()
+            .unwrap();
+        assert!(pull.success(), "docker pull {image}");
+        std::fs::create_dir_all(tdir.join(name)).unwrap();
+        std::fs::write(
+            tdir.join(name).join("sandcrab.toml"),
+            format!(
+                "[template]\nname = \"{name}\"\nversion = \"1.0.0\"\nimage = \"{image}\"\n\
+                 external = true\n\n[resources]\nvcpu = 1\nmemory_mb = 512\ndisk_mb = 2048\n\n\
+                 [tools]\ntiers = {tiers}\n"
+            ),
+        )
+        .unwrap();
+    }
+    let templates = TemplateRegistry::load(&[&tdir]).unwrap();
+    let pins = sandcrab_core::PinStore::open(tmp.path().join("pins"));
+    let manager = SandboxManager::new(
+        backend,
+        WorkspaceRegistry::open(tmp.path().join("state")).unwrap(),
+        templates.clone(),
+        ManagerConfig {
+            template_pins: Some(pins.clone()),
+            ..ManagerConfig::default()
+        },
+    )
+    .unwrap();
+
+    // Unpinned: refused before anything boots, naming the fix.
+    let err = manager
+        .spawn(SandboxConfig::from_template("node-ext"))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("UnpinnedImage"), "{err}");
+    assert!(err.contains("sandcrab template pin node-ext"), "{err}");
+    assert!(no_helper_left());
+
+    // What `sandcrab template pin` does.
+    let arch = sandcrab_core::ImageArch::host().unwrap();
+    for name in ["node-ext", "noshell-ext"] {
+        let t = templates.get(name).unwrap();
+        let id = sandcrab_rootfs::docker_image_id(t.image()).unwrap();
+        pins.adopt(&t.manifest, arch, &id).unwrap();
+    }
+
+    let sb = manager
+        .spawn(SandboxConfig::from_template("node-ext").require_hardware_isolation(true))
+        .await
+        .unwrap();
+    let r = bash(
+        &sb,
+        "node --version && git --version && python3 --version && cat /proc/1/comm",
+    )
+    .await;
+    assert_eq!(r.exit_code, Some(0), "{r:?}");
+    let lines: Vec<_> = r.stdout.lines().collect();
+    assert!(lines[0].starts_with('v'), "{}", r.stdout);
+    assert!(lines[1].starts_with("git version"), "{}", r.stdout);
+    assert!(lines[2].starts_with("Python 3"), "{}", r.stdout);
+    assert_eq!(lines[3], "crabd", "crabd is PID 1");
+    sb.destroy().await.unwrap();
+
+    let sb = manager
+        .spawn(SandboxConfig::from_template("noshell-ext"))
+        .await
+        .unwrap();
+    let w = sb
+        .call::<FileWriteResult>(FileWriteParams {
+            path: "/tmp/hello.txt".into(),
+            content: "no shell needed\n".into(),
+            append: false,
+        })
+        .await;
+    assert!(w.is_ok(), "{w:?}");
+    let l = sb
+        .call::<ListDirResult>(ListDirParams {
+            path: Some("/tmp".into()),
+            depth: Some(1),
+            respect_gitignore: false,
+        })
+        .await
+        .unwrap();
+    assert!(
+        l.entries.iter().any(|e| e.path.ends_with("hello.txt")),
+        "{l:?}"
+    );
+    sb.destroy().await.unwrap();
+    assert!(no_helper_left());
+}
+
+// ---------------------------------------------------------------------------------------
+// Server options (sdk-milestone): `/tmp`, process limits, process streams, host mounts at
+// the same path and forwards, all inside a real guest.
+// ---------------------------------------------------------------------------------------
+
+fn uuid() -> String {
+    sandcrab_core::SandboxId::new().to_string()
+}
+
+fn argv(a: &[&str]) -> Vec<String> {
+    a.iter().map(|s| (*s).to_owned()).collect()
+}
+
+fn open_params(a: &[&str]) -> ProcessOpenParams {
+    ProcessOpenParams::new(uuid(), argv(a))
+}
+
+/// Everything a finished `process.open` program sent.
+struct Ran {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    exit: ProcessExit,
+}
+
+/// Read a process to its exit. The exit must be the last event.
+async fn drain(out: &mut ProcessOutput) -> Ran {
+    let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+    loop {
+        match out.next().await.unwrap().expect("EXIT before the end") {
+            ProcessEvent::Stdout(b) => stdout.extend_from_slice(&b),
+            ProcessEvent::Stderr(b) => stderr.extend_from_slice(&b),
+            ProcessEvent::Exit(exit) => {
+                assert!(out.next().await.unwrap().is_none(), "EXIT is last");
+                return Ran {
+                    stdout,
+                    stderr,
+                    exit,
+                };
+            }
+        }
+    }
+}
+
+async fn run(sb: &Sandbox, p: ProcessOpenParams) -> Ran {
+    let mut s = sb.open_process(p).await.unwrap();
+    drain(s.output()).await
+}
+
+fn p50(mut v: Vec<Duration>) -> Duration {
+    v.sort();
+    v[v.len() / 2]
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "real libkrun: signed helper, pinned libkrun, pinned sandcrab/base:0.1.0, static crabd"]
+async fn tmp_and_process_limit_options_take_effect() {
+    let env = env();
+    let caps = env.backend.capabilities();
+    assert!(caps.supports_tmp_options && caps.supports_process_limits);
+    assert_eq!(caps.nproc_scope, NprocScope::Sandbox);
+    const PROBE: &str = "findmnt -no OPTIONS /tmp; stat -c 'mode=%a' /tmp; \
+         cp /bin/true /tmp/t && /tmp/t; echo exec_rc=$?; \
+         echo pids_max=$(cat /sys/fs/cgroup/sandbox/pids.max); cat /proc/self/cgroup; \
+         echo nofile=$(ulimit -Sn):$(ulimit -Hn); \
+         touch /sys/fs/cgroup/sandbox/pids.max 2>&1; findmnt -no FSTYPE /";
+
+    // Defaults: noexec 256 MiB /tmp, 1024 pids.
+    let sb = env
+        .manager
+        .spawn(SandboxConfig::from_template("base"))
+        .await
+        .unwrap();
+    let r = bash(&sb, PROBE).await;
+    println!("OPTIONS default:\n{}", r.stdout);
+    let opts = r.stdout.lines().next().unwrap().to_owned();
+    assert!(opts.contains("noexec") && opts.contains("nosuid") && opts.contains("nodev"));
+    assert!(opts.contains("size=262144k"), "{opts}");
+    assert!(r.stdout.contains("mode=1777"), "{}", r.stdout);
+    assert!(r.stdout.contains("exec_rc=126"), "{}", r.stdout);
+    assert!(r.stdout.contains("pids_max=1024"), "{}", r.stdout);
+    sb.destroy().await.unwrap();
+
+    // Every option at once.
+    let sb = env
+        .manager
+        .spawn(
+            SandboxConfig::from_template("base")
+                .tmp_exec(true)
+                .tmp_size_mb(64)
+                .resources(ResourceOverrides {
+                    pids_max: Some(200),
+                    nofile: Some(4096),
+                    ..ResourceOverrides::default()
+                }),
+        )
+        .await
+        .unwrap();
+    let r = bash(&sb, PROBE).await;
+    println!("OPTIONS set:\n{}", r.stdout);
+    let opts = r.stdout.lines().next().unwrap().to_owned();
+    assert!(!opts.contains("noexec"), "{opts}");
+    assert!(opts.contains("nosuid") && opts.contains("nodev"), "{opts}");
+    assert!(opts.contains("size=65536k"), "{opts}");
+    assert!(r.stdout.contains("mode=1777"), "{}", r.stdout);
+    assert!(r.stdout.contains("exec_rc=0"), "{}", r.stdout);
+    assert!(r.stdout.contains("pids_max=200"), "{}", r.stdout);
+    assert!(r.stdout.contains("0::/sandbox"), "{}", r.stdout);
+    assert!(r.stdout.contains("nofile=4096:4096"), "{}", r.stdout);
+    // The cap cannot be raised from inside (and hardening held: it fails closed otherwise).
+    assert!(r.stdout.contains("cannot touch"), "{}", r.stdout);
+
+    // /tmp really is 64 MiB: 60 fit (next to the copied binary), 8 more do not.
+    let r = bash(
+        &sb,
+        "head -c 62914560 /dev/zero > /tmp/a; echo rc=$?; \
+         head -c 8388608 /dev/zero 2>&1 > /tmp/b; echo rc=$?",
+    )
+    .await;
+    assert!(
+        r.stdout.starts_with("rc=0") && r.stdout.contains("No space left"),
+        "{r:?}"
+    );
+
+    // pids.max bounds the whole sandbox: a 300-task burst runs into it (the shell dies of
+    // the failed fork) and the kernel counts the refusals.
+    let r = run(
+        &sb,
+        open_params(&[
+            "/bin/sh",
+            "-c",
+            "i=0; while [ $i -lt 300 ]; do sleep 20 & i=$((i+1)); done; echo not-reached",
+        ]),
+    )
+    .await;
+    assert!(
+        r.stdout.is_empty() && r.exit.code != Some(0),
+        "{:?}",
+        r.exit
+    );
+    let r = bash(&sb, "cat /sys/fs/cgroup/sandbox/pids.events").await;
+    println!(
+        "OPTIONS pids.events after a 300-task burst with pids_max=200: {}",
+        r.stdout.trim()
+    );
+    let hits: u64 = r
+        .stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("max "))
+        .unwrap_or_else(|| panic!("{r:?}"))
+        .trim()
+        .parse()
+        .unwrap();
+    assert!(hits >= 1, "{r:?}");
+
+    // A process may lower its own nofile, never pass the sandbox's.
+    let mut p = open_params(&["/bin/sh", "-c", "ulimit -n"]);
+    p.limits = Some(ExecLimits {
+        nofile: Some(128),
+        ..ExecLimits::default()
+    });
+    assert_eq!(run(&sb, p).await.stdout, b"128\n");
+    let mut p = open_params(&["/bin/true"]);
+    p.limits = Some(ExecLimits {
+        nofile: Some(8192),
+        ..ExecLimits::default()
+    });
+    let err = sb.open_process(p).await.unwrap_err();
+    assert!(
+        matches!(&err, SandboxError::Protocol(e) if e.code() == sandcrab_protocol::codes::INVALID_PARAMS),
+        "{err}"
+    );
+
+    sb.destroy().await.unwrap();
+    assert!(leftovers(&env).is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "real libkrun: signed helper, pinned libkrun, pinned sandcrab/base:0.1.0, static crabd"]
+async fn process_streams_over_vsock() {
+    let env = env();
+    let sb = env
+        .manager
+        .spawn(SandboxConfig::from_template("base").env("FROM_SANDBOX", "never-inherited"))
+        .await
+        .unwrap();
+
+    // Exact env and argv, no shell in between.
+    let mut p = open_params(&["/usr/bin/env"]);
+    p.env = [("A", "1"), ("B", "x y"), ("EMPTY", "")]
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        .collect();
+    let r = run(&sb, p).await;
+    assert_eq!(
+        String::from_utf8_lossy(&r.stdout),
+        "A=1\nB=x y\nEMPTY=\n",
+        "{:?}",
+        r.exit
+    );
+    assert_eq!((r.exit.code, r.exit.signal), (Some(0), None));
+    assert!(r.exit.tree_clean && !r.exit.timed_out && !r.exit.cancelled);
+    let r = run(
+        &sb,
+        open_params(&[
+            "/bin/sh",
+            "-c",
+            "printf '%s|' \"$0\" \"$@\"",
+            "zero",
+            "a b",
+            "",
+            "$HOME",
+            "*",
+            "é\n",
+        ]),
+    )
+    .await;
+    assert_eq!(String::from_utf8_lossy(&r.stdout), "zero|a b||$HOME|*|é\n|");
+
+    // 1 MiB of every byte value through stdin and back: identical, in order, exit last.
+    let data: Vec<u8> = (0..1024 * 1024u32)
+        .map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8)
+        .collect();
+    let mut p = open_params(&["/bin/cat"]);
+    p.stdin = StdinMode::Pipe;
+    let t0 = Instant::now();
+    let (mut stdin, mut out) = sb.open_process(p).await.unwrap().into_split();
+    let sent = data.clone();
+    let writer = tokio::spawn(async move {
+        stdin.write(&sent).await.unwrap();
+        stdin.close().await.unwrap();
+        stdin
+    });
+    let r = drain(&mut out).await;
+    writer.await.unwrap();
+    assert_eq!(r.stdout.len(), data.len());
+    assert!(r.stdout == data, "1 MiB arrived changed");
+    assert_eq!(r.exit.code, Some(0));
+    println!(
+        "PROCESS 1 MiB stdin->cat->stdout round trip: {:?}",
+        t0.elapsed()
+    );
+
+    // stdin: null is an immediate EOF; a pipe stays open until STDIN_EOF.
+    let r = run(&sb, open_params(&["/bin/cat"])).await;
+    assert!(
+        r.stdout.is_empty() && r.exit.code == Some(0),
+        "{:?}",
+        r.exit
+    );
+    let mut p = open_params(&["/bin/cat"]);
+    p.stdin = StdinMode::Pipe;
+    let mut s = sb.open_process(p).await.unwrap();
+    s.stdin().write(b"ping\n").await.unwrap();
+    assert_eq!(
+        s.output().next().await.unwrap(),
+        Some(ProcessEvent::Stdout(b"ping\n".to_vec()))
+    );
+    let quiet = tokio::time::timeout(Duration::from_millis(400), s.output().next()).await;
+    assert!(quiet.is_err(), "cat ended while its stdin was open");
+    s.stdin().close().await.unwrap();
+    let r = drain(s.output()).await;
+    assert!(
+        r.stdout.is_empty() && r.exit.code == Some(0),
+        "{:?}",
+        r.exit
+    );
+
+    // Cancel stops a grandchild in its own session that ignores SIGTERM.
+    let p = open_params(&[
+        "/bin/sh",
+        "-c",
+        "setsid sh -c 'trap \"\" TERM; echo $$; exec sleep 1000' & wait",
+    ]);
+    let id = p.process_id.clone();
+    let mut s = sb.open_process(p).await.unwrap();
+    let Some(ProcessEvent::Stdout(line)) = s.output().next().await.unwrap() else {
+        panic!("no pid line");
+    };
+    let grandchild: u32 = String::from_utf8_lossy(&line).trim().parse().unwrap();
+    let r = bash(
+        &sb,
+        &format!(
+            "cat /proc/{grandchild}/comm; ps -o sid= -p {grandchild}; ps -o sid= -p {}",
+            s.pid()
+        ),
+    )
+    .await;
+    assert!(r.stdout.starts_with("sleep"), "{r:?}");
+    let t0 = Instant::now();
+    let c = sb.cancel_process(&id, Some(200)).await.unwrap();
+    println!(
+        "PROCESS cancel (grace 200 ms) of a TERM-ignoring setsid grandchild: {:?}",
+        t0.elapsed()
+    );
+    assert!(c.was_running && c.tree_clean, "{c:?}");
+    let r = drain(s.output()).await;
+    assert!(
+        r.exit.cancelled && r.exit.tree_clean && !r.exit.timed_out,
+        "{:?}",
+        r.exit
+    );
+    let r = bash(
+        &sb,
+        &format!("test -e /proc/{grandchild} && echo alive || echo gone"),
+    )
+    .await;
+    assert_eq!(r.stdout.trim(), "gone");
+
+    // A dropped stream (closed connection) stops the tree too.
+    let mut s = sb
+        .open_process(open_params(&["/bin/sh", "-c", "echo $$; exec sleep 1000"]))
+        .await
+        .unwrap();
+    let Some(ProcessEvent::Stdout(line)) = s.output().next().await.unwrap() else {
+        panic!("no pid line");
+    };
+    let pid: u32 = String::from_utf8_lossy(&line).trim().parse().unwrap();
+    drop(s);
+    let r = bash(
+        &sb,
+        &format!("for i in $(seq 50); do test -e /proc/{pid} || break; sleep 0.1; done; test -e /proc/{pid} && echo alive || echo gone"),
+    )
+    .await;
+    assert_eq!(r.stdout.trim(), "gone");
+
+    // Could not start: a typed error, nothing ran.
+    for (args, errno) in [
+        (vec!["/nonexistent/program"], "ENOENT"),
+        (vec!["/etc/passwd"], "EACCES"),
+    ] {
+        let err = sb.open_process(open_params(&args)).await.unwrap_err();
+        assert!(
+            matches!(&err, SandboxError::Protocol(ProtocolError::SpawnFailed { errno: e, .. }) if e == errno),
+            "{args:?}: {err:?}"
+        );
+    }
+    let mut p = open_params(&["/bin/true"]);
+    p.cwd = Some("/nonexistent/dir".into());
+    let err = sb.open_process(p).await.unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            SandboxError::Protocol(ProtocolError::SpawnFailed { .. })
+        ),
+        "{err:?}"
+    );
+
+    // Timeout, timed in the guest, told apart from a cancel.
+    let mut p = open_params(&["/bin/sh", "-c", "sleep 300 & sleep 301"]);
+    p.timeout_ms = Some(300);
+    p.kill_grace_ms = Some(100);
+    let t0 = Instant::now();
+    let r = run(&sb, p).await;
+    assert!(
+        r.exit.timed_out && !r.exit.cancelled && r.exit.tree_clean,
+        "{:?}",
+        r.exit
+    );
+    assert!(t0.elapsed() < Duration::from_secs(5), "{:?}", t0.elapsed());
+
+    // Output cap: `kill` cuts at the cap, `tail` keeps the end.
+    let mut p = open_params(&["/usr/bin/yes"]);
+    p.output_cap = Some(OutputCap {
+        max_bytes: 100_000,
+        on_overflow: Overflow::Kill,
+    });
+    let r = run(&sb, p).await;
+    assert_eq!(r.stdout.len(), 100_000);
+    assert!(r.exit.overflow && r.exit.tree_clean, "{:?}", r.exit);
+    let mut p = open_params(&["/bin/sh", "-c", "seq 1 100000"]);
+    p.output_cap = Some(OutputCap {
+        max_bytes: 4096,
+        on_overflow: Overflow::Tail,
+    });
+    let r = run(&sb, p).await;
+    assert_eq!(r.stdout.len(), 4096);
+    assert!(r.stdout.ends_with(b"\n99999\n100000\n"));
+    assert!(r.exit.overflow && r.exit.code == Some(0), "{:?}", r.exit);
+
+    // stderr: tail by default, a stream on request; exit code and signal.
+    let r = run(
+        &sb,
+        open_params(&["/bin/sh", "-c", "echo out; echo err >&2; exit 3"]),
+    )
+    .await;
+    assert_eq!(
+        (r.stdout.as_slice(), r.stderr.as_slice()),
+        (&b"out\n"[..], &b""[..])
+    );
+    assert_eq!(
+        (r.exit.code, r.exit.stderr_tail.as_str()),
+        (Some(3), "err\n")
+    );
+    let mut p = open_params(&["/bin/sh", "-c", "echo err >&2; kill -KILL $$"]);
+    p.stderr = StderrMode::Stream;
+    let r = run(&sb, p).await;
+    assert_eq!(r.stderr, b"err\n");
+    assert_eq!((r.exit.code, r.exit.signal), (None, Some(9)));
+
+    // RLIMIT_NPROC counts this sandbox's processes only (`nproc_scope: sandbox`): 16 is far
+    // below what the host user runs outside the guest, and the program still starts.
+    let mut p = open_params(&[
+        "/bin/sh",
+        "-c",
+        "grep 'Max processes' /proc/self/limits; ps -e --no-headers | wc -l",
+    ]);
+    p.limits = Some(ExecLimits {
+        nproc: Some(16),
+        ..ExecLimits::default()
+    });
+    let r = run(&sb, p).await;
+    let out = String::from_utf8_lossy(&r.stdout).into_owned();
+    println!("PROCESS nproc=16 (limit, processes in the guest): {out:?}");
+    let limits: Vec<_> = out.split_whitespace().collect();
+    assert_eq!(
+        limits[..4],
+        ["Max", "processes", "16", "16"],
+        "{:?}",
+        r.exit
+    );
+
+    // Warm exec: open → exit of `/bin/true`, one after the other.
+    let mut times = Vec::new();
+    for _ in 0..100 {
+        let t0 = Instant::now();
+        let r = run(&sb, open_params(&["/bin/true"])).await;
+        times.push(t0.elapsed());
+        assert_eq!(r.exit.code, Some(0));
+    }
+    let (min, max) = (*times.iter().min().unwrap(), *times.iter().max().unwrap());
+    println!(
+        "PROCESS warm exec /bin/true x100: p50={:?} min={min:?} max={max:?}",
+        p50(times)
+    );
+    let mut times = Vec::new();
+    for _ in 0..50 {
+        let t0 = Instant::now();
+        bash(&sb, "true").await;
+        times.push(t0.elapsed());
+    }
+    println!("PROCESS warm bash tool `true` x50: p50={:?}", p50(times));
+
+    // 32 at once.
+    let all = futures_join(
+        (0..32)
+            .map(|i| {
+                let sb = sb.clone();
+                async move {
+                    let r = run(&sb, open_params(&["/bin/sh", "-c", &format!("echo {i}")])).await;
+                    assert_eq!(String::from_utf8_lossy(&r.stdout).trim(), i.to_string());
+                }
+            })
+            .collect(),
+    );
+    all.await;
+
+    sb.destroy().await.unwrap();
+    assert!(leftovers(&env).is_empty());
+}
+
+/// Run every future on its own task and wait for all of them.
+async fn futures_join<F>(futs: Vec<F>)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let mut set = tokio::task::JoinSet::new();
+    for f in futs {
+        set.spawn(f);
+    }
+    while let Some(r) = set.join_next().await {
+        r.unwrap();
+    }
+}
+
+/// A manager whose mount policy allows `roots`.
+fn env_with_roots(roots: Vec<MountRoot>) -> Env {
+    let tmp = tempfile::Builder::new()
+        .prefix("sclk")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let (cfg, libs) = config(tmp.path(), false, false);
+    let backend = Arc::new(LibkrunBackend::new(cfg, libs).unwrap());
+    let workspaces = WorkspaceRegistry::open(tmp.path().join("state")).unwrap();
+    let templates = TemplateRegistry::load(&[root().join("templates")]).unwrap();
+    let manager = SandboxManager::new(
+        backend.clone(),
+        workspaces,
+        templates,
+        ManagerConfig {
+            mount_policy: Some(MountPolicy::new(roots, Vec::new()).unwrap()),
+            ..ManagerConfig::default()
+        },
+    )
+    .unwrap();
+    Env {
+        project: tmp.path().join("project"),
+        docs: tmp.path().join("docs"),
+        tmp,
+        backend,
+        manager,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "real libkrun: signed helper, pinned libkrun, pinned sandcrab/base:0.1.0, static crabd"]
+async fn host_mounts_at_the_same_path() {
+    use std::os::unix::fs::MetadataExt;
+    // One root under the temporary directory (`/tmp` is a symlink on macOS: the policy and
+    // the paths below use the resolved name) and one in the home directory, whose path the
+    // image does not have at all.
+    let home = tempfile::Builder::new()
+        .prefix("sc-hm-")
+        .tempdir_in(std::env::var_os("HOME").map_or_else(|| PathBuf::from("/tmp"), PathBuf::from))
+        .unwrap();
+    let home_root = std::fs::canonicalize(home.path()).unwrap();
+    let scratch = tempfile::Builder::new()
+        .prefix("sc-hm-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let tmp_root = std::fs::canonicalize(scratch.path()).unwrap();
+    let rw = home_root.join("deep/er/rw");
+    let ro = home_root.join("ro");
+    let under_tmp = tmp_root.join("in-tmp");
+    for d in [&rw, &ro, &under_tmp] {
+        std::fs::create_dir_all(d).unwrap();
+        std::fs::write(d.join("seed.txt"), format!("seed of {}\n", d.display())).unwrap();
+    }
+    let env = env_with_roots(vec![
+        MountRoot {
+            path: home_root.clone(),
+            max_mode: MountMode::ReadWrite,
+        },
+        MountRoot {
+            path: tmp_root.clone(),
+            max_mode: MountMode::ReadWrite,
+        },
+        MountRoot {
+            path: "/usr".into(),
+            max_mode: MountMode::ReadOnly,
+        },
+    ]);
+    let caps = env.backend.capabilities();
+    assert!(caps.supports_host_mounts && !caps.mount_identity_checked);
+    let (rws, ros, tmps) = (
+        rw.display().to_string(),
+        ro.display().to_string(),
+        under_tmp.display().to_string(),
+    );
+    let host_uid = rustix::process::getuid().as_raw();
+
+    for round in 0..2 {
+        let sb = env
+            .manager
+            .spawn(
+                SandboxConfig::from_template("base")
+                    .host_mount(&rw, MountMode::ReadWrite)
+                    .host_mount(&ro, MountMode::ReadOnly)
+                    .host_mount(&under_tmp, MountMode::ReadWrite)
+                    .tmp_size_mb(32)
+                    .default_cwd(&rw),
+            )
+            .await
+            .unwrap();
+        // Same absolute path, virtio-fs, the modes as asked; the root stays the overlay and
+        // the read-only rootfs image below it is untouched (round 1 verifies its digest
+        // stamp again at spawn).
+        let r = bash(
+            &sb,
+            &format!(
+                "pwd; cat seed.txt {ros}/seed.txt {tmps}/seed.txt; \
+                 for p in {rws} {ros} {tmps}; do findmnt -no FSTYPE,OPTIONS $p | cut -d, -f1; done; \
+                 echo $(findmnt -no FSTYPE /) $(findmnt -no FSTYPE /tmp); \
+                 stat -c 'parent %U:%G %a' {}; stat -c 'seed %u:%g' seed.txt; id -u",
+                rw.parent().unwrap().display()
+            ),
+        )
+        .await;
+        println!("MOUNTS round {round}:\n{}", r.stdout);
+        let lines: Vec<_> = r.stdout.lines().collect();
+        assert_eq!(lines[0], rws);
+        assert_eq!(lines[1], format!("seed of {rws}"));
+        assert_eq!(lines[2], format!("seed of {ros}"));
+        assert_eq!(lines[3], format!("seed of {tmps}"));
+        assert_eq!(lines[4..7], ["virtiofs rw", "virtiofs ro", "virtiofs rw"]);
+        assert_eq!(lines[7].trim(), "overlay tmpfs");
+        // Mount points the image lacks are root-owned 0755 directories on the scratch layer.
+        assert_eq!(lines[8], "parent root:root 755");
+
+        // Guest → host, live; the host file belongs to the host user.
+        let r = bash(&sb, &format!("echo from-guest-{round} > out-{round}.txt; mkdir -p d && echo x > d/f; stat -c '%u:%g' out-{round}.txt; echo t > {tmps}/t-{round}")).await;
+        assert_eq!(r.exit_code, Some(0), "{r:?}");
+        println!(
+            "MOUNTS guest-side owner of a file the guest wrote: {}",
+            r.stdout.trim()
+        );
+        let written = rw.join(format!("out-{round}.txt"));
+        assert_eq!(
+            std::fs::read_to_string(&written).unwrap(),
+            format!("from-guest-{round}\n")
+        );
+        let md = std::fs::metadata(&written).unwrap();
+        println!(
+            "MOUNTS host-side owner of that file: {}:{} mode {:o} (host uid {host_uid})",
+            md.uid(),
+            md.gid(),
+            md.mode() & 0o7777
+        );
+        assert_eq!(md.uid(), host_uid);
+        assert!(under_tmp.join(format!("t-{round}")).is_file());
+
+        // Host → guest, live, on both.
+        std::fs::write(rw.join("late.txt"), format!("late {round}")).unwrap();
+        std::fs::write(ro.join("late.txt"), format!("late ro {round}")).unwrap();
+        let r = bash(&sb, &format!("cat late.txt {ros}/late.txt")).await;
+        assert_eq!(r.stdout, format!("late {round}late ro {round}"));
+        // A file the guest has already looked at: a host-side rewrite (same length) and a
+        // host-side delete arrive too, once the guest's virtio-fs cache entry has aged out.
+        std::fs::write(rw.join("late.txt"), format!("LATE {round}")).unwrap();
+        let t0 = Instant::now();
+        let seen = bash(
+            &sb,
+            &format!("for i in $(seq 300); do [ \"$(cat late.txt)\" = 'LATE {round}' ] && break; sleep 0.05; done; cat late.txt"),
+        )
+        .await;
+        assert_eq!(seen.stdout, format!("LATE {round}"));
+        println!(
+            "MOUNTS host rewrite of a file the guest had read: visible after {:?}",
+            t0.elapsed()
+        );
+        std::fs::remove_file(rw.join("late.txt")).unwrap();
+        let t0 = Instant::now();
+        let gone = bash(
+            &sb,
+            "for i in $(seq 300); do test -e late.txt || break; sleep 0.05; done; test -e late.txt; echo $?",
+        )
+        .await;
+        assert_eq!(gone.stdout.trim(), "1");
+        println!(
+            "MOUNTS host delete of a file the guest had read: visible after {:?}",
+            t0.elapsed()
+        );
+
+        // ...and a file the guest has just seen missing appears at once when the host
+        // creates it (a failed lookup is not cached).
+        std::fs::write(rw.join("late.txt"), "back").unwrap();
+        assert_eq!(bash(&sb, "cat late.txt").await.stdout, "back");
+        std::fs::remove_file(rw.join("late.txt")).unwrap();
+
+        // Read-only holds, also against a remount.
+        let r = bash(
+            &sb,
+            &format!(
+                "touch {ros}/x 2>&1; mount -o remount,rw {ros} 2>&1; touch {ros}/y 2>&1; true"
+            ),
+        )
+        .await;
+        assert!(r.stdout.contains("Read-only file system"), "{}", r.stdout);
+        assert!(!ro.join("x").exists() && !ro.join("y").exists());
+
+        // The system directories around the mount points are intact.
+        let r = bash(
+            &sb,
+            "ls /usr/bin/env /etc/passwd /bin/sh >/dev/null && echo ok",
+        )
+        .await;
+        assert_eq!(r.stdout.trim(), "ok");
+
+        // process.open runs in a host mount by its path.
+        let mut p = open_params(&["/bin/sh", "-c", "pwd; cat seed.txt"]);
+        p.cwd = Some(ros.clone());
+        let r = run(&sb, p).await;
+        assert_eq!(
+            String::from_utf8_lossy(&r.stdout),
+            format!("{ros}\nseed of {ros}\n")
+        );
+        sb.destroy().await.unwrap();
+    }
+
+    // A sandbox user that is not the host user: report what it can do (virtio-fs maps
+    // nothing; the helper touches the host files as the host user).
+    let sb = env
+        .manager
+        .spawn(
+            SandboxConfig::from_template("base")
+                .host_mount(&rw, MountMode::ReadWrite)
+                .user(UserSpec::new(host_uid + 4242, host_uid + 4242))
+                .default_cwd("/tmp"),
+        )
+        .await
+        .unwrap();
+    let r = bash(
+        &sb,
+        &format!("id -u; cat {rws}/seed.txt; echo other > {rws}/other.txt 2>&1; echo write_rc=$?; stat -c '%u:%g %a' {rws}"),
+    )
+    .await;
+    println!("MOUNTS as another uid:\n{}", r.stdout);
+    if let Ok(md) = std::fs::metadata(rw.join("other.txt")) {
+        println!(
+            "MOUNTS host-side owner of its file: {}:{}",
+            md.uid(),
+            md.gid()
+        );
+        assert_eq!(md.uid(), host_uid, "the helper writes as the host user");
+    }
+    sb.destroy().await.unwrap();
+
+    // Refusals: outside every root, a symlink, a system directory of the guest, no policy.
+    let link = home_root.join("link");
+    std::os::unix::fs::symlink(&rw, &link).unwrap();
+    for (path, what) in [
+        (PathBuf::from("/opt"), "outside the roots"),
+        (link, "symlink"),
+        (PathBuf::from("/usr"), "guest system directory"),
+    ] {
+        let err = env
+            .manager
+            .spawn(SandboxConfig::from_template("base").host_mount(&path, MountMode::ReadOnly))
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("{what} was mounted"));
+        assert!(
+            matches!(err, SandboxError::MountNotAllowed { .. }),
+            "{what}: {err}"
+        );
+        println!("MOUNTS refused ({what}): {err}");
+    }
+    assert!(leftovers(&env).is_empty());
+    assert!(no_helper_left(), "helper exited");
+}
+
+/// Forward target: every connection goes to a TCP listener on the host's loopback.
+struct TcpTarget(SocketAddr);
+
+#[async_trait::async_trait]
+impl ForwardTarget for TcpTarget {
+    async fn connect(
+        &self,
+        _sandbox: sandcrab_core::SandboxId,
+        _guest_port: u16,
+    ) -> std::io::Result<BoxedStream> {
+        let s = tokio::net::TcpStream::connect(self.0).await?;
+        s.set_nodelay(true)?;
+        Ok(Box::new(s))
+    }
+}
+
+/// What the host target saw on one connection.
+#[derive(Debug)]
+enum Seen {
+    /// `up <id>`: bytes received until the guest's end-of-file, and how long they took.
+    Up { id: u32, bytes: u64, took: Duration },
+    /// `down <n>`: `n` bytes sent, then our end-of-file; the line the guest sent after it.
+    Down { ack: String, took: Duration },
+}
+
+/// The host target: reads one command line, then
+/// - `up <id>`: counts bytes until end-of-file and answers `got <n>` (guest → host
+///   half-close: the answer travels after the guest's EOF);
+/// - `down <n>`: sends `n` bytes, half-closes, and reads the guest's answer (host → guest
+///   half-close).
+async fn target_server(
+    listener: tokio::net::TcpListener,
+    seen: tokio::sync::mpsc::UnboundedSender<Seen>,
+) {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+    loop {
+        let Ok((stream, _)) = listener.accept().await else {
+            return;
+        };
+        let seen = seen.clone();
+        tokio::spawn(async move {
+            let mut s = tokio::io::BufReader::with_capacity(256 * 1024, stream);
+            let mut line = String::new();
+            s.read_line(&mut line).await.unwrap();
+            let f: Vec<_> = line.split_whitespace().collect();
+            let t0 = Instant::now();
+            match f.as_slice() {
+                ["up", id] => {
+                    let mut buf = vec![0u8; 256 * 1024];
+                    let mut bytes = 0u64;
+                    loop {
+                        let n = s.read(&mut buf).await.unwrap();
+                        if n == 0 {
+                            break;
+                        }
+                        bytes += n as u64;
+                    }
+                    let took = t0.elapsed();
+                    s.get_mut()
+                        .write_all(format!("got {bytes}").as_bytes())
+                        .await
+                        .unwrap();
+                    s.get_mut().shutdown().await.unwrap();
+                    let _ = seen.send(Seen::Up {
+                        id: id.parse().unwrap(),
+                        bytes,
+                        took,
+                    });
+                }
+                ["down", n] => {
+                    let mut left: u64 = n.parse().unwrap();
+                    let buf = vec![0xabu8; 256 * 1024];
+                    while left > 0 {
+                        let n = left.min(buf.len() as u64) as usize;
+                        s.get_mut().write_all(&buf[..n]).await.unwrap();
+                        left -= n as u64;
+                    }
+                    s.get_mut().shutdown().await.unwrap();
+                    let mut ack = String::new();
+                    s.read_to_string(&mut ack).await.unwrap();
+                    let _ = seen.send(Seen::Down {
+                        ack,
+                        took: t0.elapsed(),
+                    });
+                }
+                other => panic!("unexpected command {other:?}"),
+            }
+        });
+    }
+}
+
+/// Guest client (node, from the `ts-dev` template): `up <port> <conns> <bytes>` and
+/// `down <port> <bytes>`, printing one line per connection.
+const FORWARD_CLIENT_JS: &str = r"
+const net = require('net');
+const [mode, port, a, b] = [process.argv[2], +process.argv[3], +process.argv[4], +process.argv[5]];
+function up(id, bytes) {
+  return new Promise((resolve, reject) => {
+    const s = net.connect({ host: '127.0.0.1', port, allowHalfOpen: true });
+    let reply = '';
+    s.on('connect', () => {
+      s.write(`up ${id}\n`);
+      const chunk = Buffer.alloc(65536, id);
+      let left = bytes;
+      const pump = () => {
+        while (left > 0) {
+          const c = left >= chunk.length ? chunk : chunk.subarray(0, left);
+          left -= c.length;
+          if (!s.write(c)) { s.once('drain', pump); return; }
+        }
+        s.end();
+      };
+      pump();
+    });
+    s.on('data', (d) => { reply += d; });
+    s.on('end', () => resolve(`up ${id} ${reply}`));
+    s.on('error', reject);
+  });
+}
+function down(bytes) {
+  return new Promise((resolve, reject) => {
+    const s = net.connect({ host: '127.0.0.1', port, allowHalfOpen: true });
+    let n = 0;
+    const t0 = Date.now();
+    s.on('connect', () => s.write(`down ${bytes}\n`));
+    s.on('data', (d) => { n += d.length; });
+    s.on('end', () => { s.end(`ack ${n}`); resolve(`down ${n} ${Date.now() - t0}ms`); });
+    s.on('error', reject);
+  });
+}
+(async () => {
+  if (mode === 'up') {
+    const all = await Promise.all(Array.from({ length: a }, (_, i) => up(i + 1, b)));
+    console.log(all.join('\n'));
+  } else if (mode === 'down') {
+    console.log(await down(a));
+  } else {
+    // A port that is not forwarded: nothing listens.
+    net.connect({ host: '127.0.0.1', port }).on('error', (e) => console.log(`error ${e.code}`))
+      .on('connect', () => console.log('connected'));
+  }
+})().catch((e) => { console.log(`failed ${e.code || e}`); process.exit(1); });
+";
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "real libkrun: signed helper, pinned libkrun, pinned sandcrab/ts-dev:0.1.0, static crabd"]
+async fn forwards_over_vsock_with_network_disabled() {
+    const PORT: u16 = 7801;
+    const MIB: u64 = 1024 * 1024;
+    let env = env();
+    assert!(env.backend.capabilities().supports_forwards);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target = TcpTarget(listener.local_addr().unwrap());
+    let (tx, mut seen) = tokio::sync::mpsc::unbounded_channel();
+    let server = tokio::spawn(target_server(listener, tx));
+
+    let sb = env
+        .manager
+        .spawn(
+            SandboxConfig::from_template("ts-dev")
+                .network(NetworkConfig::disabled())
+                .forward(PORT)
+                .forward(PORT + 1)
+                .default_cwd("/tmp"),
+        )
+        .await
+        .unwrap();
+    // Forwards bring no network: loopback only, as without them.
+    assert_loopback_only(&sb).await;
+    sb.call::<FileWriteResult>(FileWriteParams {
+        path: "/tmp/fwd.js".into(),
+        content: FORWARD_CLIENT_JS.into(),
+        append: false,
+    })
+    .await
+    .unwrap();
+    let node = |args: String| {
+        let sb = sb.clone();
+        async move {
+            let r = bash_t(&sb, &format!("node /tmp/fwd.js {args}"), Some(120_000)).await;
+            assert_eq!(r.exit_code, Some(0), "{r:?}");
+            r.stdout
+        }
+    };
+
+    // Nobody serves the forwards yet: the connection is accepted and closed at once.
+    let r = bash_t(
+        &sb,
+        &format!("node /tmp/fwd.js up {PORT} 1 10"),
+        Some(30_000),
+    )
+    .await;
+    assert!(!r.stdout.contains("got"), "{r:?}");
+    let stats = sb.forward_stats().await.unwrap();
+    let of = |stats: &[sandcrab_protocol::ForwardPortStats], port: u16| {
+        *stats.iter().find(|s| s.port == port).unwrap()
+    };
+    assert_eq!(of(&stats, PORT).refused.no_listener, 1, "{stats:?}");
+
+    sb.serve_forwards(Arc::new(target)).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !sb.forwards_listening() {
+        assert!(
+            Instant::now() < deadline,
+            "the listen connection never came up"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // One connection: the guest dials 127.0.0.1:<port>, the host target receives, and the
+    // answer comes back after the guest's end-of-file.
+    let out = node(format!("up {PORT} 1 100000")).await;
+    assert_eq!(out.trim(), "up 1 got 100000");
+    match seen.recv().await.unwrap() {
+        Seen::Up {
+            id: 1,
+            bytes: 100_000,
+            ..
+        } => {}
+        other => panic!("{other:?}"),
+    }
+
+    // 16 at once, 4 MiB each, on the second port.
+    let t0 = Instant::now();
+    let out = node(format!("up {} 16 {}", PORT + 1, 4 * MIB)).await;
+    let took = t0.elapsed();
+    let mut ids: Vec<u32> = Vec::new();
+    for line in out.lines() {
+        let f: Vec<_> = line.split_whitespace().collect();
+        assert_eq!(f[2..], ["got", &(4 * MIB).to_string()], "{line}");
+        ids.push(f[1].parse().unwrap());
+    }
+    ids.sort_unstable();
+    assert_eq!(ids, (1..=16).collect::<Vec<u32>>());
+    for _ in 0..16 {
+        assert!(matches!(seen.recv().await.unwrap(), Seen::Up { bytes, .. } if bytes == 4 * MIB));
+    }
+    println!(
+        "FORWARD 16 parallel x 4 MiB guest->host: {took:?} ({:.0} MiB/s total, incl. node start)",
+        64.0 / took.as_secs_f64()
+    );
+
+    // Throughput of one stream, both ways.
+    let size = 512 * MIB;
+    node(format!("up {PORT} 1 {size}")).await;
+    let Seen::Up { bytes, took, .. } = seen.recv().await.unwrap() else {
+        panic!("not an upload");
+    };
+    assert_eq!(bytes, size);
+    let up = size as f64 / 1e6 / took.as_secs_f64();
+    println!("FORWARD one stream guest->host: 512 MiB in {took:?} = {up:.0} MB/s");
+    let out = node(format!("down {PORT} {size}")).await;
+    assert!(out.starts_with(&format!("down {size} ")), "{out}");
+    let Seen::Down { ack, took } = seen.recv().await.unwrap() else {
+        panic!("not a download");
+    };
+    // The guest answered after the host's end-of-file: half-close host → guest.
+    assert_eq!(ack, format!("ack {size}"));
+    let down = size as f64 / 1e6 / took.as_secs_f64();
+    println!(
+        "FORWARD one stream host->guest: 512 MiB in {took:?} = {down:.0} MB/s (guest saw: {})",
+        out.trim()
+    );
+
+    // A port that is not forwarded: nothing listens. Still no network.
+    let out = node(format!("probe {}", PORT + 2)).await;
+    assert_eq!(out.trim(), "error ECONNREFUSED");
+    assert_loopback_only(&sb).await;
+
+    let stats = sb.forward_stats().await.unwrap();
+    println!("FORWARD stats: {stats:?}");
+    assert_eq!(of(&stats, PORT).accepted, 3);
+    assert_eq!(of(&stats, PORT + 1).accepted, 16);
+    assert_eq!(
+        of(&stats, PORT + 1).refused,
+        sandcrab_protocol::ForwardRefused::default()
+    );
+
+    sb.destroy().await.unwrap();
+    server.abort();
+    assert!(leftovers(&env).is_empty());
+    assert!(no_helper_left(), "helper exited");
 }

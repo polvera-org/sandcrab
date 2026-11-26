@@ -31,7 +31,7 @@ use rustix::io::Errno;
 use crate::registry::FileKind;
 use crate::{Result, SafeRelPath, SandboxError};
 
-const DIR_FLAGS: OFlags = OFlags::RDONLY
+pub(crate) const DIR_FLAGS: OFlags = OFlags::RDONLY
     .union(OFlags::DIRECTORY)
     .union(OFlags::NOFOLLOW)
     .union(OFlags::CLOEXEC);
@@ -512,6 +512,138 @@ pub(crate) fn list_dir(root: &OwnedFd, rel: &SafeRelPath) -> Result<Vec<(PathBuf
     Ok(out)
 }
 
+/// A fresh directory made beneath a host root that other users may write (a mount root),
+/// and used only through descriptors: the directory, its subdirectories and its files are
+/// created, written and chowned relative to the handle opened when it was made, never by
+/// path. Someone who renames it away and plants a symlink or another directory at its name
+/// cannot redirect a write or a chown. Removed on drop: its contents through the held
+/// handle, then the (by then empty) name.
+pub struct ScratchDir {
+    parent: OwnedFd,
+    name: OsString,
+    path: PathBuf,
+    dir: OwnedFd,
+}
+
+impl ScratchDir {
+    /// Make `root/name` (`name` one plain component, which must not exist yet). `root` is
+    /// an absolute, canonical path; a symlink anywhere in it is refused.
+    pub fn create(root: &Path, name: &str) -> Result<Self> {
+        let rel = SafeRelPath::new(name)?;
+        let (parent_comps, n) = split(&rel)?;
+        if !parent_comps.is_empty() {
+            return Err(SandboxError::InvalidConfig(format!(
+                "`{name}` is not a single name"
+            )));
+        }
+        let parent = open_root_nofollow(root).map_err(|e| match e {
+            RootOpenError::Changed(m) => SandboxError::PathEscape(m),
+            RootOpenError::Io(e) => SandboxError::io_at(root, e),
+        })?;
+        rustix::fs::mkdirat(&parent, n, Mode::from_raw_mode(0o755)).map_err(|e| map(&rel, e))?;
+        let dir = rustix::fs::openat(&parent, n, DIR_FLAGS, Mode::empty());
+        let dir = match dir {
+            Ok(fd) => fd,
+            Err(e) => {
+                let _ = rustix::fs::unlinkat(&parent, n, AtFlags::REMOVEDIR);
+                return Err(map(&rel, e));
+            }
+        };
+        Ok(Self {
+            parent,
+            name: n.to_owned(),
+            path: root.join(n),
+            dir,
+        })
+    }
+
+    /// The path it was made at (for mounts and messages; never used to reach it).
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The handle of `name` inside, never through a symlink.
+    fn open_sub(&self, name: &str) -> Result<OwnedFd> {
+        let rel = SafeRelPath::new(name)?;
+        let comps = names(&rel)?;
+        open_dir(&self.dir, &rel, &comps, false)
+    }
+
+    /// Make the subdirectory `name` (one plain component).
+    pub fn mkdir(&self, name: &str) -> Result<()> {
+        let rel = SafeRelPath::new(name)?;
+        rustix::fs::mkdirat(&self.dir, rel.as_path(), Mode::from_raw_mode(0o755))
+            .map_err(|e| map(&rel, e))
+    }
+
+    /// Create the new file `rel` (`O_CREAT | O_EXCL | O_NOFOLLOW`) holding `bytes`.
+    pub fn write_new(&self, rel: &str, bytes: &[u8]) -> Result<()> {
+        let rel = SafeRelPath::new(rel)?;
+        let (parent, name) = split(&rel)?;
+        let dir = open_dir(&self.dir, &rel, &parent, false)?;
+        let fd = rustix::fs::openat(
+            &dir,
+            name,
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::from_raw_mode(0o644),
+        )
+        .map_err(|e| map(&rel, e))?;
+        // Readable whatever the umask is: a sandbox user reads it through a mount.
+        rustix::fs::fchmod(&fd, Mode::from_raw_mode(0o644)).map_err(|e| map(&rel, e))?;
+        File::from(fd)
+            .write_all(bytes)
+            .map_err(|e| SandboxError::io_at(rel.as_path(), e))
+    }
+
+    /// Give the subdirectory `name` to `uid:gid` (`fchown` on its handle), unless it is
+    /// theirs already.
+    pub fn chown_dir(&self, name: &str, uid: u32, gid: u32) -> Result<()> {
+        let fd = self.open_sub(name)?;
+        let err = |e: Errno| SandboxError::io_at(&self.path.join(name), e.into());
+        let st = rustix::fs::fstat(&fd).map_err(err)?;
+        if st.st_uid == uid && st.st_gid == gid {
+            return Ok(());
+        }
+        rustix::fs::fchown(
+            &fd,
+            Some(rustix::process::Uid::from_raw(uid)),
+            Some(rustix::process::Gid::from_raw(gid)),
+        )
+        .map_err(err)
+    }
+
+    /// Read the regular file `rel` inside, at most `limit` bytes; a symlink is refused.
+    pub fn read(&self, rel: &str, limit: u64) -> Result<Vec<u8>> {
+        read_file(&self.dir, &SafeRelPath::new(rel)?, limit)
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let removed = read_children(&self.dir)
+            .map_err(|e| SandboxError::io_at(&self.path, e.into()))
+            .and_then(|children| {
+                for child in children {
+                    let rel = SafeRelPath::new(&child)?;
+                    delete(&self.dir, &rel)?;
+                }
+                Ok(())
+            });
+        // Empty now, unless someone else put something there; `rmdir` removes only an empty
+        // directory, so a directory planted at the name is never emptied.
+        let removed = removed.and_then(|()| {
+            match rustix::fs::unlinkat(&self.parent, &self.name, AtFlags::REMOVEDIR) {
+                Ok(()) | Err(Errno::NOENT) => Ok(()),
+                Err(e) => Err(SandboxError::io_at(&self.path, e.into())),
+            }
+        });
+        if let Err(e) = removed {
+            tracing::warn!(dir = %self.path.display(), error = %e, "cannot remove scratch directory");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -650,6 +782,74 @@ mod tests {
         ));
         delete_max_depth(&root, &rel("d"), 10).unwrap();
         assert!(!tmp.path().join("d").exists());
+    }
+
+    /// B1: once made, a scratch directory renamed away and replaced by a symlink (or by
+    /// another directory) never takes a write, a chown or a removal outside it.
+    #[test]
+    fn scratch_dir_survives_a_swap_at_its_name() {
+        use std::os::unix::fs::MetadataExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let base = fs::canonicalize(tmp.path()).unwrap();
+        let root = base.join("root");
+        let outside = base.join("outside");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("keep"), "x").unwrap();
+
+        let s = ScratchDir::create(&root, "scratch").unwrap();
+        assert!(ScratchDir::create(&root, "scratch").is_err(), "must be new");
+        assert!(ScratchDir::create(&root, "a/b").is_err());
+        // Swap: the real directory moves away, a symlink to `outside` takes its name.
+        fs::rename(root.join("scratch"), root.join("moved")).unwrap();
+        symlink(&outside, root.join("scratch")).unwrap();
+
+        s.mkdir("rw").unwrap();
+        s.write_new("canary-outside", b"c").unwrap();
+        s.write_new("rw/f", b"c").unwrap();
+        assert!(s.write_new("rw/f", b"again").is_err(), "O_EXCL");
+        let (uid, gid) = (
+            crate::private_dir::current_uid(),
+            crate::private_dir::current_gid(),
+        );
+        s.chown_dir("rw", uid, gid).unwrap();
+        assert_eq!(s.read("rw/f", 16).unwrap(), b"c");
+        // A symlink planted inside is not followed by a read.
+        symlink(outside.join("keep"), root.join("moved/rw/link")).unwrap();
+        assert!(s.read("rw/link", 16).is_err());
+
+        assert!(root.join("moved/rw/f").exists());
+        assert!(root.join("moved/canary-outside").exists());
+        let names: Vec<_> = fs::read_dir(&outside)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["keep"], "nothing written outside");
+        assert_eq!(fs::metadata(&outside).unwrap().uid(), uid);
+
+        drop(s);
+        // The held directory is emptied; the planted symlink and its target are untouched.
+        assert_eq!(fs::read_dir(root.join("moved")).unwrap().count(), 0);
+        assert!(
+            fs::symlink_metadata(root.join("scratch"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read_to_string(outside.join("keep")).unwrap(), "x");
+    }
+
+    #[test]
+    fn scratch_dir_is_removed_on_drop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = fs::canonicalize(tmp.path()).unwrap();
+        let s = ScratchDir::create(&base, "s").unwrap();
+        s.mkdir("ro").unwrap();
+        s.write_new("ro/canary", b"c").unwrap();
+        assert_eq!(s.path(), base.join("s"));
+        assert_eq!(fs::read(base.join("s/ro/canary")).unwrap(), b"c");
+        drop(s);
+        assert!(!base.join("s").exists());
     }
 
     #[test]

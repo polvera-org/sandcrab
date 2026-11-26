@@ -44,7 +44,7 @@ another backend.
 ## `doctor`
 
 ```sh
-sandcrab doctor [--fix [--all [-y]]]
+sandcrab doctor [--fix [--all [-y]]] [--server-config FILE]
 ```
 
 Checks `crabd`, Docker (and the Docker transport in use, `unix` or `tcp`), every template
@@ -70,6 +70,7 @@ install that is present but does not match its pins always fails.
 | `--fix` | Remove orphaned sandcrab containers (only this user's, for this state dir, whose sandcrab process is gone) and Firecracker run dirs of dead sandcrab processes; download and verify the pinned Firecracker kernel and binary; tighten state dir permissions |
 | `--all` | With `--fix`: remove **every** sandcrab Docker container on the host, including live sandboxes of other processes and users. Asks for confirmation |
 | `-y, --yes` | With `--all`: skip the confirmation |
+| `--server-config FILE` | Also check a `sandcrab server` config (the `server:*` lines): it parses, the socket directory, the allow list, the mount roots, the backend preflight and the pins of the templates it names. The other checks then use its backend, state and template directories. See [server.md](server.md) |
 
 ## `workspace`
 

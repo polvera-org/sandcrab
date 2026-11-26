@@ -3,10 +3,11 @@
 //! Exit codes: `run` exits with the sandboxed command's code (`128 + signal` if killed);
 //! if `sandcrab` itself gets SIGINT / SIGTERM / SIGHUP / SIGQUIT, `run` and `tool` destroy
 //! the sandbox first and exit `128 + signal` (130 on Ctrl-C); other commands exit `0` on success, `1` on error (`doctor`: any failed
-//! check), `2` on usage errors.
+//! check; `selftest`: a line that did not pass), `2` on usage errors.
 
 mod args;
 mod doctor;
+mod doctor_server;
 #[cfg(all(feature = "firecracker", target_os = "linux"))]
 mod firecracker;
 #[cfg(all(
@@ -15,6 +16,8 @@ mod firecracker;
 ))]
 mod libkrun;
 mod run;
+mod selftest;
+mod server;
 mod util;
 mod workspace;
 
@@ -117,6 +120,13 @@ pub enum Commands {
         /// With --all: skip the confirmation prompt.
         #[arg(long, short = 'y', requires = "all")]
         yes: bool,
+
+        /// Also check a `sandcrab server` config: it parses, the socket directory, the allow
+        /// list, the mount roots, the backend preflight and the pins of the templates it
+        /// names. The other checks then use its backend, state and template directories.
+        /// Run as the server's user.
+        #[arg(long, value_name = "FILE")]
+        server_config: Option<PathBuf>,
     },
 
     /// Manage persistent workspaces.
@@ -178,10 +188,28 @@ pub enum Commands {
         params: Option<String>,
     },
 
+    /// Run the host daemon: a Unix-socket API for clients (SDKs) on one explicit backend.
+    /// Stops on SIGINT / SIGTERM (or, with --lifeline-stdin, when stdin closes) and destroys
+    /// every sandbox it made.
+    Server(server::ServerArgs),
+
     /// Tool catalog.
     Tools {
         #[command(subcommand)]
         action: ToolsCmd,
+    },
+
+    /// Prove a template's isolation on this host: probe two real sandboxes and print one
+    /// line per check (pass, fail, inconclusive). Exits 1 unless every line passes.
+    Selftest {
+        /// The template the claim is about.
+        #[arg(long)]
+        template: String,
+
+        /// Directory for the mount canaries (mounted into the sandbox). Default: the system
+        /// temp directory.
+        #[arg(long, value_name = "DIR")]
+        scratch_root: Option<PathBuf>,
     },
 }
 
@@ -201,6 +229,8 @@ fn main() -> ExitCode {
     };
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
+        // No colour codes in journald or a log file.
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(filter)),
@@ -230,13 +260,18 @@ async fn dispatch(cli: Cli) -> anyhow::Result<u8> {
     let g = &cli.global;
     util::warn_deprecated_opt_in(g);
     match cli.command {
-        Commands::Doctor { fix, all, yes } => {
+        Commands::Doctor {
+            fix,
+            all,
+            yes,
+            server_config,
+        } => {
             let reap = match (fix, all) {
                 (false, _) => doctor::Reap::None,
                 (true, false) => doctor::Reap::Owned,
                 (true, true) => doctor::Reap::All { confirmed: yes },
             };
-            doctor::doctor(g, fix, reap).await
+            doctor::doctor(g, fix, reap, server_config.as_deref()).await
         }
         Commands::Workspace { action } => workspace::workspace(g, action),
         Commands::Template { action } => workspace::template(g, action).await,
@@ -257,11 +292,16 @@ async fn dispatch(cli: Cli) -> anyhow::Result<u8> {
             name,
             params,
         } => run::tool(g, &spawn, &name, params.as_deref()).await,
+        Commands::Server(args) => server::server(g, &args).await,
         Commands::Tools {
             action: ToolsCmd::Schema,
         } => {
             util::print_json(&sandcrab_sdk::tool_definitions())?;
             Ok(0)
         }
+        Commands::Selftest {
+            template,
+            scratch_root,
+        } => selftest::selftest(g, &template, scratch_root.as_deref()).await,
     }
 }

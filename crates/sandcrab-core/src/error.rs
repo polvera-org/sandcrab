@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use sandcrab_protocol::ProtocolError;
@@ -63,6 +63,27 @@ pub enum SandboxError {
     #[error("policy cannot be enforced: {0}")]
     PolicyUnenforceable(String),
 
+    /// A host mount (`SandboxConfig::host_mounts`) was refused: outside the allowed roots,
+    /// above a root's mode, a symlink on the way, not a directory, nested, over the cap
+    /// (`cap` is then set), or a protected directory.
+    #[error("mount `{}` not allowed: {reason}{}", path.display(), cap.map(|c| format!(" (cap: {c})")).unwrap_or_default())]
+    MountNotAllowed {
+        path: PathBuf,
+        reason: String,
+        cap: Option<usize>,
+    },
+
+    /// The backend or the sandbox could not be reached (daemon down, VM failed, no `crabd`
+    /// connection). Nothing ran; trying again may work.
+    #[error("unavailable: {0}")]
+    Unavailable(String),
+
+    /// A process connection ended after its request was written and without an `EXIT`
+    /// record: the program may have run and its end is unknown. Do not retry as if
+    /// nothing ran.
+    #[error("process lost: {0}")]
+    Lost(String),
+
     /// A pinned image/rootfs digest does not match the artifact actually present.
     #[error("digest mismatch for `{image}`: expected {expected}, got {actual}")]
     DigestMismatch {
@@ -116,6 +137,13 @@ impl Clone for SandboxError {
             },
             Self::HardwareIsolationRequired(s) => Self::HardwareIsolationRequired(s.clone()),
             Self::PolicyUnenforceable(s) => Self::PolicyUnenforceable(s.clone()),
+            Self::MountNotAllowed { path, reason, cap } => Self::MountNotAllowed {
+                path: path.clone(),
+                reason: reason.clone(),
+                cap: *cap,
+            },
+            Self::Unavailable(s) => Self::Unavailable(s.clone()),
+            Self::Lost(s) => Self::Lost(s.clone()),
             Self::DigestMismatch {
                 image,
                 expected,

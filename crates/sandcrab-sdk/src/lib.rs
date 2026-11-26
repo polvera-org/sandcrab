@@ -63,6 +63,22 @@
 //! [`SandboxConfig::require_hardware_isolation`]), which refuses any backend without
 //! hardware isolation instead of downgrading.
 //!
+//! # Processes, forwards, mounts, labels
+//!
+//! - [`Sandbox::spawn`] runs a program with an exact argv and environment and gives a
+//!   [`Process`] handle (stdin, output with backpressure, cancel, an exit that never fails);
+//!   [`Sandbox::exec`] collects a bounded run. See [`process`].
+//! - [`SandboxConfig::forward`] plus [`Sandbox::serve_forwards`] let programs in a sandbox
+//!   with no network reach targets the host chooses. See [`forward`].
+//! - [`SandboxConfig::host_mount`] mounts a host directory at the same path, only beneath the
+//!   roots of [`SandcrabBuilder::mount_policy`]. Without a policy every host mount is refused.
+//! - [`SandboxConfig::label`] labels a sandbox; [`Sandcrab::list`] and
+//!   [`Sandcrab::destroy_by_label`] select by label. [`Sandbox::set_ttl`] renews a TTL.
+//! - [`selftest::run`] proves a template's isolation on this host by probing two real sandboxes.
+//!
+//! A backend that cannot do one of these refuses the spawn with an explicit error
+//! ([`BackendCapabilities`] says what it supports); nothing is silently dropped.
+//!
 //! # Sandbox lifetime
 //!
 //! Call [`Sandbox::destroy`]. A [`Sandbox`] dropped without it logs a warning and starts a
@@ -73,32 +89,43 @@
 //! ([`Sandcrab::reap_orphans`]).
 
 mod dispatch;
+pub mod forward;
+pub mod process;
 mod sandbox;
+pub mod selftest;
 mod workspace;
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 pub use dispatch::{ToolError, is_tool_error};
+pub use process::{
+    DEFAULT_EXEC_OUTPUT_CAP, DEFAULT_EXEC_TIMEOUT, ExecOutput, Output, OutputStream, Process,
+    ProcessOutcome, ProcessSpec,
+};
 pub use sandbox::Sandbox;
 pub use workspace::{TemplateClient, WorkspaceClient};
 
 pub use sandcrab_core::{
-    BackendCapabilities, BackendKind, FileEntry, FileKind, LifecyclePhase, ManagerConfig,
-    MountMode, NetworkConfig, NetworkPolicy, PinStatus, PinStore, PortSpec, PublishedPort,
-    ResourceOverrides, Result, RuntimeBackend, SandboxConfig, SandboxError, SandboxId, SandboxInfo,
-    Template, TimingMarks, TimingReport, UserSpec, Workspace, WorkspaceBacking, WorkspaceId,
-    WorkspaceMount, WorkspaceRef,
+    AsyncStream, BackendCapabilities, BackendKind, BoxedStream, DestroyByLabel, FileEntry,
+    FileKind, ForwardSpec, ForwardTarget, HostMount, LifecyclePhase, ManagerConfig, MountMode,
+    MountPolicy, MountRoot, NetworkConfig, NetworkPolicy, NprocScope, PinStatus, PinStore,
+    PortSpec, PublishedPort, ResourceOverrides, Result, RuntimeBackend, SandboxConfig,
+    SandboxError, SandboxFilter, SandboxId, SandboxInfo, Template, TimingMarks, TimingReport,
+    UserSpec, Workspace, WorkspaceBacking, WorkspaceId, WorkspaceMount, WorkspaceRef,
 };
 pub use sandcrab_protocol::{
-    BashParams, BashResult, DownloadParams, DownloadResult, FileDeleteParams, FileDeleteResult,
-    FileEditParams, FileEditResult, FileMoveParams, FileMoveResult, FileReadParams, FileReadResult,
-    FileWriteParams, FileWriteResult, GlobParams, GlobResult, GrepParams, GrepResult, KillSignal,
-    ListDirParams, ListDirResult, ProcessKillParams, ProcessKillResult, ProcessListParams,
-    ProcessListResult, ProcessPollParams, ProcessPollResult, ProcessStartParams,
-    ProcessStartResult, ProcessStdinParams, ProcessStdinResult, ProtocolError, TOOL_NAMES,
-    ToolCall, ToolDefinition, ToolResult, UploadParams, UploadResult, tool_definitions,
+    BashParams, BashResult, DownloadParams, DownloadResult, ExecLimits, FileDeleteParams,
+    FileDeleteResult, FileEditParams, FileEditResult, FileIdentity, FileMoveParams, FileMoveResult,
+    FileReadParams, FileReadResult, FileWriteParams, FileWriteResult, ForwardPortStats,
+    ForwardRefused, GlobParams, GlobResult, GrepParams, GrepResult, KillSignal, ListDirParams,
+    ListDirResult, OutputCap, Overflow, ProcessCancelResult, ProcessExit, ProcessKillParams,
+    ProcessKillResult, ProcessListParams, ProcessListResult, ProcessPollParams, ProcessPollResult,
+    ProcessStartParams, ProcessStartResult, ProcessStdinParams, ProcessStdinResult, ProtocolError,
+    SpawnTarget, StderrMode, StdinMode, TOOL_NAMES, ToolCall, ToolDefinition, ToolResult,
+    UploadParams, UploadResult, tool_definitions,
 };
 
 /// The core crate, for lower-level access ([`sandcrab_core::SandboxManager`], ...).
@@ -208,6 +235,7 @@ pub struct SandcrabBuilder {
     state_dir: Option<PathBuf>,
     templates_dirs: Vec<PathBuf>,
     template_pins_dir: Option<PathBuf>,
+    mount_policy: Option<MountPolicy>,
     require_hardware_isolation: bool,
     ready_timeout: Option<Duration>,
     call_timeout: Option<Duration>,
@@ -288,6 +316,14 @@ impl SandcrabBuilder {
     /// on a name clash the directory added **first** wins. No directory = no templates.
     pub fn templates_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.templates_dirs.push(dir.into());
+        self
+    }
+
+    /// The allowed roots for host mounts ([`SandboxConfig::host_mount`]) and the directories
+    /// no mount may touch ([`MountPolicy::new`]). Without a policy every host mount is
+    /// refused.
+    pub fn mount_policy(mut self, policy: MountPolicy) -> Self {
+        self.mount_policy = Some(policy);
         self
     }
 
@@ -389,6 +425,7 @@ impl SandcrabBuilder {
                 ready_timeout: self.ready_timeout.unwrap_or(defaults.ready_timeout),
                 call_timeout: self.call_timeout.unwrap_or(defaults.call_timeout),
                 template_pins: self.template_pins_dir.map(PinStore::open),
+                mount_policy: self.mount_policy,
                 ..defaults
             },
         )?;
@@ -485,6 +522,34 @@ impl Sandcrab {
         self.manager.list_active()
     }
 
+    /// Live sandboxes that match `filter`, oldest first: every given label must match
+    /// exactly; `created_after` is inclusive, `created_before` exclusive.
+    #[must_use]
+    pub fn list(&self, filter: &SandboxFilter) -> Vec<SandboxInfo> {
+        self.manager.list(filter)
+    }
+
+    /// A handle to the live sandbox `id`, e.g. one found with [`Self::list`]. Unlike the
+    /// handle [`Self::spawn`] returns, dropping this one does not destroy the sandbox.
+    pub fn sandbox(&self, id: SandboxId) -> Result<Sandbox> {
+        Ok(Sandbox::borrowed(self.manager.get(id)?))
+    }
+
+    /// Destroy every sandbox that carries all of `labels` (at least one), which stops
+    /// every program in them, then look again. [`DestroyByLabel::empty`] is true only when
+    /// every destroy succeeded and nothing matches any more.
+    pub async fn destroy_by_label(
+        &self,
+        labels: &BTreeMap<String, String>,
+    ) -> Result<DestroyByLabel> {
+        self.manager.destroy_by_label(labels).await
+    }
+
+    /// Change the TTL of sandbox `id` ([`Sandbox::set_ttl`]).
+    pub fn set_ttl(&self, id: SandboxId, ttl: Option<Duration>) -> Result<()> {
+        self.manager.set_ttl(id, ttl)
+    }
+
     /// Destroy every live sandbox (returns the first error, after trying all).
     pub async fn shutdown(&self) -> Result<()> {
         self.manager.shutdown().await
@@ -573,6 +638,7 @@ pub(crate) mod test_support {
             let tmp = tempfile::tempdir().unwrap();
             let d = tmp.path().join("templates/base");
             fs::create_dir_all(&d).unwrap();
+            fs::write(d.join("Dockerfile"), "FROM scratch\n").unwrap();
             fs::write(
                 d.join("sandcrab.toml"),
                 "[template]\nname = \"base\"\nversion = \"0.1.0\"\nimage = \"sandcrab/base:0.1.0\"\n\
@@ -694,6 +760,31 @@ mod tests {
         assert_eq!(sc.backend_kind(), BackendKind::Firecracker);
         let caps = sc.backend_capabilities();
         assert!(caps.hardware_isolated && !caps.multi_tenant_safe);
+    }
+
+    /// Firecracker does not serve forwards: asking for one is refused with an error that
+    /// says so, before anything is started.
+    #[cfg(all(feature = "firecracker", target_os = "linux"))]
+    #[tokio::test]
+    async fn firecracker_refuses_a_forward_explicitly() {
+        let env = Env::new();
+        let mut config =
+            FirecrackerConfig::with_home(&env.tmp.path().join("fc"), "/nonexistent/crabd");
+        config.mkfs = Some(firecracker::rootfs::MkfsStrategy::Fakeroot);
+        let backend = FirecrackerBackend::new_unchecked(config).unwrap();
+        let sc = env.builder().backend(backend).build().unwrap();
+        assert!(!sc.backend_capabilities().supports_forwards);
+        let err = sc
+            .spawn(SandboxConfig::from_template("base").forward(5432))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SandboxError::PolicyUnenforceable(_)), "{err}");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("forwards") && msg.contains("firecracker"),
+            "{msg}"
+        );
+        assert!(sc.list_sandboxes().is_empty());
     }
 
     /// `.firecracker(..)` is an explicit selection: without a usable `/dev/kvm` it is an
@@ -859,6 +950,184 @@ mod tests {
             .await
             .unwrap();
         sb.destroy().await.unwrap();
+    }
+
+    fn labels(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn list_and_destroy_by_label() {
+        let env = Env::new();
+        let backend = FakeBackend::new();
+        let sc = env.sandcrab(&backend);
+        let spawn =
+            |run: &'static str| sc.spawn(SandboxConfig::from_template("base").label("run", run));
+        let a = spawn("r1").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let b = spawn("r1").await.unwrap();
+        let c = spawn("r2").await.unwrap();
+        assert_eq!(a.labels(), &labels(&[("run", "r1")]));
+
+        let ids = |f: &SandboxFilter| sc.list(f).iter().map(|i| i.id).collect::<Vec<_>>();
+        let r1 = SandboxFilter {
+            labels: labels(&[("run", "r1")]),
+            ..SandboxFilter::default()
+        };
+        assert_eq!(ids(&SandboxFilter::default()), [a.id(), b.id(), c.id()]);
+        assert_eq!(ids(&r1), [a.id(), b.id()]);
+        // Only what was created since a point in time.
+        let since_b = SandboxFilter {
+            created_after: Some(b.info().created_at),
+            ..r1.clone()
+        };
+        assert_eq!(ids(&since_b), [b.id()]);
+
+        // A handle found by id does not own the sandbox.
+        let found = sc.sandbox(a.id()).unwrap();
+        assert_eq!(found.bash("hi").await.unwrap().stdout, "hi");
+        drop(found);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!a.is_destroyed());
+
+        assert!(sc.destroy_by_label(&BTreeMap::new()).await.is_err());
+        let gone = sc
+            .destroy_by_label(&labels(&[("run", "r1")]))
+            .await
+            .unwrap();
+        assert_eq!((gone.matched, gone.destroyed), (2, 2));
+        assert!(gone.empty && gone.remaining.is_empty());
+        assert!(a.is_destroyed() && b.is_destroyed() && !c.is_destroyed());
+        assert_eq!(ids(&SandboxFilter::default()), [c.id()]);
+        assert!(matches!(
+            sc.sandbox(a.id()),
+            Err(SandboxError::NotFound { .. })
+        ));
+        let again = sc
+            .destroy_by_label(&labels(&[("run", "r1")]))
+            .await
+            .unwrap();
+        assert!(again.empty && again.matched == 0);
+        c.destroy().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn ttl_can_be_renewed_and_removed() {
+        let env = Env::new();
+        let backend = FakeBackend::new();
+        let sc = env.sandcrab(&backend);
+        let sb = sc
+            .spawn(SandboxConfig::from_template("base").ttl(Some(Duration::from_secs(60))))
+            .await
+            .unwrap();
+        assert!(sb.info().expires_in.unwrap() <= Duration::from_secs(60));
+        sb.set_ttl(Some(Duration::from_secs(3600))).unwrap();
+        assert!(sb.info().expires_in.unwrap() > Duration::from_secs(3000));
+        sc.set_ttl(sb.id(), None).unwrap();
+        assert_eq!(sb.info().expires_in, None);
+        assert!(matches!(
+            sb.set_ttl(Some(Duration::ZERO)),
+            Err(SandboxError::InvalidConfig(_))
+        ));
+        let id = sb.id();
+        sb.destroy().await.unwrap();
+        assert!(matches!(
+            sc.set_ttl(id, Some(Duration::from_secs(1))),
+            Err(SandboxError::NotFound { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn host_mounts_need_the_mount_policy_and_options_reach_the_backend() {
+        let env = Env::new();
+        let backend = FakeBackend::shared_kernel();
+        let root = std::fs::canonicalize(env.tmp.path()).unwrap().join("data");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        let config = || {
+            SandboxConfig::from_template("base")
+                .host_mount(root.join("sub"), MountMode::ReadWrite)
+                .forward(5432)
+                .label("run", "r1")
+                .tmp_exec(true)
+                .tmp_size_mb(256)
+                .resources(ResourceOverrides {
+                    pids_max: Some(128),
+                    nofile: Some(4096),
+                    ..ResourceOverrides::default()
+                })
+        };
+
+        // No policy on the builder: every host mount is refused.
+        let sc = env.sandcrab(&backend);
+        let err = sc.spawn(config()).await.unwrap_err();
+        assert!(matches!(err, SandboxError::MountNotAllowed { .. }), "{err}");
+        drop(sc);
+
+        let policy = MountPolicy::new(
+            vec![MountRoot {
+                path: root.clone(),
+                max_mode: MountMode::ReadWrite,
+            }],
+            Vec::new(),
+        )
+        .unwrap();
+        let sc = env
+            .builder()
+            .backend(backend.clone())
+            .mount_policy(policy)
+            .build()
+            .unwrap();
+        // Outside the root: refused.
+        let outside = SandboxConfig::from_template("base")
+            .host_mount(root.parent().unwrap(), MountMode::ReadOnly);
+        let err = sc.spawn(outside).await.unwrap_err();
+        assert!(matches!(err, SandboxError::MountNotAllowed { .. }), "{err}");
+
+        let sb = sc.spawn(config()).await.unwrap();
+        let spec = backend.last_spec().unwrap();
+        assert_eq!(spec.host_mounts.len(), 1);
+        assert_eq!(spec.host_mounts[0].host_path, root.join("sub"));
+        assert_eq!(spec.host_mounts[0].guest_path, root.join("sub"));
+        assert_eq!(spec.forwards, [ForwardSpec::new(5432)]);
+        assert!(spec.tmp_exec);
+        assert_eq!(spec.tmp_size_mb, Some(256));
+        assert_eq!((spec.pids_max, spec.nofile), (Some(128), Some(4096)));
+        let info = sb.info();
+        assert_eq!(
+            info.host_mounts,
+            [HostMount::new(root.join("sub"), MountMode::ReadWrite)]
+        );
+        assert_eq!(info.labels, labels(&[("run", "r1")]));
+
+        // The sandbox's view of the mount is the host's directory (the fake answers from
+        // the host filesystem, as a bind mount would).
+        let sub = root.join("sub");
+        let ids = sb.fs_identity([sub.to_str().unwrap()]).await.unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let meta = std::fs::metadata(&sub).unwrap();
+            assert_eq!((ids[0].dev, ids[0].ino), (meta.dev(), meta.ino()));
+        }
+        assert_eq!(ids.len(), 1);
+        assert!(sb.fs_identity(["/no/such/dir"]).await.is_err());
+        sb.destroy().await.unwrap();
+        drop(sc);
+
+        // A backend that cannot do one of the options says so; nothing is dropped silently.
+        let mut plain = FakeBackend::new();
+        plain.caps.supports_process_limits = false;
+        let sc = env.sandcrab(&plain);
+        assert!(!sc.backend_capabilities().supports_process_limits);
+        let limits = SandboxConfig::from_template("base").resources(ResourceOverrides {
+            pids_max: Some(128),
+            ..ResourceOverrides::default()
+        });
+        let err = sc.spawn(limits).await.unwrap_err();
+        assert!(matches!(err, SandboxError::PolicyUnenforceable(_)), "{err}");
     }
 
     #[tokio::test]

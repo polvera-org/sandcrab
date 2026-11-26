@@ -9,8 +9,8 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use sandcrab_core::{
-    BackendCapabilities, BackendKind, LifecyclePhase, NetworkConfig, ResolvedSpec, Result,
-    RuntimeBackend, SandboxError, SandboxHandle, UserSpec,
+    BackendCapabilities, BackendKind, LifecyclePhase, NetworkConfig, NprocScope, ResolvedSpec,
+    Result, RuntimeBackend, SandboxError, SandboxHandle, UserSpec,
 };
 use sandcrab_protocol::init::{InitConfig, InitUser};
 
@@ -34,11 +34,26 @@ use crate::workspace::{self, MountPlan};
 ///   escape gets that user's full privileges (Phase C confines the helper).
 /// - `supports_snapshots: false`: libkrun has no snapshot/restore API.
 /// - `supports_host_dir_mounts: true`: live virtio-fs shares.
+/// - `supports_forwards: true`: `crabd serve --forward-port`, set through `init.configure`;
+///   every connection travels over the tools socket (vsock). No NIC, no TSI, no netstack.
+/// - `supports_host_mounts: true`: a virtio-fs share mounted at the same absolute path
+///   (`workspace.rs`).
+/// - `supports_tmp_options`, `supports_process_limits`: applied by `crabd init` in the guest.
+/// - `mount_identity_checked: false`: a virtio-fs mount does not show the host's `(dev, ino)`
+///   in the guest. The helper checks each share's identity itself, right before it adds it.
+/// - `nproc_scope: Sandbox`: the guest has its own kernel, so `RLIMIT_NPROC` counts only the
+///   sandbox's processes.
 pub const CAPABILITIES: BackendCapabilities = BackendCapabilities {
     hardware_isolated: true,
     multi_tenant_safe: false,
     supports_snapshots: false,
     supports_host_dir_mounts: true,
+    supports_forwards: true,
+    supports_host_mounts: true,
+    supports_tmp_options: true,
+    supports_process_limits: true,
+    mount_identity_checked: false,
+    nproc_scope: NprocScope::Sandbox,
 };
 
 /// Nameservers written to the guest's `/etc/resolv.conf` under the TSI opt-in (TSI proxies
@@ -525,8 +540,13 @@ impl LibkrunBackend {
         }
         t.mark_custom("rootfs_ready");
 
-        // Workspaces: re-verify each leased root, then plan the shares.
-        let plan = workspace::plan_mounts(&spec.mounts)?;
+        // Workspaces and host mounts: re-verify each root, then plan the shares.
+        let plan = workspace::plan_mounts(&spec.mounts, &spec.host_mounts)?;
+        workspace::check_device_room(
+            &plan,
+            network == HelperNetwork::Userspace,
+            workspace::device_room(),
+        )?;
         t.mark_custom("ws_attach_done");
 
         let netstack = match (network, &self.libs.netstack) {
@@ -707,6 +727,13 @@ pub(crate) fn init_config(
         dns,
         tools_port: TOOLS_PORT,
         host_time_unix_ms: crate::vm::unix_ms(),
+        tmp_exec: spec.tmp_exec,
+        tmp_size_mb: spec.tmp_size_mb,
+        pids_max: spec.pids_max,
+        nofile: spec.nofile,
+        // `crabd serve --forward-port`: loopback listeners in the guest. The network plan is
+        // untouched: forwarded connections are opened by the host over the tools socket.
+        forward_ports: spec.forwards.iter().map(|f| f.guest_port).collect(),
     }
 }
 
@@ -812,10 +839,14 @@ impl RuntimeBackend for LibkrunBackend {
 
     async fn spawn(&self, spec: &ResolvedSpec) -> Result<Box<dyn SandboxHandle>> {
         spec.reject_secrets()?;
+        spec.reject_unsupported(self.kind(), &self.capabilities())?;
         // Fail before creating anything: policy, ports, sizes.
         net::plan(&spec.network, self.net_options())?;
         ports::check(&spec.ports)?;
         vm_size(spec.resources.vcpu, spec.resources.memory_mb)?;
+        for m in &spec.host_mounts {
+            workspace::check_host_mount_target(&m.guest_path)?;
+        }
 
         let (dir, meta) = reap::create_run_dir(&self.config.run_dir, spec.id)?;
         let mut vm = KrunVm::new(spec.id, dir, meta);
@@ -936,6 +967,12 @@ image = "sandcrab/base:0.1.0"
             },
             ttl: None,
             secrets: Vec::new(),
+            forwards: Vec::new(),
+            host_mounts: Vec::new(),
+            tmp_exec: false,
+            tmp_size_mb: None,
+            pids_max: None,
+            nofile: None,
             timings: LifecycleTimings::start(),
         }
     }
@@ -964,6 +1001,11 @@ image = "sandcrab/base:0.1.0"
         assert!(!c.multi_tenant_safe);
         assert!(!c.supports_snapshots);
         assert!(c.supports_host_dir_mounts);
+        assert!(c.supports_forwards && c.supports_host_mounts);
+        assert!(c.supports_tmp_options && c.supports_process_limits);
+        // virtio-fs does not show host inode numbers in the guest: never claimed.
+        assert!(!c.mount_identity_checked);
+        assert_eq!(c.nproc_scope, NprocScope::Sandbox);
     }
 
     #[test]
@@ -1024,6 +1066,17 @@ image = "sandcrab/base:0.1.0"
             b.spawn(&s).await.err().unwrap(),
             SandboxError::InvalidConfig(_)
         ));
+
+        let mut s = spec();
+        s.host_mounts = vec![ResolvedMount {
+            workspace_name: "/usr".into(),
+            backing: WorkspaceBacking::HostDir("/usr".into()),
+            host_path: "/usr".into(),
+            guest_path: "/usr".into(),
+            ..s.mounts[0].clone()
+        }];
+        let err = b.spawn(&s).await.err().unwrap();
+        assert!(matches!(err, SandboxError::MountNotAllowed { .. }), "{err}");
 
         assert!(!tmp.path().join("krun").exists(), "no run dir on refusal");
     }
@@ -1158,12 +1211,36 @@ image = "sandcrab/base:0.1.0"
         assert_eq!(c.tools_port, TOOLS_PORT);
         assert_eq!(c.env["A"], "1");
         assert!(c.hostname.starts_with("sc-") && c.hostname.len() == 11);
+        // Nothing asked: the guest keeps its defaults.
+        assert!(!c.tmp_exec && c.tmp_size_mb.is_none());
+        assert!(c.pids_max.is_none() && c.nofile.is_none() && c.forward_ports.is_empty());
         let c = init_config(&s, user, &p, HelperNetwork::TsiUnrestricted);
         assert!(c.network);
         assert_eq!(c.dns, TSI_DNS);
         let c = init_config(&s, user, &p, HelperNetwork::Userspace);
         assert!(c.network);
         assert_eq!(c.dns, [IpAddr::V4(netstack::GATEWAY_IP)]);
+    }
+
+    #[test]
+    fn init_config_carries_the_server_options() {
+        let mut s = spec();
+        s.tmp_exec = true;
+        s.tmp_size_mb = Some(64);
+        s.pids_max = Some(300);
+        s.nofile = Some(4096);
+        s.forwards = vec![
+            sandcrab_core::ForwardSpec::new(7801),
+            sandcrab_core::ForwardSpec::new(7802),
+        ];
+        let c = init_config(&s, UserSpec::new(501, 20), &plan(), HelperNetwork::Disabled);
+        assert!(c.tmp_exec);
+        assert_eq!(c.tmp_size_mb, Some(64));
+        assert_eq!(c.pids_max, Some(300));
+        assert_eq!(c.nofile, Some(4096));
+        assert_eq!(c.forward_ports, [7801, 7802]);
+        // Forwards never bring a network device or a resolver with them.
+        assert!(!c.network && c.dns.is_empty());
     }
 
     #[test]

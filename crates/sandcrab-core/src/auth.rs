@@ -13,12 +13,19 @@ use std::time::Duration;
 use async_trait::async_trait;
 use sandcrab_protocol::{AUTH_TOKEN_BYTES, AuthToken, ProtocolError, encode_frame};
 use tokio::io::AsyncWriteExt;
+use tokio::sync::Semaphore;
 
 use crate::client::{BoxedStream, Connector, read_one_response};
 use crate::{Result, SandboxError};
 
 /// Default bound on connect + `auth` exchange.
 pub const DEFAULT_AUTH_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// At most this many `auth` handshakes of one connector at once. `crabd` keeps at most 16
+/// unauthenticated connections and evicts the oldest beyond that (its pre-auth queue), so a
+/// burst of opens (32 processes spawned at once, each on its own connection) would otherwise
+/// have some of them reset mid-handshake. Waiting for a turn counts against the timeout.
+pub const MAX_CONCURRENT_HANDSHAKES: usize = 8;
 
 /// A fresh 256-bit token from the OS CSPRNG.
 pub fn generate_auth_token() -> Result<AuthToken> {
@@ -38,6 +45,8 @@ pub struct AuthConnector {
     inner: Arc<dyn Connector>,
     token: AuthToken,
     timeout: Duration,
+    /// Shared by clones: one budget per sandbox (see [`MAX_CONCURRENT_HANDSHAKES`]).
+    handshakes: Arc<Semaphore>,
 }
 
 impl AuthConnector {
@@ -47,6 +56,7 @@ impl AuthConnector {
             inner,
             token,
             timeout: DEFAULT_AUTH_HANDSHAKE_TIMEOUT,
+            handshakes: Arc::new(Semaphore::new(MAX_CONCURRENT_HANDSHAKES)),
         }
     }
 
@@ -81,7 +91,15 @@ impl AuthConnector {
 #[async_trait]
 impl Connector for AuthConnector {
     async fn connect(&self) -> io::Result<BoxedStream> {
-        tokio::time::timeout(self.timeout, self.handshake())
+        let turn_then_handshake = async {
+            let _turn = self
+                .handshakes
+                .acquire()
+                .await
+                .map_err(|_| io::Error::other("handshake budget closed"))?;
+            self.handshake().await
+        };
+        tokio::time::timeout(self.timeout, turn_then_handshake)
             .await
             .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "auth handshake timed out"))?
     }
@@ -111,6 +129,32 @@ mod tests {
         let addr = server.tcp_addr().unwrap();
         tokio::spawn(server.run(std::future::pending()));
         addr
+    }
+
+    #[tokio::test]
+    async fn a_burst_of_connects_stays_within_crabds_pending_queue() {
+        let dir = tempfile::tempdir().unwrap();
+        let token = generate_auth_token().unwrap();
+        let addr = crabd(&token, dir.path()).await;
+        let conn = AuthConnector::new(Arc::new(Endpoint::Tcp(addr)), token);
+        let n = 4 * sandcrab_guest::preauth::DEFAULT_PENDING;
+        let mut set = tokio::task::JoinSet::new();
+        for _ in 0..n {
+            let conn = conn.clone();
+            set.spawn(async move { conn.connect().await.map(|_s| ()) });
+        }
+        // Every stream is kept open until its task ends, so the handshakes really overlap.
+        let failed: Vec<String> = set
+            .join_all()
+            .await
+            .into_iter()
+            .filter_map(|r| r.err().map(|e| e.to_string()))
+            .collect();
+        assert!(
+            failed.is_empty(),
+            "{} of {n} failed: {failed:?}",
+            failed.len()
+        );
     }
 
     #[test]
