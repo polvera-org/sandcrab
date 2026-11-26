@@ -81,7 +81,7 @@ steps:
     title: "crabd supervisor limits: rlimits before exec, oom preference, guest-side timeout, output cap with kill or tail, stderr tail / merge / stream, exit after the last byte, nothing left when the call returns; env and stdin never logged"
     depends_on: [guest-supervisor]
     artifacts: [crates/sandcrab-guest/src/supervise.rs]
-    status: doing
+    status: done
 
   - id: guest-forwards
     phase: implement
