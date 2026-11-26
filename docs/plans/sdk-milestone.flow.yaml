@@ -65,7 +65,7 @@ steps:
     title: "Server API types and their exported JSON Schema in sandcrab-protocol (`api` module): server.hello with version and features, sandbox create / get / list / destroy / destroy by label, process spawn and cancel, forward attach, capabilities, self-test; error codes"
     depends_on: [protocol-03]
     artifacts: [crates/sandcrab-protocol/src/api.rs]
-    status: doing
+    status: done
 
   - id: guest-supervisor
     phase: implement
@@ -185,7 +185,7 @@ steps:
     title: "TypeScript SDK package (Node 26, no native code): socket client, types generated from the exported schemas, version check against server.hello; process handle returned at once (stdout AsyncIterable<Uint8Array>, write that never drops, end, cancel, exit that never rejects); bounded exec (AbortSignal, Readable in, Writable out, caps, live onOutput with a client-side tail); forward targets: loopback port, Unix socket, in-process handler; labels, list, destroy; capabilities and self-test; unit tests on an in-process fake server, one a minor behind"
     depends_on: [api-types]
     artifacts: [sdk/typescript]
-    status: todo
+    status: doing
 
   - id: ts-contract
     phase: implement
