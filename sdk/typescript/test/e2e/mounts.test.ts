@@ -3,7 +3,7 @@
 // seen live, a symlinked root, and every refusal the server owes.
 
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { after, before, describe, test } from "node:test";
 
@@ -41,7 +41,8 @@ describe(`mounts on a real server (${BACKEND})`, { skip: SKIP, timeout: 600_000 
   let client: SandcrabClient;
 
   before(async () => {
-    base = mkdtempSync(path.join(process.env.SANDCRAB_E2E_DATA ?? process.cwd(), ".e2e-mounts-"));
+    // Resolved: on macOS /tmp is a symlink to /private/tmp, and the sandbox sees the resolved path.
+    base = realpathSync(mkdtempSync(path.join(process.env.SANDCRAB_E2E_DATA ?? process.cwd(), ".e2e-mounts-")));
     rwRoot = path.join(base, "rw-root");
     roRoot = path.join(base, "ro-root");
     outside = path.join(base, "outside");
@@ -98,7 +99,12 @@ describe(`mounts on a real server (${BACKEND})`, { skip: SKIP, timeout: 600_000 
     assert.equal(readFileSync(path.join(deep, "sub", "n.txt"), "utf8"), "nested\n");
     const st = statSync(path.join(deep, "out.txt"));
     const owner = `${st.uid}:${st.gid}`;
-    assert.equal(owner, `${process.getuid?.()}:${process.getgid?.()}`, "owned by the client's uid:gid");
+    // The client's own write beside it: macOS gives a new file its directory's group (under
+    // /private/tmp that is wheel), so the client's gid is not always the expected one.
+    writeFileSync(path.join(deep, "client.txt"), "");
+    const mine = statSync(path.join(deep, "client.txt"));
+    assert.equal(owner, `${mine.uid}:${mine.gid}`, "owned like the client's own writes");
+    assert.equal(st.uid, process.getuid?.());
     console.log(`mounts (${BACKEND}): sandbox user ${rw.out.trim().split("\n").join(":")}, host owner of its write ${owner}`);
 
     // The deep path does not exist in the image; its parents in the sandbox are only the way

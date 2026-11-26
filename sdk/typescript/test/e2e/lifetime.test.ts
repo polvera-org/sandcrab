@@ -4,8 +4,7 @@
 // every run and leaves nothing of the old server.
 
 import assert from "node:assert/strict";
-import { execFileSync, spawn } from "node:child_process";
-import { readdirSync, readFileSync } from "node:fs";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import path from "node:path";
 import { describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -28,22 +27,14 @@ function hostLeftovers(ids: string[]): string[] {
   return krunHelpers();
 }
 
-/** `pid` of every `sandcrab-krun` helper of this uid. */
+/** `pid` of every `sandcrab-krun` helper of this uid (`pgrep`: Linux and macOS, no /proc on a Mac). */
 function krunHelpers(): string[] {
-  const uid = process.getuid?.();
-  const out: string[] = [];
-  for (const p of readdirSync("/proc")) {
-    if (!/^\d+$/.test(p)) continue;
-    try {
-      const cmd = readFileSync(`/proc/${p}/cmdline`, "utf8").split("\0")[0] ?? "";
-      const status = readFileSync(`/proc/${p}/status`, "utf8");
-      const owner = /^Uid:\s+(\d+)/m.exec(status)?.[1];
-      if (path.basename(cmd) === "sandcrab-krun" && Number(owner) === uid) out.push(`helper pid ${p}`);
-    } catch {
-      // gone meanwhile
-    }
-  }
-  return out;
+  const r = spawnSync("pgrep", ["-x", "-U", String(process.getuid?.()), "sandcrab-krun"], { encoding: "utf8" });
+  if (r.status !== 0 && r.status !== 1) throw new Error(`pgrep failed: ${r.stderr}`);
+  return r.stdout
+    .split("\n")
+    .filter(Boolean)
+    .map((p) => `helper pid ${p}`);
 }
 
 describe(`sandbox lifetime on a real server (${BACKEND})`, { skip: SKIP, timeout: 600_000 }, () => {

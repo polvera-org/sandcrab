@@ -2,7 +2,7 @@
 // matrix (ro/rw, symlinked roots, TCP and Unix targets, throughput) is the `ts-e2e` step.
 
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { describe, test } from "node:test";
 
@@ -12,7 +12,8 @@ const ENV = { PATH: PATH_ENV };
 
 describe(`mounts and forwards smoke on a real server (${BACKEND})`, { skip: SKIP, timeout: 300_000 }, () => {
   test("a mount under an allowed root is at the same path; one forward reaches an in-process handler", async (t) => {
-    const base = mkdtempSync(path.join(process.env.SANDCRAB_E2E_DATA ?? process.cwd(), ".e2e-data-"));
+    // Resolved: on macOS /tmp is a symlink to /private/tmp, and the sandbox sees the resolved path.
+    const base = realpathSync(mkdtempSync(path.join(process.env.SANDCRAB_E2E_DATA ?? process.cwd(), ".e2e-data-")));
     t.after(() => rmSync(base, { recursive: true, force: true }));
     const root = path.join(base, "root");
     const run = path.join(root, "run-1");

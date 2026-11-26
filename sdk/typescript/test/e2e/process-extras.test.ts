@@ -3,7 +3,8 @@
 // concurrent), and a zero-mount sandbox whose uid has no passwd entry.
 
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { Readable } from "node:stream";
 import { describe, test } from "node:test";
 
@@ -48,8 +49,11 @@ async function once(sb: Sandbox, t: Timing): Promise<void> {
 }
 
 /** Resident memory of a host process, in KiB. */
-function rssKiB(pid: number): number {
-  return Number(execFileSync("ps", ["-o", "rss=", "-p", String(pid)], { encoding: "utf8" }).trim());
+// Asynchronous: on macOS one `ps` takes ~80 ms while VMs run, and a synchronous call every
+// 50 ms would stall the client's event loop and with it the pipeline being measured.
+async function rssKiB(pid: number): Promise<number> {
+  const { stdout } = await promisify(execFile)("ps", ["-o", "rss=", "-p", String(pid)], { encoding: "utf8" });
+  return Number(stdout.trim());
 }
 
 function summary(name: string, xs: number[]): string {
@@ -176,14 +180,17 @@ describe(`process extras on a real server (${BACKEND})`, { skip: SKIP, timeout: 
     t.after(() => a!.destroy().catch(() => {}));
     t.after(() => b!.destroy().catch(() => {}));
     const bytes = 256 * 1024 * 1024;
-    const base = rssKiB(server.pid);
+    const base = await rssKiB(server.pid);
     let peak = base;
+    let sampling = false;
     const sampler = setInterval(() => {
-      try {
-        peak = Math.max(peak, rssKiB(server.pid));
-      } catch {
+      if (sampling) return;
+      sampling = true;
+      rssKiB(server.pid)
+        .then((kib) => (peak = Math.max(peak, kib)))
         // the server is gone; the assertions below say so
-      }
+        .catch(() => {})
+        .finally(() => (sampling = false));
     }, 50);
     t.after(() => clearInterval(sampler));
     const producer = a!.spawn({ argv: ["/usr/bin/head", "-c", String(bytes), "/dev/zero"], env: ENV });

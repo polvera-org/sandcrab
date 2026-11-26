@@ -213,6 +213,8 @@ export async function leftovers(sandbox: Sandbox): Promise<string[]> {
       try { cmd = fs.readFileSync("/proc/" + p + "/cmdline", "utf8").split("\\0").filter(Boolean); } catch { continue; }
       if (cmd.length === 0) continue;
       if (require("path").basename(cmd[0]) === "crabd") continue;
+      // libkrun's own init on macOS leaves a root clock worker (guest time sync after host sleep).
+      if (cmd[0] === "/init.krun") continue;
       out.push(p + " " + cmd.join(" "));
     }
     process.stdout.write(JSON.stringify(out));
