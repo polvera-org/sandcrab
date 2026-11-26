@@ -145,7 +145,7 @@ steps:
     title: "sandcrab-sdk, only what the server and the self-test need: process handle (records in, records out, cancel, exit), forwards with a resolver, mounts, labels, list and destroy by label"
     depends_on: [core-streams, guest-caps]
     artifacts: [crates/sandcrab-sdk/src]
-    status: doing
+    status: done
 
   - id: selftest
     phase: implement
@@ -153,7 +153,7 @@ steps:
     title: "`crabd probe` + self-test in the SDK: named lines in a fresh sandbox of a named template (no capabilities, no new privileges, no user namespace, loopback only, DNS / gateway / metadata refused, a forward reaches its target and nothing else, nothing readable outside the mounts, tree kill is real). A line passes only on a specific refusal; a timeout is inconclusive"
     depends_on: [rust-sdk, docker-backend]
     artifacts: [crates/sandcrab-guest/src/probe.rs, crates/sandcrab-sdk/src/selftest.rs]
-    status: todo
+    status: doing
 
   - id: server-core
     phase: implement
@@ -161,7 +161,7 @@ steps:
     title: "New crate sandcrab-server + `sandcrab server`: Unix socket in a private directory, peer-uid check (default: the server's own uid), socket mode and optional group, one explicit backend, allowed mount roots, server.hello, sandbox lifecycle and labels, removal of a predecessor's sandboxes at start, TTL"
     depends_on: [rust-sdk, api-types, byo-image]
     artifacts: [crates/sandcrab-server, crates/sandcrab-cli/src]
-    status: todo
+    status: doing
 
   - id: server-streams
     phase: implement
