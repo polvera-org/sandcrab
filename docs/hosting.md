@@ -14,6 +14,9 @@ Sandcrab never falls back from one to another. Docker is for your own agents and
 No backend reports `multi_tenant_safe = true` yet, so none of them is meant for hostile
 multi-tenant code today; Firecracker is the one on the path to it (`jailer`).
 
+To run `sandcrab server` (the daemon behind the SDKs) on a prepared host, as a systemd service
+on Linux or as a child of its client on macOS, see [server.md](server.md).
+
 Placeholders: `<user>` is the account that runs Sandcrab, `<host>` the machine, `<state root>`
 is `$SANDCRAB_HOME` or `~/.sandcrab`.
 

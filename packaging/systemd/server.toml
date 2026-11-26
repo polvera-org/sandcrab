@@ -1,0 +1,29 @@
+# Sample /etc/sandcrab/server.toml for the root service (packaging/systemd/sandcrab-server.service).
+# Every key is described in docs/server.md. Check it with:
+#   sudo SANDCRAB_HOME=/var/lib/sandcrab sandcrab doctor --server-config /etc/sandcrab/server.toml
+
+# The socket's directory holds the socket and nothing else; clients mount the directory.
+socket = "/run/sandcrab/server.sock"
+# A client in another uid reaches the socket through its group.
+socket_mode = "0660"
+socket_group = "sandcrab"
+# The uids that may connect. A root server admits only root without this: list the client's.
+allow_uids = [1500]
+
+backend = "docker"
+state_dir = "/var/lib/sandcrab"
+templates_dirs = ["/etc/sandcrab/templates"]
+default_template = "base"
+# Prove the default template's isolation once at start (needs a read-write mount root).
+selftest_on_start = ["base"]
+allow_root_user = false
+
+[limits]
+max_sandboxes = 64
+default_ttl_secs = 1800
+max_ttl_secs = 86400
+
+# The host directories clients may mount, at the same absolute path in the sandbox.
+[[mount_roots]]
+path = "/srv/sandcrab"
+mode = "rw"
