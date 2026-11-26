@@ -94,6 +94,12 @@ export function versionMismatch(server: string, min: string): string | null {
   return `sandcrab server speaks API ${server}, this SDK needs ${min} or later: upgrade the server`;
 }
 
+/** Why the server cannot serve `feature` (`"mounts"`, `"forwards"`, `"selftest"`), or `null`. */
+export function featureMissing(features: readonly string[], feature: string): string | null {
+  if (features.includes(feature)) return null;
+  return `the sandcrab server does not offer "${feature}" (it offers: ${features.join(", ") || "nothing"}): upgrade the server`;
+}
+
 /** The reason when the server answered `UNSUPPORTED_VERSION` to an SDK that speaks `client`. */
 export function versionRefused(server: string, client: string): string {
   const s = parseVersion(server);
@@ -151,6 +157,11 @@ export class ClientImpl extends EventEmitter implements SandcrabClient {
   /** Why nothing can be started on this server (its API version), or `null`. */
   get _incompatible(): string | null {
     return this.#incompatible;
+  }
+
+  /** Why the connected server cannot serve `feature`, or `null` (also while not connected). */
+  _missingFeature(feature: string): string | null {
+    return this.#hello ? featureMissing(this.#hello.features, feature) : null;
   }
 
   get _closed(): boolean {

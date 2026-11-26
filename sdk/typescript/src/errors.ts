@@ -37,7 +37,7 @@ export function errorName(code: number): string {
 /** Base of every error this package throws or rejects with. */
 export class SandcrabError extends Error {
   override name = "SandcrabError";
-  /** `"SANDBOX_NOT_FOUND"`, `"MOUNT_NOT_ALLOWED"`, `"INVALID_SPEC"`, `"NOT_CONNECTED"`, ... */
+  /** `"SANDBOX_NOT_FOUND"`, `"MOUNT_NOT_ALLOWED"`, `"INVALID_SPEC"`, `"NOT_CONNECTED"`, `"UNSUPPORTED_FEATURE"` (the server lacks a feature the call needs), ... */
   readonly code: string;
   constructor(code: string, message: string, options?: ErrorOptions) {
     super(message, options);
