@@ -89,7 +89,7 @@ steps:
     title: "crabd forwards: listen on guest 127.0.0.1:<port> for each port set at spawn, announce each connection on the host-held listen connection, relay on the accept connection; loopback only, caps, refusal counters, fails closed"
     depends_on: [guest-supervisor]
     artifacts: [crates/sandcrab-guest/src/forward.rs, crates/sandcrab-guest/src/server.rs, crates/sandcrab-guest/src/main.rs]
-    status: doing
+    status: done
 
   - id: guest-init
     phase: implement
