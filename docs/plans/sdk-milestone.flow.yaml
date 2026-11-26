@@ -230,7 +230,7 @@ steps:
     agent: nova
     title: "Pilot in the adopter's repository (its own branch and worktree): a Sandcrab-backed launcher passes the adopter's launcher conformance suite on Docker and on libkrun, then a sandboxed check step and one agent run go through it. The milestone's exit test"
     depends_on: [live-linux, live-mac, adopter-flow]
-    status: doing
+    status: done
 
   - id: docs
     phase: document
@@ -238,4 +238,4 @@ steps:
     title: "docs/server.md, docs/sdk-typescript.md, protocol.md 0.3, hosting.md (server per platform; socket directory, allowed uids, mount roots; drain before a server upgrade), bring-your-own-image guide, self-test reference, ROADMAP, AGENTS.md crate map, README, CHANGELOG"
     depends_on: [review, live-linux, live-mac, adopter-pilot]
     artifacts: [docs/server.md, docs/sdk-typescript.md, docs/protocol.md, docs/hosting.md, docs/ROADMAP.md, AGENTS.md, README.md, CHANGELOG.md]
-    status: todo
+    status: doing
