@@ -302,13 +302,16 @@ impl Scratch {
             std::fs::create_dir(s.rw())?;
             std::fs::write(s.ro().join("canary"), &s.canary)?;
             std::fs::write(s.outside(), &s.canary)?;
-            // The sandbox user must be able to write through the rw mount.
+            // The sandbox user owns the scratch it is given: it must write through the rw
+            // mount, read the ro canary, and get EROFS (not EACCES) from the ro mount. A root
+            // server's umask (0077) leaves them unreadable to anyone else.
             if let Some(u) = config.user {
                 use std::os::unix::fs::MetadataExt;
-                let rw = s.rw();
-                let meta = std::fs::metadata(&rw)?;
-                if meta.uid() != u.uid || meta.gid() != u.gid {
-                    std::os::unix::fs::chown(&rw, Some(u.uid), Some(u.gid))?;
+                for p in [s.rw(), s.ro(), s.ro().join("canary")] {
+                    let meta = std::fs::metadata(&p)?;
+                    if meta.uid() != u.uid || meta.gid() != u.gid {
+                        std::os::unix::fs::chown(&p, Some(u.uid), Some(u.gid))?;
+                    }
                 }
             }
             Ok(())
