@@ -49,7 +49,7 @@ steps:
     agent: nova
     title: "Author the adopter-side flow in the adopter's own repository: suite changes first (program path option, pid assertions skipped without a recovery record, sweep by grouping key), folder sets and grouping key for short execs, a Sandcrab-backed launcher around the local one, deployment changes, then deletions. Not tracked in this repo"
     depends_on: [design-rev]
-    status: doing
+    status: done
 
   - id: protocol-03
     phase: implement
