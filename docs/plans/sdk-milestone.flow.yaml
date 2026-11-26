@@ -177,7 +177,7 @@ steps:
     title: "sandcrab-server operations: capabilities and self-test calls (per template), graceful shutdown, doctor checks, systemd unit example (root, hardened), how to run it as a child process on a Mac"
     depends_on: [server-streams, selftest]
     artifacts: [crates/sandcrab-server/src, crates/sandcrab-cli/src, docs/hosting.md]
-    status: doing
+    status: done
 
   - id: ts-sdk
     phase: implement
