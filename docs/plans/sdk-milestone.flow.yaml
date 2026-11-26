@@ -113,7 +113,7 @@ steps:
     title: "sandcrab-core host side: process.open client with records and backpressure, cancel; forward listen / accept with a target resolver; FakeBackend coverage"
     depends_on: [core-config]
     artifacts: [crates/sandcrab-core/src/process.rs, crates/sandcrab-core/src/forward.rs, crates/sandcrab-core/src/client.rs]
-    status: doing
+    status: done
 
   - id: docker-backend
     phase: implement
@@ -121,7 +121,7 @@ steps:
     title: "Docker backend: forwards with network `none`, exec /tmp option, limits, ad-hoc same-path binds with an identity re-check after start, a sandbox user different from the server's (root server), labels; e2e: no network except the forwards"
     depends_on: [core-streams, guest-forwards, guest-caps]
     artifacts: [crates/sandcrab-backend-docker/src]
-    status: todo
+    status: doing
 
   - id: libkrun-backend
     phase: implement
@@ -129,7 +129,7 @@ steps:
     title: "libkrun backend: forwards over vsock, the same options and limits through init.configure, ad-hoc virtio-fs shares at the same path with fd-pinned roots; e2e on macOS and Linux KVM"
     depends_on: [core-streams, guest-forwards, guest-caps, guest-init]
     artifacts: [crates/sandcrab-backend-libkrun/src]
-    status: todo
+    status: doing
 
   - id: byo-image
     phase: implement
@@ -145,7 +145,7 @@ steps:
     title: "sandcrab-sdk, only what the server and the self-test need: process handle (records in, records out, cancel, exit), forwards with a resolver, mounts, labels, list and destroy by label"
     depends_on: [core-streams, guest-caps]
     artifacts: [crates/sandcrab-sdk/src]
-    status: todo
+    status: doing
 
   - id: selftest
     phase: implement
