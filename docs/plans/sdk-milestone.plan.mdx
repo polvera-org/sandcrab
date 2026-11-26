@@ -132,3 +132,27 @@ enterprise design):
 3. **Disk on the Mac is at 9 GB free.** Builds and Docker e2e go to the remote hosts; only the libkrun live check
    runs locally.
 4. **No backend reports `multi_tenant_safe`.** Stated in the server's capabilities; fine for a single owner.
+
+## Outcome (2026-11-26)
+
+Every step of the flow is done. Full results per host, and what was not verified:
+[reviews/sdk-milestone-results.md](../reviews/sdk-milestone-results.md).
+
+- **Shipped**: `sandcrab server` on Docker and libkrun, server API 1.0, protocol 0.3, the TypeScript SDK
+  (`sdk/typescript`), the self-test, bring-your-own-image templates. Docs: [server.md](../server.md),
+  [protocol.md](../protocol.md#server-api-client--sandcrab-server), [design as built](../design/server-and-sdk.md).
+- **Exit test met**: the adopter's own suite passed through a pilot adapter on libkrun (`mac-m2`) and Docker
+  (`kvm-dedicated`), 0 skipped. A sandbox per call costs about 0.2 s on libkrun and 1.5 to 2.7 s on a busy Docker
+  host, so the adapter needs a pool of warm sandboxes.
+- **Gates**: 1037 Rust tests; TS unit 64/64; TS e2e 52 pass, 2 skipped on Docker and libkrun (Linux KVM and
+  Apple Silicon); live checks on `dev-vps` and `mac-m2`.
+- **Risk 1 (forward throughput) did not materialise.** One stream ran at 150 to 436 MB/s against the 50 MB/s
+  target, depending on host and backend. The server-side Unix-socket target was not needed.
+- **Changed against the plan**: sandboxes are owned per uid; a sandbox runs as its client's uid:gid unless the
+  config allows others; the supervisor takes its spec over a control pipe; only the supervisor is a subreaper, so
+  a program that kills it leaves its tree until the sandbox is destroyed; the mount cap is 4 on libkrun x86_64;
+  the socket directory is `/run/sandcrab-server`. The live Linux check found two high findings (socket directory,
+  self-test scratch under `UMask=0077`), both fixed before the pilot.
+- **Not verified**: the macOS Docker `tcp` transport and `unrestricted` network through the server; cross-uid end
+  to end; the systemd hardening options one by one; the guest clock after a Mac sleep.
+- **Next**: the Python SDK, the egress allowlist, and the review backlog in [ROADMAP.md](../ROADMAP.md#next).
