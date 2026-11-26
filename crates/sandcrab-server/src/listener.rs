@@ -297,10 +297,11 @@ mod tests {
         // macOS: ENOTCONN once the peer closed. Linux keeps the credentials from connect time.
         match Peer::of(&stream) {
             Err(e) => assert!(peer_gone(&e), "{e}"),
-            Ok(_) => assert!(
-                !cfg!(target_os = "macos"),
-                "macOS answered with credentials"
-            ),
+            Ok(_) => {
+                if cfg!(target_os = "macos") {
+                    panic!("macOS answered with credentials");
+                }
+            }
         }
     }
 
