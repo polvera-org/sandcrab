@@ -20,7 +20,7 @@ libkrun = ["sandcrab-sdk/libkrun"]
 sandcrab-sdk = { workspace = true, default-features = false }
 chrono.workspace = true
 getrandom.workspace = true
-rustix.workspace = true
+rustix = { workspace = true, features = ["fs"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
