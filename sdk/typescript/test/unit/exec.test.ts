@@ -158,6 +158,7 @@ test("output into a Writable: not captured, backpressure reaches the server, res
   assert.equal(finished, true);
   assert.deepEqual(Buffer.concat(got), data);
   assert.deepEqual(out, BASE);
+  assert.equal(output.listenerCount("error"), 0, "exec left a listener on the caller's output");
 });
 
 test("a failing output stream stops the program and is reported", async (t) => {

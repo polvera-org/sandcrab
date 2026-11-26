@@ -169,7 +169,8 @@ export async function exec(client: ClientImpl, sandboxId: string, spec: ExecOpti
   }
   if (output) {
     if (!output.destroyed && !output.writableEnded) output.end();
-    await finished(output).catch(() => {});
+    // `cleanup`: no listener of ours stays on the caller's stream.
+    await finished(output, { cleanup: true }).catch(() => {});
     output.off("error", onOutputError);
   }
 
