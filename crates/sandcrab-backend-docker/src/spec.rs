@@ -10,7 +10,9 @@
 //! - size-limited `nosuid,nodev,noexec` tmpfs at `/tmp` (stated explicitly, not left to
 //!   Docker's tmpfs default): scripts and shared objects under `/tmp` cannot be executed or
 //!   mapped. Tools that unpack and run binaries from a temp dir should get
-//!   `TMPDIR=$HOME/.tmp` (or a dir under the workspace) instead;
+//!   `TMPDIR=$HOME/.tmp` (or a dir under the workspace) instead. A spec with `tmp_exec`
+//!   drops `noexec` and nothing else; `tmp_size_mb` sets the size;
+//! - `pids_limit` and the `nofile` ulimit follow the spec's `pids_max` / `nofile` when given;
 //! - core dumps disabled (`RLIMIT_CORE` soft = hard = 0): a crashing process must not
 //!   drop `core.*` files into the cwd, which is usually a persistent workspace;
 //! - no `sysctls`: the hardening sysctls `crabd init` sets in the microVM guests
@@ -22,7 +24,10 @@
 //! - runs as the **host** uid:gid unless the spec overrides it, so files written to
 //!   bind-mounted workspaces stay editable on the host;
 //! - network `none` unless the policy is `unrestricted`; published ports bind to
-//!   `127.0.0.1` only;
+//!   `127.0.0.1` only. Forwards need no network: `crabd serve --forward-port` listens on the
+//!   container's own loopback and every connection is opened by the host;
+//! - ad-hoc host mounts are bind mounts at the same absolute path as on the host, like
+//!   directory workspaces;
 //! - `crabd` requires a per-sandbox auth token on every connection
 //!   (`--auth-token-file`, read once and deleted by `crabd`).
 //!
@@ -309,7 +314,7 @@ pub fn build_container_spec(
     if ctx.transport == DockerTransport::Tcp {
         mounts.push(volume(&sock_volume_name(spec.id), GUEST_SOCK_DIR, false));
     }
-    for m in &spec.mounts {
+    for m in spec.mounts.iter().chain(&spec.host_mounts) {
         if let WorkspaceBacking::BlockVolume(_) = m.backing {
             return Err(SandboxError::InvalidConfig(format!(
                 "workspace `{}` is a block volume; docker only mounts directories",
@@ -356,7 +361,39 @@ pub fn build_container_spec(
         })?;
     let nano_cpus = i64::from(r.vcpu) * 1_000_000_000;
 
+    let pids_limit = spec.pids_max.map_or(ctx.limits.pids_limit, i64::from);
+    let tmp_size_mb = spec.tmp_size_mb.unwrap_or(ctx.limits.tmp_size_mb);
+    // Docker's tmpfs default is `noexec`; `exec` after it wins.
+    let tmp_exec = if spec.tmp_exec { "exec" } else { "noexec" };
+    let mut ulimits = vec![ResourcesUlimits {
+        name: Some("core".into()),
+        soft: Some(0),
+        hard: Some(0),
+    }];
+    if let Some(n) = spec.nofile {
+        let n = i64::try_from(n)
+            .map_err(|_| SandboxError::InvalidConfig(format!("nofile {n} too large")))?;
+        ulimits.push(ResourcesUlimits {
+            name: Some("nofile".into()),
+            soft: Some(n),
+            hard: Some(n),
+        });
+    }
+
     let cwd = guest_str(&spec.default_cwd)?.to_owned();
+    let mut cmd = vec![
+        "serve".to_owned(),
+        "--unix".into(),
+        guest_socket(ctx.transport),
+        "--default-cwd".into(),
+        cwd.clone(),
+        "--auth-token-file".into(),
+        format!("{GUEST_RUN_DIR}/{TOKEN_NAME}"),
+    ];
+    for f in &spec.forwards {
+        cmd.push("--forward-port".into());
+        cmd.push(f.guest_port.to_string());
+    }
     let user = effective_user(spec, ctx.host_user);
     let labels = base_labels(spec, ctx.owner, ROLE_SANDBOX);
     let stop_grace = i64::try_from(ctx.limits.stop_grace.as_secs()).unwrap_or(i64::MAX);
@@ -367,15 +404,7 @@ pub fn build_container_spec(
         env: Some(env),
         // Entrypoint pinned to crabd so an image ENTRYPOINT can never wrap it.
         entrypoint: Some(vec![GUEST_CRABD.to_owned()]),
-        cmd: Some(vec![
-            "serve".into(),
-            "--unix".into(),
-            guest_socket(ctx.transport),
-            "--default-cwd".into(),
-            cwd.clone(),
-            "--auth-token-file".into(),
-            format!("{GUEST_RUN_DIR}/{TOKEN_NAME}"),
-        ]),
+        cmd: Some(cmd),
         image: Some(ctx.image.to_owned()),
         working_dir: Some(cwd),
         labels: Some(labels),
@@ -395,22 +424,15 @@ pub fn build_container_spec(
             init: Some(true),
             ipc_mode: Some("private".into()),
             readonly_rootfs: Some(false),
-            pids_limit: Some(ctx.limits.pids_limit),
+            pids_limit: Some(pids_limit),
             memory: Some(memory),
             memory_swap: Some(memory),
             nano_cpus: Some(nano_cpus),
             tmpfs: Some(HashMap::from([(
                 "/tmp".to_owned(),
-                format!(
-                    "rw,nosuid,nodev,noexec,size={}m,mode=1777",
-                    ctx.limits.tmp_size_mb
-                ),
+                format!("rw,nosuid,nodev,{tmp_exec},size={tmp_size_mb}m,mode=1777"),
             )])),
-            ulimits: Some(vec![ResourcesUlimits {
-                name: Some("core".into()),
-                soft: Some(0),
-                hard: Some(0),
-            }]),
+            ulimits: Some(ulimits),
             auto_remove: Some(false),
             publish_all_ports: Some(false),
             ..Default::default()
@@ -528,8 +550,8 @@ mod tests {
     use std::path::PathBuf;
 
     use sandcrab_core::{
-        LifecycleTimings, MountMode, PortSpec, ResolvedMount, ResourceLimits, SecretSource,
-        SecretSpec, Template, TemplateManifest, WorkspaceId,
+        ForwardSpec, LifecycleTimings, MountMode, PortSpec, ResolvedMount, ResourceLimits,
+        SecretSource, SecretSpec, Template, TemplateManifest, WorkspaceId,
     };
 
     use super::*;
@@ -756,6 +778,107 @@ image = "sandcrab/base:0.1.0"
         let mut block = mount("v", "/h/v.img", "/data", MountMode::ReadWrite);
         block.backing = WorkspaceBacking::BlockVolume("/h/v.img".into());
         s.mounts = vec![block];
+        assert!(matches!(build(&s), Err(SandboxError::InvalidConfig(_))));
+    }
+
+    #[test]
+    fn host_mounts_bind_at_the_same_path() {
+        let mut s = spec();
+        s.mounts = vec![mount(
+            "proj",
+            "/home/u/proj",
+            "/workspace",
+            MountMode::ReadWrite,
+        )];
+        s.host_mounts = vec![
+            mount("/srv/in", "/srv/in", "/srv/in", MountMode::ReadOnly),
+            mount(
+                "/tmp/run/out",
+                "/tmp/run/out",
+                "/tmp/run/out",
+                MountMode::ReadWrite,
+            ),
+        ];
+        let mounts = build(&s).unwrap().host_config.unwrap().mounts.unwrap();
+        let view: Vec<_> = mounts[2..]
+            .iter()
+            .map(|m| {
+                assert_eq!(m.typ, Some(MountType::BIND));
+                (
+                    m.source.as_deref().unwrap(),
+                    m.target.as_deref().unwrap(),
+                    m.read_only.unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            view,
+            [
+                ("/home/u/proj", "/workspace", false),
+                ("/srv/in", "/srv/in", true),
+                ("/tmp/run/out", "/tmp/run/out", false),
+            ]
+        );
+        // The reserved guest paths stay refused for host mounts too.
+        s.host_mounts = vec![mount(
+            "x",
+            "/opt/sandcrab/x",
+            "/opt/sandcrab/x",
+            MountMode::ReadOnly,
+        )];
+        assert!(build(&s).is_err());
+    }
+
+    #[test]
+    fn forwards_tmp_and_limits() {
+        let mut s = spec();
+        s.forwards = vec![ForwardSpec::new(5432), ForwardSpec::new(8080)];
+        s.tmp_exec = true;
+        s.tmp_size_mb = Some(64);
+        s.pids_max = Some(77);
+        s.nofile = Some(4096);
+        for transport in [DockerTransport::Unix, DockerTransport::Tcp] {
+            let body = build_with(&s, transport, false).unwrap();
+            let cmd = body.cmd.unwrap();
+            assert_eq!(
+                cmd[7..],
+                ["--forward-port", "5432", "--forward-port", "8080"],
+                "{cmd:?}"
+            );
+            let hc = body.host_config.unwrap();
+            // A forward publishes nothing and needs no network.
+            assert_eq!(hc.network_mode.as_deref(), Some("none"));
+            assert!(hc.port_bindings.is_none() && body.exposed_ports.is_none());
+            assert_eq!(
+                hc.tmpfs.unwrap()["/tmp"],
+                "rw,nosuid,nodev,exec,size=64m,mode=1777"
+            );
+            assert_eq!(hc.pids_limit, Some(77));
+            let ulimits: Vec<_> = hc
+                .ulimits
+                .unwrap()
+                .into_iter()
+                .map(|u| (u.name.unwrap(), u.soft.unwrap(), u.hard.unwrap()))
+                .collect();
+            assert_eq!(
+                ulimits,
+                [("core".to_owned(), 0, 0), ("nofile".to_owned(), 4096, 4096)]
+            );
+            // Hardening is untouched by the options.
+            assert_eq!(hc.cap_drop, Some(vec!["ALL".to_owned()]));
+            assert_eq!(
+                hc.security_opt,
+                Some(vec!["no-new-privileges:true".to_owned()])
+            );
+            assert_eq!(hc.privileged, Some(false));
+        }
+        // The relay never gets the forwards or the mounts.
+        s.host_mounts = vec![mount("/srv/in", "/srv/in", "/srv/in", MountMode::ReadOnly)];
+        let relay = build_with(&s, DockerTransport::Tcp, true).unwrap();
+        assert!(!relay.cmd.unwrap().iter().any(|a| a == "--forward-port"));
+        assert_eq!(relay.host_config.unwrap().mounts.unwrap().len(), 2);
+
+        s.nofile = Some(u64::MAX);
         assert!(matches!(build(&s), Err(SandboxError::InvalidConfig(_))));
     }
 

@@ -195,6 +195,25 @@ impl DockerBackend {
         }
     }
 
+    /// Unix transport: `crabd` creates its socket `0660`, owned by the sandbox user. Refuse a
+    /// user whose socket this process could not open, instead of a readiness timeout: it must
+    /// be root, the same uid, or hold the sandbox's gid.
+    fn check_socket_reachable(&self, user: UserSpec) -> Result<()> {
+        let host = self.host_user;
+        if self.transport() != DockerTransport::Unix
+            || host.uid == 0
+            || user.uid == host.uid
+            || user.gid == host.gid
+            || rustix::process::getgroups().is_ok_and(|g| g.iter().any(|g| g.as_raw() == user.gid))
+        {
+            return Ok(());
+        }
+        Err(SandboxError::InvalidConfig(format!(
+            "sandbox user {user} cannot be served by this process (uid {}): its crabd socket              is private to uid {} and gid {}. Run the server as root, or use a gid this              process holds",
+            host.uid, user.uid, user.gid
+        )))
+    }
+
     /// Create `<state_dir>/<id>/` (0700; 0777 when the container runs as another uid so
     /// it can create its socket — `state_dir` itself stays 0700) and write the auth token
     /// into it.
@@ -503,12 +522,14 @@ impl RuntimeBackend for DockerBackend {
             multi_tenant_safe: false,
             supports_snapshots: false,
             supports_host_dir_mounts: true,
-            // Turned on by the backend steps of the sdk-milestone flow; refused until then.
-            supports_forwards: false,
-            supports_host_mounts: false,
-            supports_tmp_options: false,
-            supports_process_limits: false,
-            mount_identity_checked: false,
+            supports_forwards: true,
+            supports_host_mounts: true,
+            supports_tmp_options: true,
+            supports_process_limits: true,
+            // A bind mount shows the host's `(dev, ino)` only when the daemon's kernel is
+            // the host's. Docker Desktop shares files through a VM: no check there.
+            mount_identity_checked: cfg!(target_os = "linux"),
+            // Containers share the kernel's per-uid process accounting.
             nproc_scope: NprocScope::HostUid,
         }
     }
@@ -525,6 +546,7 @@ impl RuntimeBackend for DockerBackend {
         spec.reject_secrets()?;
         spec.reject_unsupported(self.kind(), &self.capabilities())?;
         network_mode(&spec.network)?;
+        self.check_socket_reachable(effective_user(spec, self.host_user))?;
         let image_id = self.verify_image(spec).await?;
         spec.timings.mark_custom("image_verified");
         if !self.enforces_disk_limit() {
@@ -762,10 +784,11 @@ impl ImageVerifier for DockerImageVerifier {
     }
 }
 
-/// Re-check every directory workspace root (symlink-free path, dev/ino from the lease)
-/// immediately before Docker uses it as a bind source.
+/// Re-check every directory workspace root and host mount (symlink-free path, dev/ino from
+/// the lease or the mount policy) immediately before Docker uses it as a bind source.
 fn verify_mount_roots(spec: &ResolvedSpec) -> Result<()> {
-    for m in spec.mounts.iter().filter(|m| m.backing.is_dir()) {
+    let all = spec.mounts.iter().chain(&spec.host_mounts);
+    for m in all.filter(|m| m.backing.is_dir()) {
         sandcrab_core::verify_workspace_root(&m.workspace_name, &m.host_path, m.root_identity)?;
     }
     Ok(())
@@ -794,14 +817,46 @@ mod tests {
                 multi_tenant_safe: false,
                 supports_snapshots: false,
                 supports_host_dir_mounts: true,
-                supports_forwards: false,
-                supports_host_mounts: false,
-                supports_tmp_options: false,
-                supports_process_limits: false,
-                mount_identity_checked: false,
+                supports_forwards: true,
+                supports_host_mounts: true,
+                supports_tmp_options: true,
+                supports_process_limits: true,
+                mount_identity_checked: cfg!(target_os = "linux"),
                 nproc_scope: NprocScope::HostUid,
             }
         );
+    }
+
+    #[test]
+    fn socket_must_be_reachable_by_this_process() {
+        let backend = |transport, host_user| DockerBackend {
+            config: DockerConfig {
+                transport,
+                ..DockerConfig::default()
+            },
+            docker: connect_docker(Some("tcp://127.0.0.1:2375")).unwrap(),
+            crabd: PathBuf::from("/opt/sandcrab/crabd"),
+            host_user,
+        };
+        // A gid no test process holds.
+        let foreign = UserSpec::new(4_000_001, 4_000_002);
+        let me = UserSpec::new(1000, 1000);
+        let unix = backend(DockerTransport::Unix, me);
+        unix.check_socket_reachable(me).unwrap();
+        unix.check_socket_reachable(UserSpec::new(4_000_001, 1000))
+            .unwrap();
+        let e = unix.check_socket_reachable(foreign).unwrap_err();
+        assert!(
+            matches!(&e, SandboxError::InvalidConfig(m) if m.contains("4000001")),
+            "{e}"
+        );
+        // A root server opens any socket; the relay needs no socket access at all.
+        backend(DockerTransport::Unix, UserSpec::new(0, 0))
+            .check_socket_reachable(foreign)
+            .unwrap();
+        backend(DockerTransport::Tcp, me)
+            .check_socket_reachable(foreign)
+            .unwrap();
     }
 
     #[test]

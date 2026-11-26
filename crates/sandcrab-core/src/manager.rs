@@ -313,6 +313,19 @@ impl SandboxManager {
             }
             return Err(SandboxError::PolicyUnenforceable(missing));
         }
+        // The backend handed mount paths to something that resolved them again: compare
+        // what the sandbox got with what was opened (design §6.3).
+        if caps.mount_identity_checked
+            && let Err(e) = check_mount_identities(&ready.client, &spec).await
+        {
+            ready.client.close().await;
+            if let Some(handle) = guard.0.take()
+                && let Err(de) = handle.destroy().await
+            {
+                tracing::warn!(%id, error = %de, "destroy after a failed mount check also failed");
+            }
+            return Err(e);
+        }
         let handle = guard.0.take().expect("handle present until readiness");
         let ports = handle.published_ports();
 
@@ -498,6 +511,40 @@ impl SandboxManager {
             }
         }));
     }
+}
+
+/// Ask `crabd` (`fs.identity`) for the `(dev, ino)` of every directory mount point and compare
+/// each with the identity recorded when the host directory was opened. Only meaningful where
+/// the sandbox shares the host's kernel ([`BackendCapabilities::mount_identity_checked`]).
+async fn check_mount_identities(client: &CrabdClient, spec: &ResolvedSpec) -> Result<()> {
+    let mut paths = Vec::new();
+    let mut expected = Vec::new();
+    for m in spec.mounts.iter().chain(&spec.host_mounts) {
+        let (true, Some(want)) = (m.backing.is_dir(), m.root_identity) else {
+            continue;
+        };
+        let guest = m.guest_path.to_str().ok_or_else(|| {
+            SandboxError::InvalidConfig(format!(
+                "guest path `{}` is not UTF-8",
+                m.guest_path.display()
+            ))
+        })?;
+        paths.push(guest.to_owned());
+        expected.push(want);
+    }
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let got = client.fs_identity(paths.clone()).await?;
+    for ((path, want), got) in paths.iter().zip(expected).zip(got) {
+        if (want.dev, want.ino) != (got.dev, got.ino) {
+            return Err(SandboxError::WorkspaceRootChanged(format!(
+                "mount `{path}`: the sandbox sees device/inode {}:{}, the directory that was                  checked is {}:{}; the sandbox was destroyed",
+                got.dev, got.ino, want.dev, want.ino
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Why `crabd` cannot serve `forwards`, if it cannot: it does not speak forwards, or does not
@@ -1738,6 +1785,76 @@ mod tests {
             "policy cannot be enforced: forwards are not supported by the firecracker backend"
         );
         assert!(backend.events().is_empty());
+    }
+
+    #[tokio::test]
+    async fn mount_identity_is_checked_after_start() {
+        let env = env();
+        let mut backend = FakeBackend::shared_kernel();
+        backend.caps.mount_identity_checked = true;
+        let other = fs::canonicalize(env._tmp.path()).unwrap().join("other");
+        fs::create_dir(&other).unwrap();
+        let policy = crate::MountPolicy::new(
+            vec![crate::MountRoot {
+                path: other.clone(),
+                max_mode: MountMode::ReadWrite,
+            }],
+            Vec::new(),
+        )
+        .unwrap();
+        let mgr = manager(
+            &env,
+            &backend,
+            ManagerConfig {
+                mount_policy: Some(policy),
+                ..quick()
+            },
+        );
+        // The fake `crabd` answers with the host's numbers for a path: a workspace seen at
+        // its own path and a host mount (same path by definition) pass.
+        let sb = mgr
+            .spawn(
+                SandboxConfig::from_template("base")
+                    .mount("proj", &env.project, MountMode::ReadWrite)
+                    .host_mount(&other, MountMode::ReadOnly),
+            )
+            .await
+            .unwrap();
+        sb.destroy().await.unwrap();
+
+        // A mount point that shows another directory fails the create and leaves nothing.
+        let before = backend.events().len();
+        let err = mgr
+            .spawn(SandboxConfig::from_template("base").mount("proj", &other, MountMode::ReadWrite))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, SandboxError::WorkspaceRootChanged(m) if m.contains("device/inode")),
+            "{err:?}"
+        );
+        let events = backend.events();
+        assert!(
+            matches!(&events[before..], [FakeEvent::Spawned(a), FakeEvent::Destroyed(b)] if a == b),
+            "{events:?}"
+        );
+        assert!(mgr.list_active().is_empty());
+        // The lease is released: the workspace can be mounted again.
+        let sb = mgr
+            .spawn(SandboxConfig::from_template("base").mount(
+                "proj",
+                &env.project,
+                MountMode::ReadWrite,
+            ))
+            .await
+            .unwrap();
+        sb.destroy().await.unwrap();
+
+        // A backend that does not declare the check is not asked.
+        backend.caps.mount_identity_checked = false;
+        let mgr = manager(&env, &backend, quick());
+        mgr.spawn(SandboxConfig::from_template("base").mount("proj", &other, MountMode::ReadWrite))
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
