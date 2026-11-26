@@ -174,7 +174,7 @@ regenerate the report, and check the git history if the repo is to be scrubbed.
   make a collision theoretical.
 - The stderr tail is 4096 bytes. The contract says "4096-character". The trimming is UTF-8 safe
   (`supervise.rs:1162-1174`), but a multi-byte tail holds fewer characters. State "bytes" in the TS docs.
-- `docs/reviews/bench-tldr-review.md:54` lists `private-mesh` and `ubuntu@` as grep terms. They are
+- `docs/reviews/bench-tldr-review.md:54` lists a private hostname and a remote login as grep terms. They are
   harmless, but they hint at the private host naming.
 
 ## Contract table, row by row
