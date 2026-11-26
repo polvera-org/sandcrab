@@ -7,6 +7,7 @@
 
 mod args;
 mod doctor;
+mod doctor_server;
 #[cfg(all(feature = "firecracker", target_os = "linux"))]
 mod firecracker;
 #[cfg(all(
@@ -119,6 +120,13 @@ pub enum Commands {
         /// With --all: skip the confirmation prompt.
         #[arg(long, short = 'y', requires = "all")]
         yes: bool,
+
+        /// Also check a `sandcrab server` config: it parses, the socket directory, the allow
+        /// list, the mount roots, the backend preflight and the pins of the templates it
+        /// names. The other checks then use its backend, state and template directories.
+        /// Run as the server's user.
+        #[arg(long, value_name = "FILE")]
+        server_config: Option<PathBuf>,
     },
 
     /// Manage persistent workspaces.
@@ -250,13 +258,18 @@ async fn dispatch(cli: Cli) -> anyhow::Result<u8> {
     let g = &cli.global;
     util::warn_deprecated_opt_in(g);
     match cli.command {
-        Commands::Doctor { fix, all, yes } => {
+        Commands::Doctor {
+            fix,
+            all,
+            yes,
+            server_config,
+        } => {
             let reap = match (fix, all) {
                 (false, _) => doctor::Reap::None,
                 (true, false) => doctor::Reap::Owned,
                 (true, true) => doctor::Reap::All { confirmed: yes },
             };
-            doctor::doctor(g, fix, reap).await
+            doctor::doctor(g, fix, reap, server_config.as_deref()).await
         }
         Commands::Workspace { action } => workspace::workspace(g, action),
         Commands::Template { action } => workspace::template(g, action).await,

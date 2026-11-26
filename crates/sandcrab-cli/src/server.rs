@@ -15,7 +15,8 @@ use crate::util::{self, Interrupt};
 #[derive(Debug, Clone, clap::Args)]
 pub struct ServerArgs {
     /// TOML config file (keys: socket, socket_mode, socket_group, allow_uids, backend,
-    /// state_dir, templates_dirs, default_template, allow_root_user, [limits], [[mount_roots]]).
+    /// state_dir, templates_dirs, default_template, allow_root_user, selftest_on_start,
+    /// [limits], [[mount_roots]]). `sandcrab doctor --server-config FILE` checks it.
     #[arg(long)]
     pub config: Option<PathBuf>,
 
