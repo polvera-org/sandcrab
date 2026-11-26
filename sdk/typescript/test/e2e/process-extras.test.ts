@@ -146,13 +146,14 @@ describe(`process extras on a real server (${BACKEND})`, { skip: SKIP, timeout: 
   });
 
   test("a zero-mount sandbox as a uid with no passwd entry runs a command; HOME and the rest come only from env", async (t) => {
-    const server = await TestServer.start();
+    // Another uid than the client's needs an allowance in the server config.
+    const uid = 54_321;
+    const server = await TestServer.start({ configToml: `allow_sandbox_uids = [[${uid}, ${uid}]]\n` });
     t.after(() => server.close());
     const client = await server.connect();
     t.after(() => client.close());
     // A non-root server serves a sandbox user that shares its gid (Docker's unix transport).
     const gid = process.getgid?.() ?? 1000;
-    const uid = 54_321;
     const sb = await client.createSandbox({ template: TEMPLATE, labels: { e2e: "extras" }, user: { uid, gid } });
     t.after(() => sb.destroy().catch(() => {}));
     assert.deepEqual(sb.mounts, []);

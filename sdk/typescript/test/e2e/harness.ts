@@ -18,7 +18,7 @@
 
 import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
-import { mkdirSync, mkdtempSync, openSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, openSync, rmSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
@@ -99,6 +99,8 @@ export interface ServerOptions {
   mountRoots?: string[];
   /** `--allow-uid` each. */
   allowUids?: number[];
+  /** Server config file text (TOML), passed with `--config`; flags override it. */
+  configToml?: string;
   /** Reuse this directory (state, socket, log): a second server after one was killed. */
   dir?: string;
 }
@@ -141,6 +143,11 @@ export class TestServer {
     const args = [`--backend=${BACKEND}`, "--state-dir", stateDirOf(dir), "--templates-dir", path.join(REPO, "templates"), "server", "--socket", path.join(dir, "sock", "server.sock"), "--lifeline-stdin"];
     for (const r of o.mountRoots ?? []) args.push("--mount-root", r);
     for (const u of o.allowUids ?? []) args.push("--allow-uid", String(u));
+    if (o.configToml !== undefined) {
+      const file = path.join(dir, "server.toml");
+      writeFileSync(file, o.configToml);
+      args.splice(args.indexOf("server") + 1, 0, "--config", file);
+    }
     const env: Record<string, string> = {
       PATH: process.env.PATH ?? "/usr/bin:/bin",
       HOME: process.env.HOME ?? homedir(),

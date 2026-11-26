@@ -132,6 +132,12 @@ pub struct ServerConfig {
     /// May a client ask for uid or gid 0 in a sandbox (also as the default user of a root
     /// peer).
     pub allow_root_user: bool,
+    /// Inclusive `[first, last]` uid ranges a client may name as its sandbox's uid besides
+    /// its own. Default: none, so a sandbox runs as its client's uid. A file a sandbox makes
+    /// setuid in a read-write mount is a setuid file of that uid on the host.
+    pub allow_sandbox_uids: Vec<[u32; 2]>,
+    /// The same for the sandbox's gid besides the client's own gid.
+    pub allow_sandbox_gids: Vec<[u32; 2]>,
     /// Templates whose self-test runs once at start, in the background. Default: none. A
     /// failure does not stop the server; `server.capabilities` then says why isolation is
     /// not proven.
@@ -153,6 +159,8 @@ impl Default for ServerConfig {
             templates_dirs: Vec::new(),
             default_template: None,
             allow_root_user: false,
+            allow_sandbox_uids: Vec::new(),
+            allow_sandbox_gids: Vec::new(),
             selftest_on_start: Vec::new(),
             limits: LimitsConfig::default(),
             mount_roots: Vec::new(),
@@ -232,6 +240,16 @@ impl ServerConfig {
                 l.default_ttl_secs, l.max_ttl_secs
             )));
         }
+        for (key, ranges) in [
+            ("allow_sandbox_uids", &self.allow_sandbox_uids),
+            ("allow_sandbox_gids", &self.allow_sandbox_gids),
+        ] {
+            if let Some([a, b]) = ranges.iter().find(|[a, b]| a > b) {
+                return Err(ServerError::Config(format!(
+                    "`{key}` range [{a}, {b}] is reversed (write [first, last])"
+                )));
+            }
+        }
         for r in &self.mount_roots {
             if !r.path.is_absolute() {
                 return Err(ServerError::Config(format!(
@@ -290,6 +308,8 @@ state_dir = "/var/lib/sandcrab"
 templates_dirs = ["/etc/sandcrab/templates"]
 default_template = "base"
 allow_root_user = false
+allow_sandbox_uids = [[60000, 62999]]
+allow_sandbox_gids = [[60000, 62999], [70000, 70000]]
 selftest_on_start = ["base"]
 
 [limits]
@@ -316,6 +336,8 @@ mode = "ro"
         assert_eq!(c.mount_roots[1].mode, MountMode::ReadOnly);
         assert_eq!(c.default_template.as_deref(), Some("base"));
         assert_eq!(c.selftest_on_start, ["base"]);
+        assert_eq!(c.allow_sandbox_uids, [[60000, 62999]]);
+        assert_eq!(c.allow_sandbox_gids[1], [70000, 70000]);
     }
 
     #[test]
@@ -359,6 +381,7 @@ mode = "ro"
             "[[mount_roots]]\npath = \"rel\"",
             "default_template = \"\"",
             "selftest_on_start = [\"\"]",
+            "allow_sandbox_uids = [[2, 1]]",
         ] {
             let c = ServerConfig::from_toml(&format!("{ok}{extra}")).unwrap();
             assert!(c.validate().is_err(), "{extra}");

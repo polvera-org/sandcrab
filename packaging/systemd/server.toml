@@ -17,6 +17,10 @@ default_template = "base"
 # Prove the default template's isolation once at start (needs a read-write mount root).
 selftest_on_start = ["base"]
 allow_root_user = false
+# A sandbox runs as its client's uid:gid. Other users a client may name, as inclusive ranges
+# of throwaway uids/gids that own nothing (a sandbox can leave setuid files in a rw mount).
+# allow_sandbox_uids = [[60000, 62999]]
+# allow_sandbox_gids = [[60000, 62999]]
 
 [limits]
 max_sandboxes = 64

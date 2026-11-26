@@ -60,6 +60,8 @@ scratch directory in one.
 | `default_template` | none | Used when a create names no template |
 | `selftest_on_start` | none | Templates whose self-test runs once at start, in the background |
 | `allow_root_user` | `false` | May a client ask for uid or gid 0 in a sandbox |
+| `allow_sandbox_uids` | none | Inclusive `[first, last]` uid ranges a client may name as its sandbox's uid besides its own, e.g. `[[60000, 62999]]` |
+| `allow_sandbox_gids` | none | The same for the sandbox's gid besides the client's own gid |
 | `[limits] max_sandboxes` | `64` | Sandboxes alive at once, all clients together. Raise it for many concurrent runs |
 | `[limits] default_ttl_secs` | `1800` | TTL of a sandbox created without one |
 | `[limits] max_ttl_secs` | `86400` | Longest TTL a client may ask for |
@@ -69,6 +71,17 @@ scratch directory in one.
 `SANDCRAB_HOME`) checks that the file parses, the socket directory would pass the start check,
 the allow list, that every mount root exists and lies outside the state directory, the backend
 preflight, and that the templates the config names are present and pinned.
+
+### The sandbox user
+
+A sandbox runs as its client's uid and gid (the peer credentials of the connection). A
+`sandbox.create` that names another `user` is refused with `POLICY_UNENFORCEABLE` unless the
+uid lies in an `allow_sandbox_uids` range and the gid is the client's own or lies in an
+`allow_sandbox_gids` range; uid or gid 0 always needs `allow_root_user`. The reason: a sandbox
+can leave a setuid or setgid file in a read-write mount, and the host honours it as that user
+(Docker cannot mount a bind mount `nosuid`). Allow only ranges of throwaway users that own
+nothing and are in no privileged group, and keep the mount roots on a filesystem mounted
+`nosuid` where you can. A root client may name any user.
 
 ### A client in a container
 
