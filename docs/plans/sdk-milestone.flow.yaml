@@ -42,14 +42,14 @@ steps:
     title: "Revise design + ADR for the review and the MVP scope: records end to end on one connection per process (no second stderr connection, no process.wait, no unary exec); labels in server memory and a new server removes what its predecessor left (no orphan state); allowed roots with the identity path only (no path map); no cross-sandbox nesting rule; server as root on Linux, socket directory mounted, socket group; allowed uids default to the server's own; version + features in server.hello; cancel / abort / unavailable rules; env never logged; API cut to what a launcher needs"
     depends_on: [design-review]
     artifacts: [docs/design/server-and-sdk.md, docs/decisions/0002-server-and-sdk.md]
-    status: doing
+    status: done
 
   - id: adopter-flow
     phase: plan
     agent: nova
     title: "Author the adopter-side flow in the adopter's own repository: suite changes first (program path option, pid assertions skipped without a recovery record, sweep by grouping key), folder sets and grouping key for short execs, a Sandcrab-backed launcher around the local one, deployment changes, then deletions. Not tracked in this repo"
     depends_on: [design-rev]
-    status: todo
+    status: doing
 
   - id: protocol-03
     phase: implement
@@ -57,7 +57,7 @@ steps:
     title: "sandcrab-protocol 0.3 (crabd side): process.open with argv, exact env, cwd, rlimits, stderr tail / merge / stream, caps, timeout; the record format (stdin, stdin EOF, stdout, stderr, exit); cancel; forward.listen / incoming / accept; init.configure options (exec /tmp, pids, nofile, forward ports); hello features; 0.2 refused cleanly; schema snapshots"
     depends_on: [design-rev]
     artifacts: [crates/sandcrab-protocol/src, docs/protocol.md]
-    status: todo
+    status: doing
 
   - id: api-types
     phase: implement
@@ -137,7 +137,7 @@ steps:
     title: "Templates from an existing OCI image: manifest with `external = true` and no Dockerfile, crabd injected, pinned host-locally by `sandcrab template pin`; Docker and the rootfs pipeline; unpinned is refused"
     depends_on: [design-rev]
     artifacts: [crates/sandcrab-core/src/template.rs, crates/sandcrab-rootfs/src, crates/sandcrab-cli/src, docs/template-pins.md]
-    status: todo
+    status: doing
 
   - id: rust-sdk
     phase: implement
