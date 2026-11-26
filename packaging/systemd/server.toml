@@ -3,7 +3,7 @@
 #   sudo SANDCRAB_HOME=/var/lib/sandcrab sandcrab doctor --server-config /etc/sandcrab/server.toml
 
 # The socket's directory holds the socket and nothing else; clients mount the directory.
-socket = "/run/sandcrab/server.sock"
+socket = "/run/sandcrab-server/server.sock"
 # A client in another uid reaches the socket through its group.
 socket_mode = "0660"
 socket_group = "sandcrab"
