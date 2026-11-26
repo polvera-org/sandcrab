@@ -121,7 +121,7 @@ steps:
     title: "Docker backend: forwards with network `none`, exec /tmp option, limits, ad-hoc same-path binds with an identity re-check after start, a sandbox user different from the server's (root server), labels; e2e: no network except the forwards"
     depends_on: [core-streams, guest-forwards, guest-caps]
     artifacts: [crates/sandcrab-backend-docker/src]
-    status: doing
+    status: done
 
   - id: libkrun-backend
     phase: implement
