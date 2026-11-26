@@ -248,9 +248,9 @@ fn rootfs_cache(r: &mut Report, g: &Global, cache_root: &Path, crabd_sha: Option
                 name,
                 Status::Info,
                 format!(
-                    "{} unpinned and not built; `sandcrab template build {}` first",
+                    "{} unpinned and not present; {} first",
                     t.image(),
-                    t.name()
+                    sandcrab_sdk::core::pins::obtain_hint(&t.manifest)
                 ),
             );
             continue;
@@ -612,11 +612,10 @@ pub fn rootfs_cmd(g: &Global, cmd: RootfsCmd) -> anyhow::Result<u8> {
                     })
                     .with_context(|| {
                         format!(
-                            "building the rootfs of `{}` (image {}; is it built? \
-                             `sandcrab template build {}`)",
+                            "building the rootfs of `{}` (image {}; if it is missing, {})",
                             t.name(),
                             t.image(),
-                            t.name()
+                            sandcrab_sdk::core::pins::obtain_hint(&t.manifest)
                         )
                     })?;
                 let m = &built.manifest;
