@@ -73,7 +73,7 @@ steps:
     title: "crabd: one `supervise` child per process as a subreaper (no capability, no unsafe), spec handed over out of band, exact env and argv, records on the connection, tree kill (ask, grace, force) that gets a grandchild which ignores TERM or left the group; first on Docker and libkrun as a spike, then the real thing"
     depends_on: [protocol-03]
     artifacts: [crates/sandcrab-guest/src/supervise.rs, crates/sandcrab-guest/src/proctree.rs, crates/sandcrab-guest/src/server.rs]
-    status: doing
+    status: done
 
   - id: guest-caps
     phase: implement
@@ -81,7 +81,7 @@ steps:
     title: "crabd supervisor limits: rlimits before exec, oom preference, guest-side timeout, output cap with kill or tail, stderr tail / merge / stream, exit after the last byte, nothing left when the call returns; env and stdin never logged"
     depends_on: [guest-supervisor]
     artifacts: [crates/sandcrab-guest/src/supervise.rs]
-    status: todo
+    status: doing
 
   - id: guest-forwards
     phase: implement
@@ -89,7 +89,7 @@ steps:
     title: "crabd forwards: listen on guest 127.0.0.1:<port> for each port set at spawn, announce each connection on the host-held listen connection, relay on the accept connection; loopback only, caps, refusal counters, fails closed"
     depends_on: [guest-supervisor]
     artifacts: [crates/sandcrab-guest/src/forward.rs, crates/sandcrab-guest/src/server.rs, crates/sandcrab-guest/src/main.rs]
-    status: todo
+    status: doing
 
   - id: guest-init
     phase: implement
