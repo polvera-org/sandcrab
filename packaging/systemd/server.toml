@@ -26,6 +26,7 @@ allow_root_user = false
 max_sandboxes = 64
 default_ttl_secs = 1800
 max_ttl_secs = 86400
+max_disk_mb = 32768
 
 # The host directories clients may mount, at the same absolute path in the sandbox.
 [[mount_roots]]

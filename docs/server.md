@@ -72,6 +72,7 @@ program in the sandbox sees its connection closed).
 | `[limits] max_sandboxes` | `64` | Sandboxes alive at once, all clients together. Raise it for many concurrent runs |
 | `[limits] default_ttl_secs` | `1800` | TTL of a sandbox created without one |
 | `[limits] max_ttl_secs` | `86400` | Longest TTL a client may ask for |
+| `[limits] max_disk_mb` | `32768` | Largest `resources.disk_mb` a client may ask for (the scratch drive on libkrun and Firecracker; Docker does not enforce `disk_mb`) |
 | `[[mount_roots]] path`, `mode` | none | Host directories clients may mount (`rw`: ro and rw; `ro`: ro only). No roots: every mount is refused |
 
 `sandcrab doctor --server-config FILE` (run it as the server's user, with the same

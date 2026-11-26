@@ -14,6 +14,8 @@ pub const DEFAULT_MAX_SANDBOXES: u32 = 64;
 pub const DEFAULT_TTL_SECS: u64 = sandcrab_sdk::core::DEFAULT_TTL_SECS;
 /// Longest TTL a client may ask for.
 pub const DEFAULT_MAX_TTL_SECS: u64 = 24 * 60 * 60;
+/// Default `max_disk_mb`: 32 GiB.
+pub const DEFAULT_MAX_DISK_MB: u64 = 32 * 1024;
 /// Default socket mode.
 pub const DEFAULT_SOCKET_MODE: u32 = 0o600;
 
@@ -96,6 +98,9 @@ pub struct LimitsConfig {
     pub default_ttl_secs: u64,
     /// Longest TTL a client may ask for (`null`, no TTL, stays allowed).
     pub max_ttl_secs: u64,
+    /// Largest `resources.disk_mb` a client may ask for (the scratch drive on libkrun and
+    /// Firecracker; a sparse file, so a large one fills the host disk only as it is used).
+    pub max_disk_mb: u64,
 }
 
 impl Default for LimitsConfig {
@@ -104,6 +109,7 @@ impl Default for LimitsConfig {
             max_sandboxes: DEFAULT_MAX_SANDBOXES,
             default_ttl_secs: DEFAULT_TTL_SECS,
             max_ttl_secs: DEFAULT_MAX_TTL_SECS,
+            max_disk_mb: DEFAULT_MAX_DISK_MB,
         }
     }
 }
@@ -229,7 +235,11 @@ impl ServerConfig {
             ));
         }
         let l = &self.limits;
-        if l.max_sandboxes == 0 || l.default_ttl_secs == 0 || l.max_ttl_secs == 0 {
+        if l.max_sandboxes == 0
+            || l.default_ttl_secs == 0
+            || l.max_ttl_secs == 0
+            || l.max_disk_mb == 0
+        {
             return Err(ServerError::Config(
                 "`limits` values must be positive".into(),
             ));
@@ -315,6 +325,7 @@ selftest_on_start = ["base"]
 [limits]
 max_sandboxes = 128
 default_ttl_secs = 600
+max_disk_mb = 8192
 
 [[mount_roots]]
 path = "/srv/app-data"
@@ -332,6 +343,7 @@ mode = "ro"
         assert_eq!(c.allowed_uids(0), [1500]);
         assert_eq!(c.limits.max_sandboxes, 128);
         assert_eq!(c.limits.default_ttl_secs, 600);
+        assert_eq!(c.limits.max_disk_mb, 8192);
         assert_eq!(c.limits.max_ttl_secs, DEFAULT_MAX_TTL_SECS);
         assert_eq!(c.mount_roots[1].mode, MountMode::ReadOnly);
         assert_eq!(c.default_template.as_deref(), Some("base"));
@@ -377,6 +389,7 @@ mode = "ro"
         for extra in [
             "allow_uids = []",
             "[limits]\nmax_sandboxes = 0",
+            "[limits]\nmax_disk_mb = 0",
             "[limits]\ndefault_ttl_secs = 100000",
             "[[mount_roots]]\npath = \"rel\"",
             "default_template = \"\"",

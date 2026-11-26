@@ -480,6 +480,9 @@ pub(crate) fn sandbox_config(
     if over(r.nofile, MAX_NOFILE) {
         return Err(limit("nofile", MAX_NOFILE));
     }
+    if over(r.disk_mb, cfg.limits.max_disk_mb) {
+        return Err(limit("disk_mb", cfg.limits.max_disk_mb));
+    }
     c.resources = ResourceOverrides {
         vcpu: r.vcpu,
         memory_mb: r.memory_mb,

@@ -383,6 +383,14 @@ async fn create_refusals_and_the_sandbox_limit() {
             json!({"template": "base", "resources": {"nofile": 2000000}}),
             -32104,
         ),
+        (
+            json!({"template": "base", "resources": {"disk_mb": 32769}}),
+            -32104,
+        ),
+        (
+            json!({"template": "base", "resources": {"disk_mb": u64::MAX}}),
+            -32104,
+        ),
         // No mount roots configured: every mount is refused.
         (
             json!({"template": "base", "mounts": [{"path": "/tmp", "mode": "ro"}]}),
