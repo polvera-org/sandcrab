@@ -161,7 +161,7 @@ steps:
     title: "New crate sandcrab-server + `sandcrab server`: Unix socket in a private directory, peer-uid check (default: the server's own uid), socket mode and optional group, one explicit backend, allowed mount roots, server.hello, sandbox lifecycle and labels, removal of a predecessor's sandboxes at start, TTL"
     depends_on: [rust-sdk, api-types, byo-image]
     artifacts: [crates/sandcrab-server, crates/sandcrab-cli/src]
-    status: doing
+    status: done
 
   - id: server-streams
     phase: implement
@@ -169,7 +169,7 @@ steps:
     title: "sandcrab-server streams: a connection per process carrying the records, cancel that cannot lose a race with spawn, a closed connection stops its tree; forward notifications and attach connections relayed to the client"
     depends_on: [server-core]
     artifacts: [crates/sandcrab-server/src]
-    status: todo
+    status: doing
 
   - id: server-ops
     phase: implement
