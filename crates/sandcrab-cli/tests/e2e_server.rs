@@ -52,19 +52,37 @@ impl Client {
             .await
             .unwrap();
         self.s.write_all(&body).await.unwrap();
-        let mut h = [0u8; 4];
-        self.s.read_exact(&mut h).await.unwrap();
-        let mut body = vec![0u8; u32::from_be_bytes(h) as usize];
-        self.s.read_exact(&mut body).await.unwrap();
-        let r: Value = serde_json::from_slice(&body).unwrap();
+        let r = loop {
+            let mut h = [0u8; 4];
+            self.s.read_exact(&mut h).await.unwrap();
+            let mut body = vec![0u8; u32::from_be_bytes(h) as usize];
+            self.s.read_exact(&mut body).await.unwrap();
+            let r: Value = serde_json::from_slice(&body).unwrap();
+            // Notifications (`sandbox.destroyed`, ...) carry no id: skip them.
+            if r.get("id").is_some() {
+                break r;
+            }
+        };
         r.get("result")
             .cloned()
             .unwrap_or_else(|| panic!("{method}: {r}"))
     }
 }
 
+/// A `sandcrab server` child that cannot outlive the test: it runs with `--lifeline-stdin`
+/// and this process holds the pipe (closed when the test process dies, also on a kill), and
+/// dropping the guard (also on a panic) kills and reaps it.
+struct ServerChild(Child);
+
+impl Drop for ServerChild {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 /// `sandcrab server` with a private state dir; waits until it accepts.
-async fn start(state: &Path, socket: &Path) -> Child {
+async fn start(state: &Path, socket: &Path) -> ServerChild {
     let child = Command::new(env!("CARGO_BIN_EXE_sandcrab"))
         .arg("--backend=docker")
         .arg("--state-dir")
@@ -74,9 +92,11 @@ async fn start(state: &Path, socket: &Path) -> Child {
         .arg("server")
         .arg("--socket")
         .arg(socket)
-        .stdin(Stdio::null())
+        .arg("--lifeline-stdin")
+        .stdin(Stdio::piped())
         .spawn()
         .expect("start sandcrab server");
+    let child = ServerChild(child);
     let deadline = Instant::now() + Duration::from_secs(60);
     while UnixStream::connect(socket).await.is_err() {
         assert!(Instant::now() < deadline, "the server did not start");
@@ -130,8 +150,8 @@ async fn server_on_docker_create_list_destroy_and_restart_reaps() {
     let b = c.call("sandbox.create", json!({"template": "base"})).await;
     let id_b = b["sandbox_id"].as_str().unwrap().to_owned();
     drop(c);
-    first.kill().unwrap();
-    first.wait().unwrap();
+    first.0.kill().unwrap();
+    first.0.wait().unwrap();
     assert_eq!(containers_of(&id_b), 1, "the container outlives its server");
 
     // A new server removes it at start and lists nothing.
@@ -148,11 +168,11 @@ async fn server_on_docker_create_list_destroy_and_restart_reaps() {
     let d = c.call("sandbox.create", json!({"template": "base"})).await;
     let id_d = d["sandbox_id"].as_str().unwrap().to_owned();
     let ok = Command::new("kill")
-        .args(["-TERM", &second.id().to_string()])
+        .args(["-TERM", &second.0.id().to_string()])
         .status()
         .unwrap();
     assert!(ok.success());
-    let status = second.wait().unwrap();
+    let status = second.0.wait().unwrap();
     assert!(status.success(), "{status}");
     assert_eq!(containers_of(&id_d), 0);
     assert!(!socket.exists());
