@@ -216,7 +216,7 @@ steps:
     agent: nova
     title: "Live on the Linux VPS (Docker, no KVM): root server as a systemd service; client in a hardened container with the socket directory and a host data directory bound at the same path; external template; a monorepo install + build + test through a forward to a proxy in the client's container; server restart without a container restart. Targets: a forwarded stream at 50 MB/s, 16 parallel connections with no reset, warm exec p50 at or under 30 ms; self-test green"
     depends_on: [ts-e2e]
-    status: doing
+    status: done
 
   - id: live-mac
     phase: verify
