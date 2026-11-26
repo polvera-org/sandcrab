@@ -121,6 +121,12 @@ pub(crate) async fn run(
         socket,
     } = server;
     let mut conns = JoinSet::new();
+    // Background work that ends with the server: the TTL watcher and the self-tests at start.
+    let mut background = JoinSet::new();
+    background.spawn(crate::watch::watch(Arc::clone(&shared)));
+    if !shared.config.selftest_on_start.is_empty() {
+        background.spawn(crate::selftest::on_start(Arc::clone(&shared)));
+    }
     tokio::pin!(shutdown);
     loop {
         tokio::select! {
@@ -145,6 +151,7 @@ pub(crate) async fn run(
 
     tracing::info!("sandcrab server stopping: cancelling processes, destroying every sandbox");
     shared.shutting_down.store(true, Ordering::SeqCst);
+    background.abort_all();
     drop(listener);
     shared.hub.notify(
         None,

@@ -13,6 +13,8 @@
 //! control.rs    a control connection: `server.hello`, then the sandbox calls
 //! process.rs    a process connection (`process.spawn`), the process table, `process.cancel`
 //! forwards.rs   control connections and forwards: `forward.incoming`, `forward.attach`
+//! selftest.rs   `server.selftest`: one run at a time per template, the last report kept
+//! watch.rs      `sandbox.destroyed` for sandboxes the TTL reaper destroyed
 //! wire.rs       async frames
 //! ```
 //!
@@ -27,6 +29,8 @@ mod lifecycle;
 mod listener;
 pub mod peer;
 mod process;
+mod selftest;
+mod watch;
 mod wire;
 
 use std::collections::HashMap;
@@ -150,6 +154,10 @@ pub(crate) struct Shared {
     pub hub: Arc<forwards::Hub>,
     /// Process connections by `process_id`.
     pub processes: process::Processes,
+    /// Self-test runs and the last report per template.
+    pub selftests: selftest::Selftests,
+    /// Last seen expiry of each sandbox, to tell a TTL reap from a destroy.
+    pub expiries: watch::Expiries,
 }
 
 impl Shared {
@@ -179,6 +187,8 @@ impl Shared {
             shutting_down: AtomicBool::new(false),
             hub: Arc::default(),
             processes: process::Processes::default(),
+            selftests: selftest::Selftests::default(),
+            expiries: watch::Expiries::default(),
         }
     }
 
@@ -200,21 +210,22 @@ impl Shared {
     }
 
     /// Drop owner records (and who served their forwards) of sandboxes that are gone (TTL,
-    /// backend exit).
+    /// backend exit); announce the expired ones.
     pub(crate) fn prune_owners(&self) {
-        let live: std::collections::HashSet<SandboxId> = self
-            .sandcrab
-            .list_sandboxes()
-            .into_iter()
-            .map(|i| i.id)
-            .collect();
-        self.owners().retain(|id, _| {
-            let keep = live.contains(id);
-            if !keep {
-                self.hub.forget(*id);
-            }
-            keep
-        });
+        self.expiries.sweep(self);
+    }
+
+    /// The sandboxes that have an owner now.
+    pub(crate) fn owned_ids(&self) -> Vec<SandboxId> {
+        self.owners().keys().copied().collect()
+    }
+
+    /// Remove the owner records of `ids`; returns those that were there, with their uid.
+    pub(crate) fn take_owners(&self, ids: &[SandboxId]) -> Vec<(SandboxId, u32)> {
+        let mut owners = self.owners();
+        ids.iter()
+            .filter_map(|id| owners.remove(id).map(|uid| (*id, uid)))
+            .collect()
     }
 
     /// Take a sandbox slot or answer `LIMIT_EXCEEDED`. The slot is returned when the guard

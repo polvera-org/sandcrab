@@ -134,7 +134,6 @@ Host setup for every backend: [`docs/hosting.md`](docs/hosting.md).
    digests, N3 quarantine cleared through the fd) are the `integrity-fixes` step; then R10 (sign and notarize with a
    real Developer ID; note that `sandcrab libkrun install` re-signs every helper), the `doctor` checks for swap and
    TSI precedence, I1 (fd passing for Firecracker drives before the jailer), R9 (setuid bits on virtio-fs shares).
-   Also drop the stale "e2e pending" note from the libkrun `doctor` summary.
 2. Benchmarks ([`docs/bench/README.md`](docs/bench/README.md#open-bench-todo)): Docker vs libkrun on mac-m2 in an idle
    weekend window (`--backends docker,libkrun`); one valid, interleaved `docker,firecracker,libkrun` run on an SSD/NVMe
    KVM host (kvm-dedicated's HDDs skew Docker). Then regenerate `docs/site/bench-report.html`

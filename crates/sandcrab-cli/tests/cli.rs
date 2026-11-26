@@ -344,7 +344,7 @@ fn firecracker_doctor_section() {
     }
     let summary = find(&v, "firecracker");
     let detail = summary["detail"].as_str().unwrap();
-    assert!(detail.contains("e2e pending"), "{detail}");
+    assert!(!detail.contains("e2e pending"), "{detail}");
     if !kvm_usable() {
         assert!(
             detail.starts_with("Firecracker: unavailable (") && detail.contains("/dev/kvm"),
