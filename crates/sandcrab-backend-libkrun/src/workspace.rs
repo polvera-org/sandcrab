@@ -7,8 +7,16 @@
 //!   (`MS_RDONLY`, from [`GuestMount::read_only`]).
 //! - **Block-volume workspaces** are attached with `krun_add_disk` (parity with Firecracker).
 //!
-//! **Tag scheme:** mount `n` (its index in `ResolvedSpec::mounts`) gets the tag / block id
-//! `ws<n>`. That is 3–4 bytes of `[a-z0-9]`, so it satisfies the guest rule (1–36 bytes of
+//! - **Ad-hoc host mounts** (`ResolvedSpec::host_mounts`) are virtio-fs shares like host-dir
+//!   workspaces, mounted in the guest at the same absolute path as on the host. The guest's
+//!   root is an overlay (read-only rootfs image below, the per-sandbox scratch drive above),
+//!   so `crabd init` creates a mount point that the image does not have on the scratch
+//!   layer, one component at a time and never through a symlink; the rootfs image itself is
+//!   never written. A host mount may not replace a directory the guest runs from
+//!   ([`check_host_mount_target`]).
+//!
+//! **Tag scheme:** mount `n` (its index in `ResolvedSpec::mounts` followed by
+//! `ResolvedSpec::host_mounts`) gets the tag / block id `ws<n>`. That is 3–4 bytes of `[a-z0-9]`, so it satisfies the guest rule (1–36 bytes of
 //! `[A-Za-z0-9_.:-]`), the helper's stricter device-id rule (`[A-Za-z0-9_-]`) and the 20-byte
 //! virtio-blk serial limit, and it is unique by construction. It never collides with the
 //! `rootfs` / `scratch` drive ids.
@@ -53,9 +61,60 @@ pub struct MountPlan {
     pub guest_mounts: Vec<GuestMount>,
 }
 
-/// Plan every mount, re-verifying dir-backed roots against their lease identity.
-pub fn plan_mounts(mounts: &[ResolvedMount]) -> Result<MountPlan> {
-    plan_with(mounts, |m| {
+/// Guest directories a host mount may not replace: the image's programs, libraries and
+/// configuration, and the directories `crabd init` mounts or uses itself. A mount *below*
+/// one of them (`/var/lib/app`, `/tmp/build`) is fine; `/` and everything under `/proc`,
+/// `/sys`, `/dev`, `/run/sandcrab` and `/opt/sandcrab` are already refused by
+/// `sandcrab_core::validate_mount_target`.
+pub const GUEST_SYSTEM_DIRS: &[&str] = &[
+    "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32", "/usr", "/etc", "/var", "/opt", "/mnt",
+    "/run", "/tmp", "/boot", "/root",
+];
+
+/// Guest directories no host mount may be inside: `crabd init`'s own tmpfs and the scratch
+/// drive behind the root overlay.
+pub const GUEST_RESERVED_TREES: &[&str] = &["/run", "/mnt/scratch"];
+
+/// Refuse a host mount whose guest path (equal to its host path) would hide a directory the
+/// guest needs: one of [`GUEST_SYSTEM_DIRS`], a direct child of `/usr` (`/usr/bin`,
+/// `/usr/lib`, `/usr/local`, ...), or anything inside [`GUEST_RESERVED_TREES`].
+pub fn check_host_mount_target(path: &Path) -> Result<()> {
+    let refused = |why: String| SandboxError::MountNotAllowed {
+        path: path.to_path_buf(),
+        reason: why,
+        cap: None,
+    };
+    if GUEST_SYSTEM_DIRS.iter().any(|d| path == Path::new(d))
+        || path.parent() == Some(Path::new("/usr"))
+    {
+        return Err(refused(
+            "mounted at the same path in a libkrun guest it would replace a system directory \
+             of the sandbox; mount a directory below it"
+                .into(),
+        ));
+    }
+    if let Some(tree) = GUEST_RESERVED_TREES.iter().find(|t| path.starts_with(t)) {
+        return Err(refused(format!(
+            "`{tree}` is reserved inside a libkrun guest"
+        )));
+    }
+    Ok(())
+}
+
+/// Plan every mount (workspaces, then host mounts), re-verifying dir-backed roots against
+/// their identity from lease / resolution time.
+pub fn plan_mounts(mounts: &[ResolvedMount], host_mounts: &[ResolvedMount]) -> Result<MountPlan> {
+    for m in host_mounts {
+        check_host_mount_target(&m.guest_path)?;
+        if m.host_path != m.guest_path || !m.backing.is_dir() {
+            return Err(SandboxError::InvalidConfig(format!(
+                "host mount `{}` must be a directory mounted at its own path",
+                m.host_path.display()
+            )));
+        }
+    }
+    let all: Vec<ResolvedMount> = mounts.iter().chain(host_mounts).cloned().collect();
+    plan_with(&all, |m| {
         sandcrab_core::verify_workspace_root(&m.workspace_name, &m.host_path, m.root_identity).map(
             |id| HostIdentity {
                 dev: id.dev,
@@ -293,20 +352,126 @@ mod tests {
             MountMode::ReadWrite,
         );
         m.root_identity = None;
-        let p = plan_mounts(std::slice::from_ref(&m)).unwrap();
+        let p = plan_mounts(std::slice::from_ref(&m), &[]).unwrap();
         let id = p.shares[0].identity.unwrap();
         // The planned identity is the real one: pinning it on the lease passes…
         m.root_identity = Some(RootIdentity {
             dev: id.dev,
             ino: id.ino,
         });
-        plan_mounts(std::slice::from_ref(&m)).unwrap();
+        plan_mounts(std::slice::from_ref(&m), &[]).unwrap();
         // …and a different one (root replaced since the lease) is refused.
         m.root_identity = Some(RootIdentity {
             dev: id.dev,
             ino: id.ino + 1,
         });
-        assert!(plan_mounts(std::slice::from_ref(&m)).is_err());
+        assert!(plan_mounts(std::slice::from_ref(&m), &[]).is_err());
+    }
+
+    fn host_mount(path: &Path, mode: MountMode) -> ResolvedMount {
+        ResolvedMount {
+            workspace_id: WorkspaceId::new(),
+            workspace_name: path.display().to_string(),
+            backing: WorkspaceBacking::HostDir(path.to_path_buf()),
+            host_path: path.to_path_buf(),
+            guest_path: path.to_path_buf(),
+            mode,
+            generation: 0,
+            root_identity: None,
+        }
+    }
+
+    #[test]
+    fn host_mounts_are_shares_at_the_same_path_after_the_workspaces() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let (ws, deep, ro) = (root.join("ws"), root.join("a/b/c"), root.join("ro"));
+        for d in [&ws, &deep, &ro] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let mut w = mount(
+            WorkspaceBacking::HostDir(ws.clone()),
+            "/workspace",
+            MountMode::ReadWrite,
+        );
+        w.root_identity = None;
+        let hosts = [
+            host_mount(&deep, MountMode::ReadWrite),
+            host_mount(&ro, MountMode::ReadOnly),
+        ];
+        let p = plan_mounts(&[w], &hosts).unwrap();
+        let shares: Vec<_> = p
+            .shares
+            .iter()
+            .map(|s| (s.tag.as_str(), s.host_path.as_path(), s.read_only))
+            .collect();
+        assert_eq!(
+            shares,
+            [
+                ("ws0", ws.as_path(), false),
+                ("ws1", deep.as_path(), false),
+                ("ws2", ro.as_path(), true),
+            ]
+        );
+        assert!(p.shares.iter().all(|s| s.identity.is_some()));
+        assert_eq!(
+            p.guest_mounts[1..],
+            [
+                GuestMount::virtio_fs("ws1", &deep, false),
+                GuestMount::virtio_fs("ws2", &ro, true),
+            ]
+        );
+
+        // The identity from resolution time is checked again: a replaced directory is refused.
+        let mut swapped = host_mount(&deep, MountMode::ReadWrite);
+        let id = p.shares[1].identity.unwrap();
+        swapped.root_identity = Some(RootIdentity {
+            dev: id.dev,
+            ino: id.ino + 1,
+        });
+        let err = plan_mounts(&[], &[swapped]).unwrap_err();
+        assert!(
+            matches!(err, SandboxError::WorkspaceRootChanged(_)),
+            "{err}"
+        );
+
+        // Never a guest path that differs from the host path.
+        let mut moved = host_mount(&deep, MountMode::ReadOnly);
+        moved.guest_path = "/elsewhere".into();
+        assert!(plan_mounts(&[], &[moved]).is_err());
+    }
+
+    #[test]
+    fn host_mounts_never_replace_guest_system_directories() {
+        for p in GUEST_SYSTEM_DIRS.iter().copied().chain([
+            "/usr/bin",
+            "/usr/lib",
+            "/usr/local",
+            "/run/user",
+            "/mnt/scratch/upper",
+        ]) {
+            let err = check_host_mount_target(Path::new(p)).unwrap_err();
+            assert!(
+                matches!(&err, SandboxError::MountNotAllowed { path, .. } if path == Path::new(p)),
+                "{p}: {err}"
+            );
+            // Refused before anything is opened on the host.
+            assert!(plan_mounts(&[], &[host_mount(Path::new(p), MountMode::ReadOnly)]).is_err());
+        }
+        for p in [
+            "/home/dev/project",
+            "/Users/u/project",
+            "/private/tmp/x",
+            "/tmp/build",
+            "/var/lib/app",
+            "/usr/local/share/app",
+            "/etc/app",
+            "/srv",
+            "/data",
+            "/mnt/data",
+        ] {
+            check_host_mount_target(Path::new(p)).unwrap_or_else(|e| panic!("{p}: {e}"));
+        }
     }
 
     #[test]
