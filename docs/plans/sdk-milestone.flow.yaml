@@ -97,7 +97,7 @@ steps:
     title: "crabd init (microVM): exec-capable /tmp and its size, pids and nofile limits, forward ports through init.configure"
     depends_on: [protocol-03]
     artifacts: [crates/sandcrab-guest/src/init]
-    status: doing
+    status: done
 
   - id: core-config
     phase: implement
