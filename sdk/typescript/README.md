@@ -81,4 +81,5 @@ pnpm pack        # the tarball to install by file or URL
 The wire types in `src/generated/api.ts` come from `schema/server-api.schema.json`, a copy of
 `crates/sandcrab-protocol/tests/snapshots/server-api.schema.json`. After the Rust snapshot
 changes: `pnpm sync-schema && pnpm generate`. A unit test fails when either is stale.
-End-to-end tests against a real server go in `test/e2e` (`pnpm test:e2e`).
+End-to-end tests against a real server on Docker are in `test/e2e` (`pnpm test:e2e`; see its README
+for the binaries and variables they need).

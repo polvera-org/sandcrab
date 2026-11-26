@@ -24,6 +24,8 @@ export interface SandboxSpec {
   user?: { uid: number; gid: number };
   resources?: { vcpu?: number; memoryMb?: number; diskMb?: number; pidsMax?: number; nofile?: number };
   tmpExec?: boolean;
+  /** Size of the sandbox's `/tmp` in MiB. Absent: the template's or backend's default. */
+  tmpSizeMb?: number;
 }
 
 export interface Sandbox {
@@ -102,6 +104,7 @@ async function prepareCreate(spec: SandboxSpec): Promise<{ params: SandboxCreate
     if (typeof spec.tmpExec !== "boolean") throw new InvalidSpecError("`tmpExec` must be a boolean");
     params.tmp_exec = spec.tmpExec;
   }
+  if (spec.tmpSizeMb !== undefined) params.tmp_size_mb = positiveInt(spec.tmpSizeMb, "tmpSizeMb");
   if (spec.forwards !== undefined && spec.forwards.length > 0) {
     validateForwards(spec.forwards);
     params.forwards = spec.forwards.map((f) => (f.maxConnections === undefined ? { guest_port: f.guestPort } : { guest_port: f.guestPort, max_connections: f.maxConnections }));

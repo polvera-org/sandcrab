@@ -26,6 +26,7 @@ test("create sends the spec in wire form and resolves mount paths", async (t) =>
     user: { uid: 1500, gid: 1500 },
     resources: { vcpu: 2, memoryMb: 512, pidsMax: 256, nofile: 1024 },
     tmpExec: true,
+    tmpSizeMb: 64,
   });
   assert.deepEqual(sandbox.mounts, [{ path: asked, resolvedPath: resolved, mode: "rw" }]);
   assert.deepEqual(server.calls.at(-1), {
@@ -38,6 +39,7 @@ test("create sends the spec in wire form and resolves mount paths", async (t) =>
       user: "1500:1500",
       resources: { vcpu: 2, memory_mb: 512, pids_max: 256, nofile: 1024 },
       tmp_exec: true,
+      tmp_size_mb: 64,
       mounts: [{ path: resolved, mode: "rw" }],
     },
   });
@@ -63,6 +65,7 @@ test("a malformed spec is an InvalidSpecError and nothing is sent", async (t) =>
     { template: "base", network: "open" as "disabled" },
     { template: "base", user: { uid: -1, gid: 0 } },
     { template: "base", resources: { vcpu: 0 } },
+    { template: "base", tmpSizeMb: 0 },
     { template: "base", forwards: [{ guestPort: 0, target: { port: 80 } }] },
     { template: "base", forwards: [{ guestPort: 80, target: { port: 80, host: "10.0.0.1" as "::1" } }] },
     { template: "base", forwards: [{ guestPort: 80, target: { port: 80 } }, { guestPort: 80, target: { port: 81 } }] },

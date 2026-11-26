@@ -156,6 +156,28 @@ async fn stdin_stays_open_until_eof_and_null_stdin_refuses_records() {
 }
 
 #[tokio::test]
+async fn a_program_that_exits_without_reading_its_stdin_still_reports_its_exit() {
+    let h = Harness::new(|_, _| {}).await;
+    let mut c = h.client().await;
+    let sb = sandbox(&mut c, json!({})).await;
+    let chunk = vec![b'x'; 65536];
+    for _ in 0..5 {
+        let mut p = Client::spawn_ok(
+            &h.socket,
+            &spawn_params(&sb, &["exit", "0"], json!({"stdin": "pipe"})),
+        )
+        .await;
+        // More than the connections buffer: the guest is gone before the last write.
+        for _ in 0..64 {
+            p.record(STDIN, &chunk).await;
+        }
+        p.record(STDIN_EOF, b"").await;
+        let (_, _, exit) = p.drain().await;
+        assert_eq!(exit.expect("EXIT, not a bare close")["code"], 0);
+    }
+}
+
+#[tokio::test]
 async fn a_client_that_stops_reading_stops_the_program_and_memory_stays_bounded() {
     let h = Harness::new(|_, _| {}).await;
     let mut c = h.client().await;

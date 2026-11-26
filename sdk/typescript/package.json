@@ -33,7 +33,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "build": "rm -rf dist && tsc -p tsconfig.build.json && node scripts/fix-declarations.mjs",
     "test": "node --test --test-timeout=30000 \"test/unit/*.test.ts\"",
-    "test:e2e": "node --test --test-timeout=300000 \"test/e2e/*.test.ts\"",
+    "test:e2e": "node --test --test-concurrency=1 --test-timeout=600000 \"test/e2e/*.test.ts\"",
     "prepack": "pnpm build"
   },
   "devDependencies": {

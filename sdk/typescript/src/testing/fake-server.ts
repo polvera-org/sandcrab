@@ -2,7 +2,7 @@
 // It speaks the real framing and records on a temporary Unix socket and keeps sandboxes in
 // memory. It runs no program: a test scripts each process with `onSpawn`.
 
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
@@ -177,12 +177,13 @@ export class FakeServer {
   readonly #serving = new Map<string, Control>();
   readonly #forwards = new Map<string, PendingForward>();
   readonly #tmpDir: string | null;
+  /** `process.cancel` for ids no spawn has named yet (the real server keeps them 60 s). */
+  readonly #earlyCancels = new Set<string>();
   #spawn: (p: FakeProcess) => unknown = (p) => {
     p.ack();
     p.exit();
   };
   #server: net.Server | null = null;
-  #nextSandbox = 1;
 
   private constructor(o: FakeServerOptions) {
     if (o.socketPath) {
@@ -226,6 +227,7 @@ export class FakeServer {
       this.sandboxes.clear();
       this.#serving.clear();
       this.#reports.clear();
+      this.#earlyCancels.clear();
       for (const f of this.#forwards.values()) f.reject(new Error("the fake server stopped"));
       this.#forwards.clear();
       if (server) server.close(() => resolve());
@@ -309,7 +311,7 @@ export class FakeServer {
       if (msg.method === "server.hello") this.#control(sock, msg, rest);
       else if (msg.method === "process.spawn") this.#process(sock, msg, rest);
       else if (msg.method === "forward.attach") this.#attach(sock, msg, rest);
-      else sock.end(encodeFrame({ jsonrpc: "2.0", id: msg.id ?? null, error: { code: CODE_INVALID_REQUEST, message: "not a first frame" } }));
+      else sock.end(encodeFrame({ jsonrpc: "2.0", id: msg.id ?? null, error: { code: CODE_INVALID_REQUEST, message: "not a first frame", data: { detail: "not a first frame" } } }));
     };
     sock.on("readable", first);
   }
@@ -364,7 +366,7 @@ export class FakeServer {
       const result = await (custom ? custom(params ?? {}, builtin) : builtin());
       reply = { jsonrpc: "2.0", id, result: result ?? {} };
     } catch (e) {
-      const err = e instanceof FakeRpcError ? { code: e.code, message: e.message, data: e.data } : { code: -32603, message: String(e) };
+      const err = e instanceof FakeRpcError ? { code: e.code, message: e.message, data: e.data } : { code: -32603, message: String(e), data: { detail: String(e) } };
       reply = { jsonrpc: "2.0", id, error: err };
     }
     if (!control.socket.destroyed) control.socket.write(encodeFrame(reply));
@@ -407,7 +409,7 @@ export class FakeServer {
       }
       case "sandbox.create": {
         const c = p as SandboxCreate;
-        const id = `sb-${this.#nextSandbox++}`;
+        const id = randomUUID();
         const ttl = c.ttl_secs === undefined ? 1800 : c.ttl_secs;
         const info: SandboxInfo = {
           sandbox_id: id,
@@ -444,11 +446,16 @@ export class FakeServer {
       }
       case "process.cancel": {
         const proc = this.processes.get(p.process_id);
-        if (!proc || proc.finished) return { was_running: false, tree_clean: true };
+        if (!proc) {
+          // Not seen yet: remembered, so a spawn of this id still on its way is answered CANCELLED.
+          this.#earlyCancels.add(p.process_id);
+          return { was_running: false, tree_clean: true };
+        }
+        if (proc.finished) return { was_running: false, tree_clean: true };
         proc._resolveCancel(p.grace_ms ?? 5000);
         if (!proc.acked) {
           // Registered but not open yet: the cancel is remembered and the spawn answers CANCELLED.
-          proc.fail(CODE_CANCELLED, "cancelled before the program started");
+          proc.fail(CODE_CANCELLED, "cancelled before the program started", { detail: "cancelled before the program started" });
           return { was_running: false, tree_clean: true };
         }
         proc.exit({ code: null, signal: p.grace_ms === 0 ? 9 : 15, cancelled: true });
@@ -471,14 +478,16 @@ export class FakeServer {
         return {};
       }
       default:
-        throw new FakeRpcError(CODE_METHOD_NOT_FOUND, `no such method: ${method}`);
+        throw new FakeRpcError(CODE_METHOD_NOT_FOUND, `no such method: ${method}`, { detail: method });
     }
   }
 
   #process(sock: net.Socket, msg: any, rest: Buffer): void {
     const params = msg.params as ProcessSpawnParams;
     const proc = new FakeProcess(sock, msg.id, params);
-    if (this.processes.has(params.process_id)) return proc.fail(ERROR_CODES.CONFLICT, "process_id used twice", { detail: "process_id used twice" });
+    // As the real server: an id is in conflict only while the first process with it lives.
+    if (this.processes.get(params.process_id)?.finished === false) return proc.fail(ERROR_CODES.CONFLICT, "process_id used twice", { detail: `process_id ${params.process_id} is already in use` });
+    if (this.#earlyCancels.delete(params.process_id)) return proc.fail(CODE_CANCELLED, "cancelled before the program started", { detail: "cancelled before the program started" });
     this.processes.set(params.process_id, proc);
     const records = new RecordDecoder();
     const onData = (chunk: Buffer): void => {
@@ -514,7 +523,7 @@ export class FakeServer {
     const connId = msg.params?.conn_id;
     const f = this.#forwards.get(connId);
     if (!f) {
-      sock.end(encodeFrame({ jsonrpc: "2.0", id: msg.id, error: { code: -32004, message: "unknown conn_id" } }));
+      sock.end(encodeFrame({ jsonrpc: "2.0", id: msg.id, error: { code: -32004, message: "unknown conn_id", data: { detail: "no announced connection with this conn_id" } } }));
       return;
     }
     this.#forwards.delete(connId);
