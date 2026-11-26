@@ -1,15 +1,40 @@
 # Server, TypeScript SDK and forwards: design
 
-Status: design for the `sdk-milestone` flow ([plan](../plans/sdk-milestone.plan.mdx),
+Status: **implemented** (2026-11-26) by the `sdk-milestone` flow ([plan](../plans/sdk-milestone.plan.mdx),
 [flow](../plans/sdk-milestone.flow.yaml)). Decisions are recorded in
-[ADR 0002](../decisions/0002-server-and-sdk.md). Date: 2026-11-26.
+[ADR 0002](../decisions/0002-server-and-sdk.md). What was verified, where, and the measured numbers:
+[reviews/sdk-milestone-results.md](../reviews/sdk-milestone-results.md). Operator guide:
+[server.md](../server.md). Wire reference: [protocol.md](../protocol.md).
 
-This page is the build contract for the flow's implement steps. Facts about today's code carry a
-`path:line` reference. Anything not checked against the code is marked **not verified** and listed in §16.
+This page was the build contract for the flow's implement steps. Facts about the code before the
+milestone carry a `path:line` reference; those line numbers are from that time and have moved since.
+The text below has been corrected where the build differs, and each correction is listed here.
+
+## As built: what changed against this design
+
+| § | The design said | As built |
+| --- | --- | --- |
+| Scope, §12.1, §12.2 | Every admitted client controls every sandbox | **A sandbox belongs to the peer uid that created it.** Another uid gets `SANDBOX_NOT_FOUND` for it, never sees it in a list, cannot cancel its processes or attach to its forwards |
+| §3.5 | The spec goes to `crabd supervise` in a `memfd` on fd 2; the connection is its stdin and stdout; cancel is two signals | The spec and later cancel bytes go over a **control pipe** on the supervisor's stdin; the connection is its stdout; stderr is inherited. No `memfd` |
+| §3.5, §12.3 | `crabd serve` is a subreaper too and kills what a dead supervisor leaves | **Only the per-process supervisor is a subreaper.** A program that kills its supervisor leaves its tree running until the sandbox is destroyed; the exit says `tree_clean: false` (§3.5, Known limits) |
+| §3.4, §5.4 | Early cancels are remembered | Remembered for 60 s, at most 1024 ids, in `crabd` and in the server alike |
+| §4.2 | Forward caps per forward are set per forward | `crabd` holds a fixed 64 per forward and 256 per sandbox; a lower `max_connections` is enforced on the host by rejecting. Connection ids are a counter from 1 |
+| §5.3 | `sandbox.destroyed` for `destroyed`, `ttl`, `backend_exit` | Sent to the owner uid's control connections for explicit destroys and TTL expiry. `backend_exit` is never sent |
+| §5.6 | Fixed limits | Plus `max_disk_mb` (config), a server-wide cap on forwarded connections, and connection caps sized from `RLIMIT_NOFILE`, which the server raises at start |
+| §5.9, §6.4 | Any non-zero `user` is accepted | A sandbox runs as its client's uid and gid. Another uid or gid needs `allow_sandbox_uids` / `allow_sandbox_gids` |
+| §5.10 | Socket directory unspecified in places | `/run/sandcrab-server`. Not `/run/sandcrab`, which every sandbox uses for `crabd`'s own socket |
+| §6.2 | 16 mounts on every backend | 16 on Docker and on libkrun on Apple Silicon (64 measured to boot there). **libkrun on x86_64 boots at most 4** directory mounts (3 with a NIC); `max_mounts` reports the backend's real room |
+| §6.1 | Mount points must exist in the image | libkrun's guest root is an overlay, so `crabd init` creates a missing mount point on the scratch layer. No image change. Some system directories are refused as mount targets |
+| §8 | The self-test runs as the server's sandbox default | It runs **as the calling peer's uid:gid**, makes its scratch directory through descriptors only, and keeps one report per template and user. A template never tested reports `selftest: null`, read as "not proven" |
+| §11 | `nix` for macOS peer credentials | Tokio's `peer_cred` on both platforms; no `nix` in `sandcrab-server` |
+| §16 | Twelve open points | Settled; results in §16 |
+
+## Words and scope
 
 **Scope: an MVP.** The common case is one user on a Mac or a Linux box, at most two or three users on
-one host. The defaults are safe. There is no multi-tenant machinery: every client the server admits
-controls every sandbox on it.
+one host. The defaults are safe. There is no multi-tenant machinery. Clients of different uids are kept
+apart by ownership (a sandbox belongs to the uid that created it); clients of the same uid share
+everything.
 
 Words used here: the **client** is a program that talks to the server through an SDK. The **adopter** is
 the first such program. Its **launcher interface** is the one interface through which it starts every
@@ -115,7 +140,7 @@ adopter's adapter.
 | --- | --- | --- |
 | 1 | Exact env, no shell | The supervisor clears the environment and passes argv to `execve` unparsed (G). Self-test line `exec-env-exact` |
 | 2 | Never throws at run time; only a malformed spec throws, before anything starts | The SDK validates the spec synchronously and turns every later failure into an exit or outcome (K) |
-| 3 | Nothing outlives the handle | Tree kill by the supervisor (§3.5); the tree dies with its leader; a closed connection stops the tree (G) |
+| 3 | Nothing outlives the handle | Tree kill by the supervisor (§3.5); the tree dies with its leader; a closed connection stops the tree (G). Exception: a program that kills its supervisor; the exit then says `tree_clean: false` and the client must destroy the sandbox |
 | 4 | Output ordered and complete up to the caps; exit after the last byte | One reader per pipe, one connection per process, backpressure end to end (G, S); `EXIT` is the last record |
 | 5 | `host` runs on the host | Outside Sandcrab (A) |
 | 6 | At most what was declared | Allowed roots and non-nesting (S); network `disabled` plus forwards (backend, G); a part that cannot be enforced shows up in the self-test, not at spawn |
@@ -301,9 +326,9 @@ A closed process connection is the other way to stop a process: `crabd` treats i
 6. answers the `process.open` request on the connection (ack or `SPAWN_FAILED`),
 7. pumps records until the tree is gone, then writes `EXIT` and exits.
 
-It asks for no signal on its parent's death: the closed connection and `crabd serve` as a subreaper cover
-that case, and such a signal follows the thread that started the child, which is wrong under a
-multi-thread runtime (`crates/sandcrab-guest/src/main.rs:138-139`).
+It asks for no signal on its parent's death: a closed connection or a closed control pipe covers that
+case, and such a signal follows the thread that started the child, which is wrong under a multi-thread
+runtime (`crates/sandcrab-guest/src/main.rs:138-139`).
 
 A subreaper becomes the parent of every descendant whose own parent died. A grandchild that calls
 `setsid`, leaves the process group or double-forks is still a descendant of the supervisor, so it stays
@@ -327,23 +352,25 @@ Stopping a tree:
 - `crabd serve` authenticates the connection and reads the `process.open` frame. `read_frame` reads
   exact lengths with no buffered reader (`crates/sandcrab-guest/src/codec.rs:21`), so nothing after the
   frame is consumed.
-- It writes the spec to an anonymous in-memory file (`memfd_create`) and starts `crabd supervise` with
-  the **connection as stdin and stdout** and the **memory file as stderr**. All three go through
-  `Stdio::from(OwnedFd)`. The spec, with its env, therefore never appears on a command line.
-- The supervisor reads the spec from descriptor 2, then talks records directly on descriptors 0 and 1.
-  `crabd serve` is not in the data path.
+- As built, it starts `crabd supervise` with three descriptors, all through `Stdio::from(OwnedFd)`:
+  - **stdin: the read end of a control pipe.** `crabd serve` writes the spec (the request id and the
+    params, env included) as one frame, then keeps the pipe for cancel bytes (`A` for ask, `F` for
+    force). The spec, with its env, never appears on a command line, and a cancel is ordered after the
+    spec without a signal race. End-of-file on the pipe (`crabd serve` stopped or died) stops the tree.
+  - **stdout: the connection itself**, a duplicate of the Unix, TCP or vsock socket. `crabd serve` drops
+    its own copy after the start and is not in the data path.
+  - **stderr: inherited**, so the supervisor's logs go where `crabd serve`'s go.
+- The descriptor handed over is non-blocking (Tokio set it, and the flag lives in the open file
+  description). The supervisor keeps it that way and drives it with its own single-thread Tokio runtime.
 - The program gets pipes the supervisor creates, or one pipe for both with `merge`.
 
-What exists already: `rustix::process::set_child_subreaper` is in use
-(`crates/sandcrab-guest/src/init/reap.rs:87`). `tokio-vsock` 0.7 streams implement `AsFd`, so a vsock
-connection can be duplicated into an `OwnedFd` like a Unix socket. The locked `rustix` 1.1.6 has
-`memfd_create`, `setrlimit` and `set_dumpable_behavior` as safe functions (read in its source, not yet
-compiled into `crabd`).
+The design first put the spec in a `memfd` on descriptor 2. The control pipe replaced it because the
+supervisor needs a channel for cancel anyway, and one pipe carries both in order.
 
-`crabd serve` keeps a table `process_id → supervisor pid`. `process.cancel` is two signals from
-`crabd serve` to the supervisor: "ask" now, "force" after the grace. The supervisor's exit status tells
-`crabd serve` whether the tree was clean. If the connection closes, the supervisor stops the tree by
-itself.
+`crabd serve` keeps a table `process_id → supervisor`. `process.cancel` writes the ask byte, then the
+force byte after the grace, on the control pipe. The supervisor exits 0 when the tree is clean and with a
+distinct status when something could not be stopped; `crabd serve` reads `tree_clean` from that status.
+If the connection closes, the supervisor stops the tree by itself.
 
 **On each backend.**
 
@@ -351,7 +378,7 @@ itself.
 | --- | --- | --- |
 | Who `crabd serve` is | An unprivileged process in a container with `cap_drop: ALL` and `no-new-privileges`; `docker-init` is PID 1 (`crates/sandcrab-backend-docker/src/spec.rs:7-8`, `:392-395`) | An unprivileged child of `crabd init`, which is PID 1 and root (`crates/sandcrab-guest/src/hardening.rs:3-8`) |
 | Privilege needed | None. `PR_SET_CHILD_SUBREAPER` and `/proc` reads need no capability | None |
-| Backstop | `crabd serve` is a subreaper too. If a supervisor dies without finishing, `crabd serve` kills the processes it adopts as a result. After that: sandbox destroy | The same |
+| Backstop | Sandbox destroy. `crabd serve` is **not** a subreaper (the design said it would be; it was not built). Processes orphaned by a dead supervisor are re-parented to PID 1 (`docker-init`, which reaps but does not kill) | Sandbox destroy. Orphans go to `crabd init` (PID 1), which reaps but does not kill them |
 
 **Rejected.**
 
@@ -367,9 +394,12 @@ server's capabilities repeat it, and the self-test line `tree-kill` fails. It is
 
 **Known limits.**
 
-- The program and its supervisor run as the same uid, so a program can kill its supervisor. The
-  connection then closes without `EXIT`; the SDK reports the process as lost; `crabd serve` kills what it
-  adopted. The sandbox stays the boundary.
+- **A program can kill its supervisor.** They run as the same uid. As built, the connection then closes
+  without `EXIT`, the SDK reports the process as `lost` with `treeClean: false`, and whatever the program
+  started keeps running in the sandbox until the sandbox is destroyed. Nothing in the guest sweeps it up.
+  A client must destroy a sandbox whose process reported `tree_clean: false` before it runs anything else
+  there. The self-test line `tree-kill` covers the normal case only. Making `crabd serve` a subreaper that
+  kills what a dead supervisor leaves is on the backlog (review item M1).
 - **`RLIMIT_NPROC` on Docker counts every process of that uid on the host**, in every container, because
   containers share the kernel's per-uid accounting. A client should leave `nproc` out on Docker and set
   the sandbox's `pids_max`, a cgroup limit, instead. The server says which case applies in
@@ -483,6 +513,19 @@ A refusal looks like a flaky network from inside. The counters are how a client 
 
 Forward connections do not take `--max-connections` slots.
 
+**As built (`crabd`).**
+
+- `conn_id` is a `u64` counter that starts at 1 per `crabd`, and each id is used once. An unknown or
+  used id on `forward.accept` is `-32004`.
+- A second `forward.listen` is refused with `-32001` while the first is alive.
+- `forward.reject {conn_id}` closes the program's connection. An unknown id is ignored.
+- An announced connection survives a dropped listen connection until its 10 s deadline, so the host
+  can still accept it after a reconnect.
+- The per-forward cap in `crabd` is fixed at 64. A lower `max_connections` is enforced on the host,
+  which rejects the excess; those count under `rejected`, not `cap`. Caps count a connection from its
+  announcement to the end of its relay.
+- `--max-forward-conns` defaults to 256.
+
 ### 4.3 Host side (`sandcrab-core`)
 
 ```rust
@@ -498,7 +541,10 @@ pub struct ForwardSpec { pub guest_port: u16, pub max_connections: Option<u32> }
 `ForwardAcceptor` holds the `forward.listen` connection of a sandbox. For each announcement it calls the
 target; on success it opens the `forward.accept` connection and relays between the two, translating
 end-of-file to `EOF` records and back. On failure it sends `forward.reject`. If the listen connection
-drops while the sandbox lives, it reconnects with backoff; until then the guest refuses connections.
+drops while the sandbox lives, it reconnects with backoff (50 ms up to 5 s, as built); until then the
+guest refuses connections. As built, `serve_forwards` is called once per sandbox, and the target is
+resolved per incoming connection. A spawn with forwards is refused when the guest's `hello` lacks the
+forward feature or the ports.
 
 `sandcrab-core` ships the trait and the acceptor, and no target. The server implements one target that
 passes the connection to the client (§4.4). The self-test implements one in its own process (§8). A
@@ -518,7 +564,11 @@ later server-side target (Sandcrab's own egress proxy, Phase 3) plugs in at the 
   half-close on the Unix socket is an end-of-file. When the target failed, the client sends
   `forward.reject {conn_id}` on the control connection.
 - Not attached within 10 s, no serving connection, or the serving connection is gone: rejected. Fail
-  closed.
+  closed. As built, the server waits 9 s for the attach, so its reject reaches the guest inside the
+  guest's 10 s deadline.
+- As built, only a control connection of the sandbox's owner uid can serve its forwards, and an attach
+  is matched only to an announcement made to the same uid. Forwarded connections across all sandboxes
+  are capped server-wide (§5.6); one past the cap is rejected.
 
 ### 4.5 Backends
 
@@ -553,7 +603,9 @@ Every connection starts with one frame. Its method decides the kind of connectio
 A connection that sends no first frame within 2 s is closed. Any other first method is `-32600`.
 
 One control connection carries any number of sandboxes. A sandbox does not belong to a connection; the
-only per-connection state is "serves the forwards of these sandboxes".
+only per-connection state is "serves the forwards of these sandboxes". As built, a sandbox belongs to the
+**peer uid** that created it: every method that names a sandbox, `process.spawn`, `process.cancel` and
+`forward.attach` answer as if it did not exist when the caller's uid is not the owner.
 
 ### 5.3 Methods on a control connection
 
@@ -578,6 +630,18 @@ accept them, as in `crabd`.
 Notifications from the server: `forward.incoming {conn_id, sandbox_id, guest_port}`,
 `sandbox.destroyed {sandbox_id, reason: "destroyed" | "ttl" | "backend_exit"}`,
 `server.shutdown {grace_ms}`.
+
+As built:
+
+- `sandbox.destroyed` goes to every control connection of the owner uid. Reason `destroyed` follows
+  `sandbox.destroy` and `sandbox.destroy_by_label`; `ttl` follows a TTL expiry, which the server notices
+  by polling every 500 ms (and on every `sandbox.list`), so it can arrive up to about a second late.
+  `backend_exit` is in the schema but **never sent**: the core keeps a sandbox whose container or VM
+  died until something destroys it, so there is no event to pass on. A race can deliver
+  `sandbox.destroyed` twice for one sandbox.
+- `server.shutdown {grace_ms: 5000}` goes to every control connection when the server starts to stop.
+- `sandbox.list` returns forward counters as zero; `sandbox.get` fetches the real ones from the guest.
+- Sandbox ids are UUIDs.
 
 **Not in this API yet.** File transfer calls, a pass-through for the LLM tools, template listing and
 verification, a terminal mode and signal delivery for the new process call, a process listing, and
@@ -657,7 +721,9 @@ unchanged in both directions. It checks each record's kind and length and decode
   it has read the request, before any await. A `process.cancel` for an id that is in the table but not
   yet open in the guest is remembered: if the guest open was not written yet, it is never written and
   the spawn is answered `CANCELLED`; otherwise the cancel is sent to the guest at once, where the same
-  rule holds (§3.4). A `process_id` used twice is `CONFLICT`.
+  rule holds (§3.4). A `process_id` used twice is `CONFLICT`. As built, `CONFLICT` applies only while the
+  first process with that id lives; a cancel for an id the server has not seen is remembered for 60 s
+  (at most 1024); and a cancel from another uid finds nothing.
 
 A bounded exec is not a server call. The SDK builds it on this path (§10.4).
 
@@ -683,15 +749,29 @@ A bounded exec is not a server call. The SDK builds it on this path (§10.4).
 
 Server config, with defaults. Over a limit is `LIMIT_EXCEEDED`. Nothing queues.
 
-| Limit | Default |
-| --- | --- |
-| Connections, all kinds | 1024 |
-| Requests in flight per control connection | 64; beyond that the server stops reading |
-| Sandboxes | 64 |
-| Processes per sandbox | 64 (the guest's `--max-processes`) |
-| Mounts per sandbox | 16 (§6.2) |
-| Resources per sandbox | `max_vcpu` 8, `max_memory_mb` 16384, `max_pids` 8192, `max_nofile` 1048576 |
-| Default TTL, maximum TTL | 30 min (today's default, `crates/sandcrab-core/src/sandbox.rs:37-38`), 24 h |
+| Limit | Default (as built) | Set by |
+| --- | --- | --- |
+| Connections, all kinds | 1024, or a quarter of the soft `RLIMIT_NOFILE` if that is less | fd limit |
+| Forwarded connections, all sandboxes together | 4096, or an eighth of the soft `RLIMIT_NOFILE` if that is less | fd limit |
+| Requests in flight per control connection | 64; beyond that the server stops reading | fixed |
+| Sandboxes | 64 | `[limits] max_sandboxes` |
+| Processes per sandbox | 64 (the guest's `--max-processes`) | fixed |
+| Mounts per sandbox | 16; 4 on libkrun x86_64 (§6.2) | backend |
+| Resources per sandbox | `max_vcpu` 8, `max_memory_mb` 16384, `max_pids` 8192, `max_nofile` 1048576 | fixed |
+| `resources.disk_mb` | 32768 | `[limits] max_disk_mb` |
+| Default TTL, maximum TTL | 30 min (`crates/sandcrab-core/src/sandbox.rs:37-38`), 24 h | `[limits] default_ttl_secs`, `max_ttl_secs` |
+| A first frame | within 2 s | fixed |
+
+**Descriptors (as built).** Each connection and each forwarded connection holds up to two server
+descriptors. At start the server raises its soft `RLIMIT_NOFILE` towards the hard limit (at most 65536;
+on macOS at least 10240 is always allowed) and sizes the two connection caps from the result, so a busy
+server refuses with `LIMIT_EXCEEDED` before `accept` or a dial meets `EMFILE`. The systemd unit sets
+`LimitNOFILE=65536`. `max_connections` in `server.hello` is the cap in force.
+
+**Disk (as built).** `resources.disk_mb` sizes the sparse scratch drive on libkrun and Firecracker.
+Docker does not enforce it. Without the ceiling a mistaken value could fill the host disk.
+
+Self-test sandboxes are not counted against `max_sandboxes` (at most two per template at a time).
 
 ### 5.7 Lifetime: disconnect, restart, shutdown
 
@@ -729,9 +809,12 @@ All of it is checked before the first frame is read.
 | Socket directory | Holds the socket and nothing else. The server refuses to start when the directory is writable by a user other than root and its own (`sandcrab_core::private_dir::check_foreign_dir`, `crates/sandcrab-core/src/private_dir.rs:125`) |
 | Stale socket | Replaced only when it is a socket owned by the server's user and nothing answers on it |
 | Own files in a mount | Refused (§6.2) |
+| Ownership (as built) | A sandbox belongs to the uid that created it. Another admitted uid cannot see or touch it |
+| Sandbox user (as built) | The client's own uid and gid unless the config allows others (§6.4) |
 
 There is no token and no TCP listener. A process that can open the socket and passes the uid check has
-full control of the server. The per-sandbox token between host and `crabd` is unchanged.
+full control of its own uid's sandboxes, within the config. The per-sandbox token between host and
+`crabd` is unchanged.
 
 The uid in `SO_PEERCRED` is the uid as the host kernel sees it. For a containerised client without a
 user-namespace remap that is the container's numeric uid.
@@ -748,11 +831,17 @@ allow_uids = [1500]                  # default: the server's own uid
 backend = "docker"                   # required: "docker" | "libkrun" | "firecracker". Never a fallback
 state_dir = "/var/lib/sandcrab"
 templates_dirs = ["/etc/sandcrab/templates"]
+default_template = "base"            # used when a create names no template
 selftest_on_start = ["base"]         # templates to test at start; default none
 allow_root_user = false              # may a client ask for uid or gid 0 in a sandbox
+# allow_sandbox_uids = [[60000, 62999]]  # as built: other uids a client may name (default: none)
+# allow_sandbox_gids = [[60000, 62999]]  # as built: the same for gids
 
 [limits]
 max_sandboxes = 64
+default_ttl_secs = 1800
+max_ttl_secs = 86400
+max_disk_mb = 32768                  # as built
 
 [[mount_roots]]                      # the allowed roots (§6)
 path = "/srv/app-data"
@@ -767,9 +856,14 @@ sandbox that runs as another user (the socket is `0660`, owned by the sandbox us
 `crates/sandcrab-guest/src/server.rs:477`).
 
 - The unit gets ordinary hardening: `NoNewPrivileges`, `ProtectSystem=strict` with write access to the
-  state and socket directories only, protected kernel tunables and modules, `AF_UNIX` only. Which
-  capabilities can also be dropped is decided by test in `server-ops`.
+  state and socket directories only, protected kernel tunables and modules, `AF_UNIX` only. As built
+  (`packaging/systemd/sandcrab-server.service`), no capability is dropped from the bounding set, read-write
+  mount roots are added with `ReadWritePaths=` in a drop-in, and `LimitNOFILE=65536` is set. The unit ran
+  on `dev-vps` with these options; they were not tested one by one.
 - Because the server is root, its default `allow_uids` is `[0]`. The application's uid must be listed.
+- As built, the socket directory is **`/run/sandcrab-server`** (`RuntimeDirectory=sandcrab-server`). It
+  must not be `/run/sandcrab`: every sandbox has its own `/run/sandcrab` for `crabd`'s socket, and the
+  self-test's "server socket not reachable" probe would find that one and fail.
 - A containerised client mounts the socket's **directory**, not the socket file. A bind mount of the file
   pins its inode, and the server replaces the socket at every start. The directory must therefore
   survive a server restart (`RuntimeDirectoryPreserve=yes`, or a directory systemd does not manage).
@@ -820,6 +914,18 @@ The SDK resolves each mount path with `realpath` before it sends it, and reports
 (§10.3). The sandbox sees the folder at the **resolved** path, so that is the path a client must use in
 `cwd` and env. A path the server receives with a symlink in it is refused.
 
+On macOS, `/tmp` is a symlink to `/private/tmp`. A mount under `/tmp` therefore appears in the sandbox
+at `/private/tmp/...` (verified on `mac-m2`). A program that uses the client's `/tmp/...` spelling will
+not find it.
+
+**Mount points (as built).** On Docker a bind mount creates its mount point. On libkrun the guest's root
+is an overlay (the read-only rootfs image below, the per-sandbox scratch drive above), so `crabd init`
+creates a missing mount point on the scratch layer, one component at a time and never through a symlink.
+The rootfs image is never written and no image change is needed. libkrun refuses a host mount that
+would replace a directory the guest runs from: exactly `/bin`, `/sbin`, `/lib*`, `/usr`, `/etc`, `/var`,
+`/opt`, `/mnt`, `/run`, `/tmp`, `/boot`, `/root`, any direct child of `/usr`, and anything inside `/run`
+or `/mnt/scratch`. A directory below one of them (`/var/lib/app`, `/tmp/build`) is fine.
+
 Registered workspaces (`WorkspaceRegistry`) stay as they are in `sandcrab-core` and the Rust SDK. The
 server API does not expose them in this milestone.
 
@@ -852,9 +958,19 @@ For each `{path, mode}`:
    the template pin store. The check compares `(dev, ino)`, not path strings, so a bind mount or a second
    name for the same directory does not get around it. Without it a client could mount the socket into a
    sandbox, and a program there running as an allowed uid would control the server.
-6. **Cap.** At most 16 mounts per sandbox, on every backend (the libkrun helper's share limit,
-   `crates/sandcrab-backend-libkrun/src/helper_proto.rs:53`). The error names the cap:
-   `MOUNT_NOT_ALLOWED {reason: "too many mounts", cap: 16}`.
+6. **Cap.** At most 16 mounts per sandbox (the core's `MAX_SANDBOX_MOUNTS` and the libkrun helper's
+   share limit, `crates/sandcrab-backend-libkrun/src/helper_proto.rs:53`). The error names the cap:
+   `MOUNT_NOT_ALLOWED {reason, cap}`. **As built, the cap depends on the backend and the architecture:**
+
+   | Backend | Cap | Why |
+   | --- | --- | --- |
+   | Docker | 16 | Sandcrab's own cap |
+   | libkrun, Apple Silicon (aarch64) | 16 | Sandcrab's own cap. 64 directory mounts plus a NIC were measured to boot on `mac-m2`: devices sit on GIC interrupts there |
+   | libkrun, Linux x86_64 | 4 devices: directory mounts, block volumes and a NIC together (so 4 mounts, 3 with `unrestricted` network) | A sandbox without mounts already uses seven virtio-mmio devices on legacy IRQs 5 to 11, which end at 15. A fifth mount made `krun_start_enter` fail with `EINVAL` (libkrun 1.19.8, `kvm-dedicated`). Refused before boot |
+
+   `server.hello` `limits.max_mounts` and `server.capabilities` `max_mounts` report the lower of the core
+   cap and the backend's room. Raising the 16 on Apple Silicon is one constant each in the core, the libkrun
+   helper protocol and the TypeScript SDK.
 
 There is **no rule about nesting across sandboxes**. Two sandboxes may mount the same folder, or folders
 inside each other. The limit, in one sentence: a program in a sandbox with a read-write mount can change
@@ -887,17 +1003,27 @@ Rules for the server:
 - `user` on `sandbox.create` defaults to the uid:gid of the connecting peer, not the server's. On Linux
   with a root server and a containerised client, files written in the sandbox are then owned exactly as
   the client's own writes. On the Mac all three are the same user.
-- Any other non-zero uid:gid is accepted. uid or gid 0 needs `allow_root_user = true`. A client can
-  therefore act as any ordinary user inside the allowed roots; the roots are the bound.
+- **Other users (as built, stricter than designed).** The design accepted any other non-zero uid:gid,
+  with "the roots are the bound". They are not: Docker cannot mount a bind mount `nosuid`, so a
+  sandbox running as uid X with a read-write mount can leave a setuid file there that the host honours
+  as X, and a setgid file of any group it runs as (for example the host's `docker` group, which is
+  root-equivalent). So a non-root client's sandbox runs as the client's own uid and gid. Another uid
+  needs an `allow_sandbox_uids` range, another gid an `allow_sandbox_gids` range (inclusive `[first,
+  last]` pairs, default none). uid or gid 0 always needs `allow_root_user = true`, also as the default
+  user of a root peer. A root client may name any other user. A refusal is `POLICY_UNENFORCEABLE`.
 - **The sandbox user may differ from the server's.** On Docker's `unix` transport the backend then makes
   the socket directory `0777` and the token `0444` (`crates/sandcrab-backend-docker/src/backend.rs:198-233`),
-  and a root server can connect to the `0660` socket. This path has never run: it is an acceptance test
-  of `docker-backend` (§16).
-- On libkrun a `user` other than the server's own uid does not change host ownership (the helper writes
-  as itself). The server accepts it and the docs say so.
+  and a root server can connect to the `0660` socket. As built and verified: a root server takes any
+  sandbox user; a non-root server needs the sandbox user to share its uid or a gid it holds, otherwise
+  the spawn is `InvalidConfig`. A sandbox with no mounts whose uid:gid has no passwd entry in the image
+  runs a command; `HOME` and the rest come only from the given env.
+- On libkrun the files a guest writes appear on the host as the helper's (the server's) uid:gid. A sandbox
+  user other than the server's can read them but not write. On a Mac, run the sandbox as the server's uid
+  (the default when client and server are one user). Under `/private/tmp` macOS gives a new file its
+  directory's group (`wheel`), the same as for the client's own writes there.
 - A read-write mount keeps the setuid-bit risk of review item R9
-  (`docs/reviews/libkrun-backend-review.md:61`). Allowed roots should be directories that other local
-  users cannot traverse.
+  (`docs/reviews/libkrun-backend-review.md:61`). Keep mount roots on a filesystem mounted `nosuid` where
+  you can, and make them directories that other local users cannot traverse.
 
 ### 6.5 `/tmp`, pids, nofile
 
@@ -932,7 +1058,11 @@ spawn; it never ignores it.
   restart the list is empty: the answer is "gone".
 - **TTL:** the manager's reaper, unchanged (`crates/sandcrab-core/src/manager.rs:357-360`).
   `sandbox.set_ttl` changes the expiry. A long run renews it; the SDK has a keep-alive helper. Only TTL,
-  `destroy`, `destroy_by_label` and a server stop end a sandbox. A disconnect does not.
+  `destroy`, `destroy_by_label` and a server stop end a sandbox. A disconnect does not. As built, a TTL
+  expiry sends `sandbox.destroyed {reason: "ttl"}` to the owner (§5.3).
+- **As built, every call here is within the caller's uid.** `list` and `destroy_by_label` see only the
+  caller's own sandboxes. A sandbox between its backend spawn and its owner record is invisible, so a
+  create that races a sweep with the same labels can let the sweep answer `empty: true` (review item m4).
 
 ## 8. Self-test
 
@@ -946,6 +1076,27 @@ read-only and one read-write mount in a temporary directory; B plain.
 **Keyed by template.** The claim a client repeats is about its own template, so the client names it. The
 server keeps the last report per template. `server.selftest {template}` runs or returns one;
 `server.capabilities {template}` carries its summary.
+
+**As built.**
+
+- **It runs as the calling peer.** The self-test sandboxes get the peer's uid:gid, the user that peer's
+  own sandboxes get by default, so a root server tests what its clients get, not 0:0. Reports are kept
+  per template **and** sandbox user; `server.capabilities` returns the one for the caller's user.
+  `selftest_on_start` runs as the server's own uid, or on a root server as the first admitted non-root
+  uid with its primary group from `/etc/passwd`.
+- **`selftest: null` means not proven.** A template never tested for that user has no summary; the SDK
+  reads that as isolation not proven.
+- **A report that cannot be made is not ok.** No read-write mount root for the scratch, a missing or
+  unpinned template, a backend refusal, or uid/gid 0 without `allow_root_user` gives `ok: false`, no
+  lines, and a reason that starts "isolation not proven". A whole run has 180 s; past that it is
+  inconclusive.
+- **The scratch directory is made through descriptors only.** It lives in the first read-write mount
+  root, which clients can write. The server may be root, so the directory, its `ro` and `rw` children
+  and the canaries are made with `mkdirat` / `openat(O_NOFOLLOW)` relative to held descriptors, and
+  handed to the sandbox user with `fchown`. A rename or symlink swap at its name redirects nothing. It is
+  removed when the run ends or is dropped. (The first version used path names and followed symlinks;
+  the review found that a client could make a root server `chown` any host file. Fixed before release.)
+- One run at a time per template.
 
 **No dependency on the image.** Probes run as `crabd probe <name>`, started through `process.open` from
 the `crabd` binary that every sandbox already contains (`/opt/sandcrab/crabd` on Docker, `/sbin/crabd`
@@ -983,8 +1134,12 @@ with `evidence` holding what was tried and the `errno`.
 | --- | --- |
 | `sandcrab selftest --template <name> [--backend ...]` | Prints the lines; exit status 1 unless `ok` |
 | Server start | Runs it for each template in `selftest_on_start`. A failure does not stop the server; the capabilities then say isolation is not proven, and why |
-| `server.selftest {template}` | Runs a fresh one, or returns the last for that template when it is younger than `max_age_secs`. One runs at a time |
+| `server.selftest {template}` | Runs a fresh one, or returns the last for that template and user when it is younger than `max_age_secs`. One runs at a time per template |
 | TypeScript SDK | `client.selftest(template)` and a synchronous `client.capabilitiesSnapshot(template)` (§10.3) |
+
+Measured duration of one run: 0.5 s on `mac-m2` (libkrun), 1.1 to 1.4 s on `dev-vps` (Docker), 1.7 s
+(libkrun) and 5 s (Docker) on `kvm-dedicated`. The ~62 s seen once through the server was host load and
+did not reproduce.
 
 ## 9. Bring-your-own-image templates
 
@@ -1081,6 +1236,8 @@ export interface SandcrabClient {
   capabilitiesSnapshot(template: string): { backend: string | null; isolation: { ok: boolean; reason: string | null }; ageMs: number | null };
   selftest(template: string, o?: { maxAgeMs?: number }): Promise<SelftestReport>;
   on(event: "connect" | "disconnect", listener: () => void): this;
+  on(event: "shutdown", listener: (e: { graceMs: number }) => void): this;            // as built
+  on(event: "sandboxDestroyed", listener: (e: { sandboxId: string; reason: string }) => void): this; // as built
   close(): Promise<void>;
 }
 
@@ -1096,6 +1253,7 @@ export interface SandboxSpec {
   user?: { uid: number; gid: number };
   resources?: { vcpu?: number; memoryMb?: number; diskMb?: number; pidsMax?: number; nofile?: number };
   tmpExec?: boolean;
+  tmpSizeMb?: number;                       // as built
 }
 
 /** The target stays in the client. The server only learns `guestPort`. */
@@ -1242,6 +1400,19 @@ rejected. It never connects anything else.
 **Mount paths.** The SDK resolves each mount path with `realpath` and sends the resolved path.
 `sandbox.mounts` shows both. A path that does not exist is an `InvalidSpecError`.
 
+**As built.**
+
+- `ProcessExit.signal` uses Node's signal names (`"SIGKILL"`, `"SIGXFSZ"`), mapped from the Linux numbers
+  whatever the client's platform.
+- A `lost` exit also has `treeClean: false`: nothing is known to be stopped.
+- The SDK returns the server's own wire types (snake_case fields) from `info()`, `listSandboxes()`,
+  `capabilities()` and `selftest()`; it does not map them.
+- `createSandbox` with mounts or forwards, and `selftest`, refuse with `SandcrabError` code
+  `UNSUPPORTED_FEATURE` when the server's `features` lack the one needed.
+- `stderr: "stream"` is not offered on `spawn`; `exec` uses it when `onOutput` is given. The stream has
+  no cap; the tail in `EXIT` is at most 64 KiB.
+- The stderr tail counts **bytes**, not characters; it is cut at a UTF-8 character boundary.
+
 ### 10.5 Connections and reconnect
 
 - One control connection per client. One connection per process and per forwarded connection, closed
@@ -1295,11 +1466,12 @@ New row for the crate map in AGENTS.md (added in the document step):
 | :--- | :--- | :--- |
 | `sandcrab-server` | Host daemon (lib): Unix-socket listener, peer-uid check, JSON-RPC control connections, process and forward connections, allowed mount roots, relaying, removal of a predecessor's sandboxes at start, graceful shutdown. One explicitly chosen backend, never a fallback | `sandcrab-sdk` (backends only through its features, like `sandcrab-cli`), `sandcrab-protocol`, `sandcrab-core`, Tokio, `rustix` (`net`, `fs`), `nix` (macOS peer credentials), `serde`/`serde_json`, `toml`, `tracing`, `thiserror`, `uuid`. **No** backend crate directly, **no** `bollard`, **no** HTTP stack, **no** TCP listener |
 
-`sandcrab-cli` may depend on `sandcrab-server` (for the `server` command).
+As built, the crate depends on `sandcrab-sdk` only for everything Sandcrab (protocol and core through its
+re-exports), plus Tokio, `rustix`, `serde`/`serde_json`, `toml`, `tracing`, `thiserror`, `uuid`, `chrono`
+and `getrandom`. No `nix`: peer credentials come from Tokio's `UnixStream::peer_cred` (`SO_PEERCRED` on
+Linux, `getpeereid` on macOS), with no `unsafe` in Sandcrab code. The AGENTS.md row is the as-built one.
 
-Peer credentials without `unsafe`: `rustix::net::sockopt::socket_peercred` on Linux; on macOS
-`nix::unistd::getpeereid`, which needs the `socket` and `user` features of `nix` (the workspace enables
-only `net` today).
+`sandcrab-cli` may depend on `sandcrab-server` (for the `server` command).
 
 ## 12. Security
 
@@ -1311,7 +1483,7 @@ client ──(1)── server ──(2)── backend (Docker daemon / libkrun h
 
 | Boundary | Who is trusted with what |
 | --- | --- |
-| (1) client ↔ server | A client the uid list admits is trusted **within the server's config**: the allowed roots, `allow_root_user` and the limits bound it. Clients are not separated from each other |
+| (1) client ↔ server | A client the uid list admits is trusted **within the server's config**: the allowed roots, `allow_root_user`, the sandbox user ranges and the limits bound it. As built, clients of different uids are separated by ownership; clients of the same uid are not |
 | (2) server ↔ backend | The server holds the backend's full power: Docker access is root on the host; the libkrun helper runs as the server's user |
 | (3) host ↔ guest | The guest is not trusted. Unchanged: every connection is opened by the host; on Docker each starts with the per-sandbox token |
 
@@ -1319,9 +1491,10 @@ client ──(1)── server ──(2)── backend (Docker daemon / libkrun h
 
 | Can | Cannot |
 | --- | --- |
-| Create, list and destroy **every** sandbox on this server, including other clients'. One server serves one owner; clients that must be kept apart get a server each | Reach a server whose uid list does not name it, even when the socket file is world-writable |
+| Create, list and destroy the sandboxes of its own uid (as built; the design said every sandbox on the server) | See or touch another uid's sandbox, its processes or its forwards; reach a server whose uid list does not name it, even when the socket file is world-writable |
 | Mount any directory under the allowed roots, in the allowed mode | Mount anything else; mount through a symlink; mount the server's socket, state or pins |
-| Run programs as any non-zero uid:gid | Run as 0 unless `allow_root_user` is set |
+| Run programs as its own uid:gid, or as a user in `allow_sandbox_uids` / `allow_sandbox_gids` (as built; the design said any non-zero uid:gid) | Run as 0 unless `allow_root_user` is set; run as another user outside the configured ranges |
+| Run the self-test, as itself | Make the server follow a symlink while it builds the self-test scratch (fixed before release, §8) |
 | Use up to the configured limits | Exceed them |
 | Choose where its own forwards go, inside its own process | Make the server open any socket or port |
 
@@ -1330,7 +1503,8 @@ client ──(1)── server ──(2)── backend (Docker daemon / libkrun h
 | Through | Can | Cannot |
 | --- | --- | --- |
 | Forwards | Connect to the declared loopback ports, up to the caps. Whatever the client's target then allows | Reach a port that was not declared; choose the target; make the server or the host dial anything; open a connection towards the host (announcements only); hold more than 32 announced connections |
-| Process streams | Send any bytes as stdout; block by not reading stdin; kill its own supervisor, which the client sees as a lost process | Touch the records of another process (one connection each); make the host hold more than one record per direction |
+| Process streams | Send any bytes as stdout; block by not reading stdin; kill its own supervisor, which the client sees as a lost process with `tree_clean: false`, and keep what it started running until the sandbox is destroyed (§3.5) | Touch the records of another process (one connection each); make the host hold more than one record per direction |
+| Forwards, at scale | Open up to 256 connections per sandbox, which hold server descriptors | Exhaust the server's descriptors: forwarded connections are capped server-wide and sized from the fd limit (§5.6) |
 | Mounts | Read and write its mounts in the given mode. Change what lies under a read-write mount, also for another sandbox that mounts a folder inside it (§6.2) | Leave its mounts |
 | The `crabd` it shares a uid with | Disturb its own sandbox | Authenticate as the host: the token file is gone (`docs/protocol.md:85-86`) and the connections are opened from outside |
 | Resources | Use its limits | Fork past `pids_max`; survive `destroy` |
@@ -1340,7 +1514,7 @@ client ──(1)── server ──(2)── backend (Docker daemon / libkrun h
 **Env values and stdin never appear in logs or in error `data`.** This holds for the server, for
 `crabd serve` and for the supervisor, at every log level. argv is logged as `argv[0]` only. Env is logged
 as a count of variables, if at all. The first frame of a process connection is never logged as a whole.
-A client's env may carry credentials; the in-memory spec file (§3.5) already keeps it off command lines.
+A client's env may carry credentials; the control pipe (§3.5) keeps it off command lines.
 One test per layer runs a process at trace level with a marker value in env and in stdin and searches the
 log for it.
 
@@ -1355,13 +1529,16 @@ log for it.
 
 ## 13. Targets
 
-These are targets, not measurements. `ts-contract` and `ts-e2e` print the numbers; the live steps decide.
+These were targets. All three were met on every host; the full table is in
+[reviews/sdk-milestone-results.md](../reviews/sdk-milestone-results.md).
 
-| Target | Value | Measured in |
+| Target | Value | Measured (TypeScript SDK through the server) |
 | --- | --- | --- |
-| One forwarded stream, client target to a program in the sandbox | 50 MB/s or more | `ts-e2e`, `live-linux` |
-| 16 forwarded connections in parallel | No reset, no refusal counter moves | `ts-e2e`, `live-linux` |
-| Warm exec of `["/bin/true"]` on Docker, sequential, timed at the client | p50 at or under 30 ms | `ts-contract`, `live-linux` |
+| One forwarded stream, client target to a program in the sandbox | 50 MB/s or more | 150 to 254 MB/s `dev-vps` Docker; 295 MB/s Docker and ~270 MB/s libkrun on `kvm-dedicated`; 385 to 436 MB/s `mac-m2` libkrun |
+| 16 forwarded connections in parallel | No reset, no refusal counter moves | Met on all three hosts |
+| Warm exec of `["/bin/true"]` on Docker, sequential, timed at the client | p50 at or under 30 ms | p50 8.8 to 9.8 ms `dev-vps`; 6.5 ms `kvm-dedicated`; on libkrun 14.7 ms `kvm-dedicated`, 4.7 to 4.8 ms `mac-m2` |
+
+The connection pool below was not needed and was not built.
 
 One exec costs: one connection to the server, one new `crabd` connection (`auth`, `process.open`), two
 process starts in the guest (the supervisor, then the program), one `/proc` listing at the end. Measure
@@ -1389,7 +1566,7 @@ These shape the adapter and the adopter's own flow. None blocks Sandcrab work.
 | 11 | **`lost` has no place in the adopter's outcome** | The adapter maps `lost` to a **failed, non-retryable** outcome with a sentence in stderr. Never to "unavailable", which callers read as "nothing ran, try again" | `lost` as its own field (§10.4) |
 | 12 | **Awaiting `exit` without reading stdout blocks** once 1 MiB plus the hop buffers are full (§10.4). A local launcher that queues without bound does not show this | The adopter confirms no caller of `spawn` relies on it; the adapter may drain for callers that never read | The stated buffer size; `exec` for callers that only want the result |
 | 13 | **`nproc` on Docker is host-wide per uid** (§3.5) | The adapter leaves `nproc` out when `capabilities.nproc_scope` is `"host_uid"` and sets the sandbox's `pidsMax` | The capability |
-| 14 | **At most 16 mounts per sandbox** | The adopter counts a run's folders plus the adapter's extra mounts against the cap | The cap in the capabilities (`max_mounts`) and in the error |
+| 14 | **At most 16 mounts per sandbox** (as built: 4 on libkrun x86_64, §6.2) | The adopter counts a run's folders plus the adapter's extra mounts against the cap | The cap in the capabilities (`max_mounts`), which reports the backend's real room, and in the error |
 | 15 | **Same path on both sides** | On Linux the adopter's data directories become host directories bound into its container at the same absolute path (a deployment change and a one-time copy). The container mounts the socket's directory and holds the socket group's gid. On macOS the adapter uses `resolvedPath` of each mount for cwd and env | §5.10, §6.1 |
 | 16 | **A server restart ends every run** | The adopter drains before a server upgrade | `server.shutdown` notification; `lost` exits |
 | 17 | **Labels that are reused** | `reap` passes its "since" time | `createdAfter` on list |
@@ -1399,6 +1576,9 @@ These shape the adapter and the adopter's own flow. None blocks Sandcrab work.
 
 The implement steps of the flow, by their ids. Every step ends with `cargo fmt`, `clippy -D warnings`
 and the unit tests green. Builds and Docker e2e run on the remote hosts.
+
+This section is the plan as it was dispatched and is kept as written, except where it named a mechanism
+that was not built (marked "as built"). Every step is done.
 
 ### `protocol-03`
 
@@ -1417,8 +1597,8 @@ and the unit tests green. Builds and Docker e2e run on the remote hosts.
 ### `guest-supervisor`
 
 - **Files:** `crates/sandcrab-guest/src/{supervise.rs (new),proctree.rs (new),server.rs,main.rs,context.rs,lib.rs}`, `Cargo.toml` (`rustix` features). `tools/process.rs` and `tools/exec.rs` are **not** changed.
-- **First, a spike** on Docker and on libkrun: the connection handed over as stdin and stdout (Unix socket, TCP relay, vsock), the spec through a memory file, the subreaper, a 1 MiB echo, a grandchild in a new session that ignores `SIGTERM`. Settle the first three items of §16 here. Then the real thing.
-- **Contains:** `crabd supervise` (§3.5): spec handover, exact env and argv, the record pump for stdin, stdout and exit, the tree listing and tree kill. The `process.open` branch in `serve_stream` (`server.rs:570-584`); `process.cancel` with the remembered cancel (§3.4); `fs.identity`; `crabd serve` as a subreaper; the `hello` changes; `--max-processes`.
+- **First, a spike** on Docker and on libkrun: the connection handed over as stdin and stdout (Unix socket, TCP relay, vsock), the spec through a memory file, the subreaper, a 1 MiB echo, a grandchild in a new session that ignores `SIGTERM`. Settle the first three items of §16 here. Then the real thing. (As built: the connection is stdout only, the spec and cancel go over a control pipe on stdin, §3.5.)
+- **Contains:** `crabd supervise` (§3.5): spec handover, exact env and argv, the record pump for stdin, stdout and exit, the tree listing and tree kill. The `process.open` branch in `serve_stream` (`server.rs:570-584`); `process.cancel` with the remembered cancel (§3.4); `fs.identity`; `crabd serve` as a subreaper (as built: not done, see §3.5 Known limits); the `hello` changes; `--max-processes`.
 - **Acceptance:** the program's environment is exactly the given map. 1 MiB of mixed bytes arrives identical. `EXIT` comes after the last byte. A grandchild in a new session that ignores `SIGTERM` is gone when `process.cancel` answers, and `tree_clean` is true. A leader that exits leaving a grandchild on its pipes ends within the drain bound. `ENOENT` and `EACCES` give `SPAWN_FAILED`. A cancel sent right after the open frame is never lost. A closed connection stops the tree. `bash` and `process_*` behave as before.
 - **Tests:** unit tests for the tree listing on a fixture `/proc`; integration tests that run `crabd serve` on a Unix socket on Linux and drive it (the pattern the tunnel tests use), one per case above; a fork-heavy program against the force loop.
 
@@ -1532,22 +1712,27 @@ and the unit tests green. Builds and Docker e2e run on the remote hosts.
 - **Contains:** the full e2e as a matrix over Docker and libkrun (macOS and Linux KVM).
 - **Acceptance:** mounts at the same path, `ro` and `rw`, one under a symlinked root. Forwards to a TCP port, a Unix socket and a handler; an undeclared port is refused; the throughput and the 16 parallel connections of §13. A pipeline between two sandboxes with a reader that pauses, server memory bounded. Destroy by label answers `empty` and a list finds nothing. A client killed with `SIGKILL` mid-run, then reaped by a new client. A server restart mid-run: the exit says `lost`, not `unavailable`; the client reconnects; the old sandboxes are gone. 16 sandboxes at once. The self-test is green on both backends. CI runs the SDK's unit tests and type checks. The server binary and the SDK tarball are in the release artifacts.
 
-## 16. Not verified: check first
+## 16. Verified and still unverified
 
-Nothing in this design was built or run. These are the points an implementer must settle before building
-on them.
+Before the build this section listed twelve points to settle first. Their results:
 
-| # | Point | Where it is settled | If it fails |
-| --- | --- | --- | --- |
-| 1 | A connection duplicated from Tokio is non-blocking, and the flag is shared with the copy the supervisor gets as stdin and stdout. The supervisor must drive descriptors 0 and 1 with its own async runtime or clear the flag after `crabd serve` let go of its copy | `guest-supervisor` spike | Hand the supervisor a socket pair and relay in `crabd serve`: one more copy, same protocol |
-| 2 | `memfd_create`, `setrlimit` and `set_dumpable_behavior` are safe functions in `rustix` 1.1.6 by its source. They are not yet compiled into `crabd` for `musl`, and the `fs` and `process` features must be on | `guest-supervisor` spike | The smallest vetted crate that wraps the missing call. Do not relax `unsafe_code = "forbid"` |
-| 3 | The handover works for all three guest transports: Unix socket, the Docker TCP relay, vsock | `guest-supervisor` spike, on Docker and libkrun | As point 1 |
-| 4 | Docker's `unix` transport with a sandbox user different from a root server's | `docker-backend`, first test written | `crabd` creates its socket with a group the server holds |
-| 5 | `fs.identity` in a container shows the host's `(dev, ino)` for a bind mount on a Linux Docker host | `docker-backend` | `mount_identity_checked: false` there too; the check is dropped, the rest of §6 stands |
-| 6 | A mount point under the guest's tmpfs `/tmp` is mounted in the right order on both backends | `docker-backend`, `libkrun-backend` e2e | Sort mounts by depth after the system mounts |
-| 7 | The rootfs pipeline accepts a template with no Dockerfile and an image with no shell | `byo-image` | Fix the pipeline in that step |
-| 8 | The user-namespace probe: `rustix::thread::unshare` is a safe function, but it must be called before the probe starts any thread | `selftest` | Run the attempt in a child process and read its result |
-| 9 | `nix::unistd::getpeereid` on macOS needs the `socket` and `user` features | `server-core` | `rustix` if it gains the call |
-| 10 | Which capabilities a root server can drop under systemd while it still opens every allowed root and reaches Docker | `server-ops`, on the Linux VPS | Keep the bounding set as it is and say so in `docs/hosting.md` |
-| 11 | The guest clock on libkrun after the Mac slept. It is set once at boot | `live-mac` | A periodic clock set from the host |
-| 12 | The three targets of §13 | `ts-contract`, `ts-e2e`, `live-linux` | For exec: the connection pool of §13. For forwards: a server-side Unix-socket target |
+| # | Point | Result |
+| --- | --- | --- |
+| 1 | A connection duplicated from Tokio is non-blocking, and the flag is shared with the supervisor's copy | **Verified.** The supervisor keeps the descriptor non-blocking and drives it with its own single-thread Tokio runtime; `crabd serve` never reads, writes or shuts down its copy after the handover |
+| 2 | `memfd_create`, `setrlimit`, `set_dumpable_behavior` as safe `rustix` functions in a musl `crabd` | **Settled.** `setrlimit` and the dumpable flag are used. `memfd_create` is not: the control pipe replaced the memory file (§3.5). No `unsafe` was added |
+| 3 | The handover works on every guest transport | **Verified** on a Unix socket, TCP, the Docker TCP relay and vsock loopback in tests, and in real libkrun guests on Linux KVM and on Apple Silicon (`libkrun-backend` e2e, `live-mac`) |
+| 4 | Docker's `unix` transport with a sandbox user different from a root server's | **Verified** (`docker-backend` e2e; `live-linux` ran a root systemd service whose sandboxes run as the client's uid). A non-root server needs the sandbox user to share its uid or a gid it holds |
+| 5 | `fs.identity` shows the host's `(dev, ino)` for a bind mount on a Linux Docker host | **Verified.** The manager checks every mount's identity after spawn on Linux; `mount_identity_checked` is true there |
+| 6 | A mount point under the guest's tmpfs `/tmp` is mounted in the right order | **Partly verified.** On libkrun mounts under `/private/tmp` work on macOS (`live-mac`); `/tmp` itself is refused as a libkrun mount target. On Docker no test mounts a host directory below `/tmp` |
+| 7 | The rootfs pipeline accepts a template with no Dockerfile and an image with no shell | **Verified** (`byo-image`: rootfs test from external images; a Docker e2e with a shell-less external template, refused until pinned) |
+| 8 | The user-namespace probe must run before any thread starts | **Verified.** `crabd probe` dispatches before any thread and calls `unshare(CLONE_NEWUSER)` directly. Line `userns-refused` passes on Docker and libkrun |
+| 9 | `nix::unistd::getpeereid` on macOS | **Not needed.** Tokio's `peer_cred` covers Linux and macOS |
+| 10 | Which capabilities a root server can drop under systemd | **Not settled.** The unit drops none from the bounding set. It ran on `dev-vps` with its other hardening options on (`ProtectSystem=strict`, `ProtectHome=read-only`, `AF_UNIX` only, `NoNewPrivileges`); each option was not tested on its own |
+| 11 | The guest clock on libkrun after the Mac slept | **Not verified.** Sleep was out of scope in `live-mac`. libkrun's own `init.krun` on macOS runs a clock worker in every guest for time sync after host sleep; Sandcrab adds nothing |
+| 12 | The three targets of §13 | **Met** on every host (§13) |
+
+Still unverified after the milestone (details in
+[reviews/sdk-milestone-results.md](../reviews/sdk-milestone-results.md#not-verified)): the macOS Docker
+`tcp` transport through the server; `unrestricted` network through the server end to end; the cross-uid
+guarantee end to end (unit evidence only); a program that kills its supervisor (a known limit, no test);
+the guest clock after a host sleep.

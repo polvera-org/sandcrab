@@ -49,11 +49,17 @@ Before planning or writing code, read:
 | `sandcrab-backend-firecracker` | Linux KVM `RuntimeBackend`: owned HTTP-over-UDS Firecracker API client, vsock `CONNECT` transport, pinned kernel/binary (`sandcrab-fc-fetch` bin), block-volume workspaces, tap pool; re-exports `sandcrab-rootfs` as `rootfs` | `sandcrab-core`, `sandcrab-protocol`, `sandcrab-rootfs`, Tokio, `rustix`, `tar`/`flate2`, `sha2`; drives the `firecracker`, `mke2fs`, `docker` and `curl` binaries. **No** Firecracker/VMM SDK crates, **no** `bollard` |
 | `sandcrab-backend-libkrun` | macOS (Apple Silicon, Hypervisor.framework) + Linux KVM `RuntimeBackend` on libkrun: one signed `sandcrab-krun` helper process per sandbox (reads a validated `HelperConfig` from stdin, becomes the VMM, stdin lifeline), libkrun `dlopen`ed at runtime from SHA-256-pinned paths, ext4 block rootfs, live virtio-fs workspaces, TSI never implicit; `unrestricted` = pinned passt / gvproxy spawned by the helper behind its egress filter (`netstack.rs`); `entitlements.plist` + `scripts/sign-krun-helper.sh` | `sandcrab-core`, `sandcrab-protocol`, `sandcrab-rootfs`, Tokio, `rustix`, `sha2`, `nix` (`net`: `getifaddrs`), `libloading` (helper only). `unsafe_code = "deny"` with `src/ffi.rs` as the single `#[allow(unsafe_code)]` island. **No** link-time libkrun, bindgen or `krun-sys`, **no** `bollard`; builds and tests without libkrun installed |
 | `sandcrab-sdk` | Public ergonomic Rust SDK (`Sandcrab`, `Sandbox`, `WorkspaceClient`; explicit `.docker()` / `.firecracker()` / `.libkrun()`, never a fallback) | `sandcrab-core`, `sandcrab-protocol`; backends only behind feature flags (`docker` default; `firecracker` opt-in, Linux only; `libkrun` opt-in, macOS aarch64 + Linux, target-gated dependency) |
-| `sandcrab-cli` (`sandcrab`) | Operator & developer CLI (`doctor`, `workspace`, `template`, `rootfs`, `libkrun install`, `run`, `tool`, `tools schema`; `--backend docker\|firecracker\|libkrun`, `--libkrun-tsi`) | `sandcrab-sdk` (backends via its features: default `docker`, `firecracker`, `libkrun`; the last two compile to nothing off their targets, since Cargo default features cannot be target-specific), `clap`, `anyhow`, `tokio` |
+| `sandcrab-server` | Host daemon behind `sandcrab server`: Unix-socket listener, peer-uid check (Tokio `peer_cred`), per-uid sandbox ownership and the sandbox user rule, JSON-RPC control connections, process and forward connections relaying records and bytes, allowed mount roots, limits sized from the fd limit, self-test as the peer, removal of a predecessor's sandboxes, graceful shutdown. One explicitly chosen backend, never a fallback. Server API types and schema live in `sandcrab-protocol` (`api.rs`) | `sandcrab-sdk` (backends only via its features: default `docker`, `firecracker`, `libkrun`), Tokio, `rustix`, `serde`/`serde_json`, `toml`, `tracing`, `thiserror`, `uuid`, `chrono`, `getrandom`. **No** backend crate directly, **no** `bollard`, **no** `nix`, **no** HTTP stack, **no** TCP listener |
+| `sandcrab-cli` (`sandcrab`) | Operator & developer CLI (`doctor`, `workspace`, `template`, `rootfs`, `libkrun install`, `run`, `tool`, `tools schema`, `server`, `selftest`; `--backend docker\|firecracker\|libkrun`, `--libkrun-tsi`) | `sandcrab-sdk` and `sandcrab-server` (backends via their features: default `docker`, `firecracker`, `libkrun`; the last two compile to nothing off their targets, since Cargo default features cannot be target-specific), `clap`, `anyhow`, `tokio` |
 | `sandcrab-agent` (`crabagent`) | Test harness: Claude coding agent (Anthropic Messages API) whose tools are exactly the Sandcrab tools | `sandcrab-sdk` (backends via its features, like `sandcrab-cli`: default `docker`, `firecracker`, `libkrun`; the last two compile to nothing off their targets), `reqwest`, `rustyline`, `clap`, `dotenvy`; never a backend crate directly |
 | `sandcrab-bench` | Backend benchmark runner (scenarios, cgroup/`/proc` sampling, macOS helper RSS for libkrun, JSON results + schema) | `sandcrab-sdk` (`docker`, `firecracker`, `libkrun` features), `clap`, `schemars`; `bollard` (optional, `docker` feature) for resource sampling only |
 
-Future crates: `sandcrab-server` and the TypeScript/Python SDKs (next milestone); `sandcrab-backend-cloud-hypervisor` (Phase 2 remainder, on hold).
+Outside the Cargo workspace: **`sdk/typescript`** (`@sandcrab/sdk`), the TypeScript client for `sandcrab server`. Node 26+, ESM,
+no runtime dependency, no native code. Its wire types are generated from `sdk/typescript/schema/server-api.schema.json`, a byte copy
+of the Rust snapshot `crates/sandcrab-protocol/tests/snapshots/server-api.schema.json` (`pnpm sync-schema && pnpm generate`; a unit
+test fails when stale). Commands: `pnpm test`, `pnpm test:e2e` (needs `SANDCRAB_BIN`), `pnpm build`.
+
+Future crates: the Python SDK (next milestone, on the same server API); `sandcrab-backend-cloud-hypervisor` (Phase 2 remainder, on hold).
 
 ---
 
@@ -120,26 +126,37 @@ build cache. Dev machines can run out of space mid-task, which breaks Docker and
 
 ## 5. Picking Up From Here (Agent Handoff)
 
-**Done.** Phase 1 (V1) and the libkrun backend flow (Phase 2, partial) are complete on `feat/phase-1`; see
-[`docs/ROADMAP.md`](docs/ROADMAP.md#status) and the flows [`docs/plans/phase-1-mvp.flow.yaml`](docs/plans/phase-1-mvp.flow.yaml)
-and [`docs/plans/libkrun-backend.flow.yaml`](docs/plans/libkrun-backend.flow.yaml). Three backends ship: Docker (Linux,
-and macOS over the `tcp` transport), Firecracker (Linux KVM; KVM e2e passes) and libkrun (Apple Silicon macOS and
-Linux KVM; e2e passes on both). Also done: protocol 0.2 connection auth, guest hardening that fails closed,
-host-local template pins, pins verified through the fd that is used, a per-host bench report. The final review
-([`docs/reviews/libkrun-backend-review.md`](docs/reviews/libkrun-backend-review.md)) says "ship with follow-ups".
-Host setup for every backend: [`docs/hosting.md`](docs/hosting.md).
+**Done.** Phase 1 (V1), the libkrun backend flow (Phase 2, partial) and the server and SDK milestone are complete on
+`feat/sdk-milestone`; see [`docs/ROADMAP.md`](docs/ROADMAP.md#status) and the flows
+[`docs/plans/phase-1-mvp.flow.yaml`](docs/plans/phase-1-mvp.flow.yaml),
+[`docs/plans/libkrun-backend.flow.yaml`](docs/plans/libkrun-backend.flow.yaml) and
+[`docs/plans/sdk-milestone.flow.yaml`](docs/plans/sdk-milestone.flow.yaml). Three backends ship: Docker (Linux, and macOS
+over the `tcp` transport), Firecracker (Linux KVM; KVM e2e passes) and libkrun (Apple Silicon macOS and Linux KVM; e2e
+passes on both). `sandcrab server` serves Docker and libkrun to the TypeScript SDK over a Unix socket (server API 1.0,
+protocol 0.3 to `crabd`); operator guide [`docs/server.md`](docs/server.md), wire reference
+[`docs/protocol.md`](docs/protocol.md#server-api-client--sandcrab-server), design as built
+[`docs/design/server-and-sdk.md`](docs/design/server-and-sdk.md), results and the not-verified list
+[`docs/reviews/sdk-milestone-results.md`](docs/reviews/sdk-milestone-results.md). Host setup for every backend:
+[`docs/hosting.md`](docs/hosting.md).
+
+Known limits to keep in mind when touching the server: a program that kills its supervisor leaves its tree until the
+sandbox is destroyed (`crabd serve` is not a subreaper, review M1); `backend_exit` is never sent; libkrun x86_64 boots at
+most 4 mount devices; a server restart ends every run.
 
 **Next**, roughly in this order:
-1. The review backlog ([`docs/ROADMAP.md`](docs/ROADMAP.md#next)). The top three (R18 private-dir checks, N2 stamps bound to
-   digests, N3 quarantine cleared through the fd) are the `integrity-fixes` step; then R10 (sign and notarize with a
-   real Developer ID; note that `sandcrab libkrun install` re-signs every helper), the `doctor` checks for swap and
-   TSI precedence, I1 (fd passing for Firecracker drives before the jailer), R9 (setuid bits on virtio-fs shares).
-2. Benchmarks ([`docs/bench/README.md`](docs/bench/README.md#open-bench-todo)): Docker vs libkrun on mac-m2 in an idle
-   weekend window (`--backends docker,libkrun`); one valid, interleaved `docker,firecracker,libkrun` run on an SSD/NVMe
-   KVM host (kvm-dedicated's HDDs skew Docker). Then regenerate `docs/site/bench-report.html`
-   (`scripts/bench-report-data.py`).
-3. The older deferred review items: pack/commit workspaces through the verified root fd and have `crabd` re-check root
+1. **Python SDK** on the same server API, mirroring the TypeScript SDK's outcomes and e2e.
+2. **The egress allowlist** and the secret-injection proxy (Phase 3).
+3. The server and SDK review backlog ([`docs/ROADMAP.md`](docs/ROADMAP.md#next): M1 subreaper in `crabd serve`, m3
+   `tree_kill` reported without evidence, m4 ownership race, m5 more protected mount roots, m6 cross-uid e2e, m9
+   self-test sandboxes not counted) and the open items of the live reports (`unrestricted` and macOS Docker `tcp`
+   through the server, `backend_exit`, log level, doctor noise).
+4. The libkrun review backlog: R18, N2, N3 (`integrity-fixes`), R10 (sign and notarize with a real Developer ID; note
+   that `sandcrab libkrun install` re-signs every helper), the `doctor` checks for swap and TSI precedence, I1, R9.
+   Also drop the stale "e2e pending" note from the libkrun `doctor` summary.
+5. Benchmarks ([`docs/bench/README.md`](docs/bench/README.md#open-bench-todo)): Docker vs libkrun on mac-m2 in an idle
+   weekend window; one valid, interleaved `docker,firecracker,libkrun` run on an SSD/NVMe KVM host. Then regenerate
+   `docs/site/bench-report.html` (`scripts/bench-report-data.py`).
+6. The older deferred review items: pack/commit workspaces through the verified root fd and have `crabd` re-check root
    dev/ino after start; the cross-registry nesting race.
-4. Phase 2 remainder: Cloud Hypervisor backend, Firecracker `jailer` (then reconsider `multi_tenant_safe`), libkrun helper
+7. Phase 2 remainder: Cloud Hypervisor backend, Firecracker `jailer` (then reconsider `multi_tenant_safe`), libkrun helper
    confinement (Seatbelt / Landlock + seccomp), reproducible template content digests.
-5. Phase 3: the egress allowlist and secret-injection proxy.
