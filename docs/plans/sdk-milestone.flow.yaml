@@ -153,7 +153,7 @@ steps:
     title: "`crabd probe` + self-test in the SDK: named lines in a fresh sandbox of a named template (no capabilities, no new privileges, no user namespace, loopback only, DNS / gateway / metadata refused, a forward reaches its target and nothing else, nothing readable outside the mounts, tree kill is real). A line passes only on a specific refusal; a timeout is inconclusive"
     depends_on: [rust-sdk, docker-backend]
     artifacts: [crates/sandcrab-guest/src/probe.rs, crates/sandcrab-sdk/src/selftest.rs]
-    status: doing
+    status: done
 
   - id: server-core
     phase: implement
