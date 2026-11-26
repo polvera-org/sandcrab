@@ -9,8 +9,8 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use sandcrab_core::{
-    BackendCapabilities, BackendKind, LifecyclePhase, NetworkConfig, ResolvedSpec, Result,
-    RuntimeBackend, SandboxError, SandboxHandle, UserSpec,
+    BackendCapabilities, BackendKind, LifecyclePhase, NetworkConfig, NprocScope, ResolvedSpec,
+    Result, RuntimeBackend, SandboxError, SandboxHandle, UserSpec,
 };
 use sandcrab_protocol::init::{InitConfig, InitUser};
 
@@ -39,6 +39,13 @@ pub const CAPABILITIES: BackendCapabilities = BackendCapabilities {
     multi_tenant_safe: false,
     supports_snapshots: false,
     supports_host_dir_mounts: true,
+    // Turned on by the backend steps of the sdk-milestone flow; refused until then.
+    supports_forwards: false,
+    supports_host_mounts: false,
+    supports_tmp_options: false,
+    supports_process_limits: false,
+    mount_identity_checked: false,
+    nproc_scope: NprocScope::Sandbox,
 };
 
 /// Nameservers written to the guest's `/etc/resolv.conf` under the TSI opt-in (TSI proxies
@@ -817,6 +824,7 @@ impl RuntimeBackend for LibkrunBackend {
 
     async fn spawn(&self, spec: &ResolvedSpec) -> Result<Box<dyn SandboxHandle>> {
         spec.reject_secrets()?;
+        spec.reject_unsupported(self.kind(), &self.capabilities())?;
         // Fail before creating anything: policy, ports, sizes.
         net::plan(&spec.network, self.net_options())?;
         ports::check(&spec.ports)?;
@@ -941,6 +949,12 @@ image = "sandcrab/base:0.1.0"
             },
             ttl: None,
             secrets: Vec::new(),
+            forwards: Vec::new(),
+            host_mounts: Vec::new(),
+            tmp_exec: false,
+            tmp_size_mb: None,
+            pids_max: None,
+            nofile: None,
             timings: LifecycleTimings::start(),
         }
     }

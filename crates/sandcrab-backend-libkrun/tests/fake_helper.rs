@@ -448,6 +448,12 @@ fn bare_spec() -> ResolvedSpec {
         resources: manifest.resources,
         ttl: None,
         secrets: Vec::new(),
+        forwards: Vec::new(),
+        host_mounts: Vec::new(),
+        tmp_exec: false,
+        tmp_size_mb: None,
+        pids_max: None,
+        nofile: None,
         timings: LifecycleTimings::start(),
         template,
     }

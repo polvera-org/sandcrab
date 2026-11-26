@@ -565,6 +565,12 @@ image = "sandcrab/base:0.1.0"
             },
             ttl: None,
             secrets: Vec::new(),
+            forwards: Vec::new(),
+            host_mounts: Vec::new(),
+            tmp_exec: false,
+            tmp_size_mb: None,
+            pids_max: None,
+            nofile: None,
             timings: LifecycleTimings::start(),
         }
     }

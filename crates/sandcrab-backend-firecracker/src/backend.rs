@@ -11,8 +11,8 @@ use std::time::Instant;
 use async_trait::async_trait;
 use sandcrab_core::{
     BackendCapabilities, BackendKind, Connector, ForwarderConfig, MountMode, NetworkConfig,
-    NetworkPolicy, PortForwards, ResolvedSpec, Result, RuntimeBackend, SandboxError, SandboxHandle,
-    StopSignal, UserSpec, WorkspaceBacking,
+    NetworkPolicy, NprocScope, PortForwards, ResolvedSpec, Result, RuntimeBackend, SandboxError,
+    SandboxHandle, StopSignal, UserSpec, WorkspaceBacking,
 };
 use sandcrab_protocol::init::{
     DEFAULT_TOOLS_PORT, GuestMount, InitConfig, InitUser, ROOT_DRIVE_ID, SCRATCH_DRIVE_ID,
@@ -560,6 +560,13 @@ impl RuntimeBackend for FirecrackerBackend {
             supports_snapshots: false,
             // Workspaces are block drives copied in and synced back, not live shares.
             supports_host_dir_mounts: false,
+            // Not implemented on Firecracker in this milestone: refused, never ignored.
+            supports_forwards: false,
+            supports_host_mounts: false,
+            supports_tmp_options: false,
+            supports_process_limits: false,
+            mount_identity_checked: false,
+            nproc_scope: NprocScope::Sandbox,
         }
     }
 
@@ -569,6 +576,8 @@ impl RuntimeBackend for FirecrackerBackend {
 
     async fn spawn(&self, spec: &ResolvedSpec) -> Result<Box<dyn SandboxHandle>> {
         spec.reject_secrets()?;
+        // Forwards, host mounts, `/tmp` options and process limits: explicit refusal.
+        spec.reject_unsupported(self.kind(), &self.capabilities())?;
         if !enforces(&spec.network) {
             return Err(SandboxError::PolicyUnenforceable(format!(
                 "the firecracker backend cannot enforce network policy `{}` in V1 \
