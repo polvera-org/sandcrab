@@ -54,7 +54,7 @@ $SANDCRAB_TEMPLATE_PINS/<template>/<version>/<arch>.json
 ```
 
 `source` is `build` (written by `templates/build.sh`) or `adopt` (written by
-`sandcrab template pin`). The store is host-wide because it describes the host's image
+`sandcrab template pin`, the only way to pin an [external image](#external-images)). The store is host-wide because it describes the host's image
 store: `--state-dir` does not move it. Use `SANDCRAB_TEMPLATE_PINS`, or
 `SandcrabBuilder::template_pins_dir` in the SDK, to point somewhere else. A pin file that
 exists but is unreadable, malformed or for another key fails the spawn. It is never
@@ -104,6 +104,52 @@ image changed since this host pinned it; rebuild and re-pin with `templates/buil
 base` (or `sandcrab template build base`), or adopt the current image with `sandcrab
 template pin base`)
 ```
+
+## External images
+
+A template can name an image somebody else built (bring your own image). Its directory holds
+only `sandcrab.toml`, with `external = true`:
+
+```toml
+[template]
+name = "myapp"
+version = "1.4.0"
+image = "registry.example/myapp:1.4.0"   # a digest reference (`name@sha256:…`) also works
+external = true                          # no Dockerfile; never built by Sandcrab
+
+[tools]
+tiers = ["core"]                         # leave out "process" when the image has no bash
+```
+
+An external template with a `Dockerfile` next to it, or a non-external one without, fails to
+load. `templates/build.sh` and `sandcrab template build` skip or refuse external templates.
+
+Pin it the same way as a built template: pull the image, then adopt it.
+
+```sh
+docker pull registry.example/myapp:1.4.0
+sandcrab template pin myapp      # records its local image ID, `source: "adopt"`
+```
+
+The pin means what it means for a built template: the local image is unchanged since this
+host adopted it. It says nothing about who built the image or what is in it, so pin only an
+image you trust, ideally pulled by digest. Sandcrab never pulls at spawn and never trusts an
+unpinned image: the spawn fails with `UnpinnedImage` and the two commands above. After a
+`docker pull` moves the tag, spawns fail with a digest mismatch until you pin again.
+
+What the image must provide:
+
+| Requirement | Why |
+| --- | --- |
+| Linux for the host's architecture (`linux/amd64` or `linux/arm64`) | Guests run natively; the rootfs pipeline exports that platform and fails if the image lacks it |
+| Nothing else for the file tools | `crabd` is a static (musl) binary that Sandcrab injects; it needs no libc, shell or user database from the image |
+| `bash` on `PATH`, only for the `bash` and `process_*` tools | They run `bash -c` |
+| The template's `workdir` (default `/workspace`) exists, or is a mount target | It is the default cwd. The microVM rootfs creates `/workspace`; Docker creates a missing one owned by root |
+| A writable `HOME` if its programs need one | The sandbox runs as the host uid:gid (or the configured user), not the image's `USER` |
+| No reliance on `ENTRYPOINT`, `CMD`, `USER` or an init system | None of them is used: `crabd` is the entrypoint (Docker) or PID 1 (microVMs) |
+
+The microVM rootfs pipeline (libkrun, Firecracker) exports the image's files without running
+it, so an image with no shell and a non-root `USER` works there too.
 
 ## Legacy in-manifest pins
 
