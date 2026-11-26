@@ -111,7 +111,7 @@ fn schema_for<T: JsonSchema>(nullable_options: bool) -> Value {
 
 /// Recursively clean a schema node, walking only schema-valued keywords so property
 /// names that collide with keywords are never touched.
-fn clean(node: &mut Value) {
+pub(crate) fn clean(node: &mut Value) {
     let Value::Object(map) = node else { return };
 
     if map.get("default") == Some(&Value::Null) {

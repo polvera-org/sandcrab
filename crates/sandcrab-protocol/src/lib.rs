@@ -21,6 +21,9 @@
 //! connection. Process and forward connections then carry [`record`]s.
 //! Typed layers: [`Call`] / [`Reply`] (all methods), [`ToolCall`] / [`ToolResult`] (tools).
 //!
+//! The [`api`] module holds the client ↔ server API of `sandcrab-server` and its JSON Schema
+//! document ([`api::server_api_schema`]).
+//!
 //! # Host flow
 //!
 //! ```
@@ -42,6 +45,7 @@
 //! assert_eq!(Call::from_request(&req).unwrap(), call);
 //! ```
 
+pub mod api;
 pub mod auth;
 mod error;
 pub mod forward;
