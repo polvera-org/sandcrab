@@ -127,6 +127,15 @@ sandcrab --backend libkrun server --socket "$DIR/server.sock" --lifeline-stdin
 pipe open, so a client that dies takes its server and its sandboxes with it. Client, server and
 the libkrun helper run as one user, so the default allow list (the server's own uid) is right.
 
+## Processes that outlive their supervisor
+
+Each process runs under its own supervisor in the sandbox, which kills the whole tree on exit,
+timeout or cancel and reports `tree_clean`. The program runs as the same user as its
+supervisor, so it can kill it. Then nothing is left to stop the tree: the client gets `lost`
+(or an exit) with `tree_clean: false`, and whatever the program started keeps running in the
+sandbox until the sandbox is destroyed. **A client must destroy a sandbox whose process
+reported `tree_clean: false`** before it runs anything else there.
+
 ## Self-test
 
 `server.selftest {template}` runs the self-test ([design §8](design/server-and-sdk.md#8-self-test))
