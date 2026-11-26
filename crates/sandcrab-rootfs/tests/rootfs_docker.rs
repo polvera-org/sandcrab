@@ -85,3 +85,95 @@ fn builds_base_rootfs() {
     assert!(hit.cache_hit);
     assert_eq!(hit.manifest, built.manifest);
 }
+
+/// Third-party images, pinned by multi-arch index digest and pulled when missing: one with no
+/// shell whose default user is not root (`static-debian12:nonroot`, uid 65532), and one with
+/// Node, git and Python (`node:24-bookworm`).
+const EXTERNAL_IMAGES: &[&str] = &[
+    "gcr.io/distroless/static-debian12@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab",
+    "node@sha256:49f7adaf9f1574bc45c20ea317139b39a59d7e758d0e93745e112fd85cb42623",
+];
+
+/// The pipeline takes an image built elsewhere (an external template): no Dockerfile, maybe no
+/// shell, a non-root `USER`. The export never runs the image, so neither matters.
+#[test]
+#[ignore = "requires docker + network to pull public images + SANDCRAB_TEST_CRABD"]
+fn builds_rootfs_from_external_images() {
+    let crabd = PathBuf::from(
+        std::env::var_os("SANDCRAB_TEST_CRABD").expect("set SANDCRAB_TEST_CRABD to a crabd binary"),
+    );
+    let cache = tempfile::tempdir().unwrap();
+    let builder = RootfsBuilder::new(cache.path());
+    for image in EXTERNAL_IMAGES {
+        let pull = Command::new("docker")
+            .args(["pull", "-q", image])
+            .status()
+            .unwrap();
+        assert!(pull.success(), "docker pull {image}");
+        let image_id = sandcrab_rootfs::docker_image_id(image).unwrap();
+        let req = RootfsRequest {
+            image: (*image).into(),
+            expected_image_id: Some(image_id),
+            template: Some("external".into()),
+            crabd: crabd.clone(),
+            arch: Arch::host().unwrap(),
+        };
+        let built = builder.build(&req).unwrap();
+        let img = &built.image_path;
+        let fsck = Command::new("e2fsck").arg("-fn").arg(img).output().unwrap();
+        assert!(
+            fsck.status.success(),
+            "{image}: e2fsck: {}",
+            String::from_utf8_lossy(&fsck.stdout)
+        );
+        let stat = debugfs(img, &format!("stat {}", built.manifest.crabd_path));
+        assert!(stat.contains("Mode:  0755"), "{image}: {stat}");
+        assert!(
+            debugfs(img, "stat /opt/sandcrab/crabd").contains("Type: symlink"),
+            "{image}"
+        );
+        for d in [
+            "/proc",
+            "/sys",
+            "/dev",
+            "/run",
+            "/tmp",
+            "/workspace",
+            "/mnt/scratch",
+            "/mnt/newroot",
+        ] {
+            assert!(
+                debugfs(img, &format!("stat {d}")).contains("Type: directory"),
+                "{image}: {d}"
+            );
+        }
+        // No leftover export container (nor its anonymous volumes).
+        let ps = Command::new("docker")
+            .args([
+                "ps",
+                "-aq",
+                "--filter",
+                "label=dev.sandcrab.purpose=rootfs-export",
+                "--filter",
+                &format!("ancestor={image}"),
+            ])
+            .output()
+            .unwrap();
+        assert!(ps.stdout.is_empty(), "{image}: export container left");
+    }
+    // The no-shell image really has no shell.
+    let sh = debugfs(
+        &builder
+            .build(&RootfsRequest {
+                image: EXTERNAL_IMAGES[0].into(),
+                expected_image_id: None,
+                template: None,
+                crabd,
+                arch: Arch::host().unwrap(),
+            })
+            .unwrap()
+            .image_path,
+        "stat /bin/sh",
+    );
+    assert!(!sh.contains("Type: regular"), "{sh}");
+}
