@@ -201,7 +201,7 @@ steps:
     title: "Full e2e as a matrix on Docker and libkrun: mounts at the same path, forwards (TCP port, Unix socket, handler; undeclared port refused; throughput and 16 parallel connections), a pipeline between two sandboxes with a paused reader, destroy by label confirmed empty, client killed then reaped by a new client, server restart (exit is not `unavailable`, client reconnects), 16 concurrent sandboxes; CI job for the SDK; server and SDK tarball in the release packaging"
     depends_on: [ts-contract, server-ops, docker-backend, libkrun-backend]
     artifacts: [sdk/typescript/test, .github/workflows/ci.yml, scripts/package-release.sh]
-    status: doing
+    status: done
 
   - id: review
     phase: verify
@@ -209,21 +209,21 @@ steps:
     title: "QA + security review, MVP posture (fix medium and up, backlog the rest): peer-uid check and socket modes, no mount outside the allowed roots or of the server's own directories, a forward reaches only what the client named, no network besides forwards, exact env and nothing logged, bounded memory, nothing outlives a command, no backend downgrade, self-test cannot pass on a timeout; fmt / clippy / unit / e2e green"
     depends_on: [ts-e2e, byo-image]
     artifacts: [docs/reviews/sdk-milestone-review.md]
-    status: todo
+    status: doing
 
   - id: live-linux
     phase: verify
     agent: nova
     title: "Live on the Linux VPS (Docker, no KVM): root server as a systemd service; client in a hardened container with the socket directory and a host data directory bound at the same path; external template; a monorepo install + build + test through a forward to a proxy in the client's container; server restart without a container restart. Targets: a forwarded stream at 50 MB/s, 16 parallel connections with no reset, warm exec p50 at or under 30 ms; self-test green"
     depends_on: [ts-e2e]
-    status: todo
+    status: doing
 
   - id: live-mac
     phase: verify
     agent: nova
     title: "Live on the Mac (libkrun): server as a child of the client process, identity paths incl. one under a symlinked temp root, a folder edited from the host mid-run, forwards over vsock, a line-duplex process, guest clock after a host sleep, self-test green"
     depends_on: [ts-e2e]
-    status: todo
+    status: doing
 
   - id: adopter-pilot
     phase: verify
