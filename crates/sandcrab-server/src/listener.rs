@@ -201,10 +201,23 @@ async fn attach(shared: &Shared, peer: Peer, mut stream: UnixStream, req: RpcReq
     }
 }
 
+/// Whether reading the peer's credentials failed only because the peer is already gone.
+fn peer_gone(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::NotConnected | std::io::ErrorKind::ConnectionReset
+    )
+}
+
 /// One accepted connection: the peer check, then the first frame decides its kind.
 pub(crate) async fn connection(shared: Arc<Shared>, mut stream: UnixStream) {
     let peer = match Peer::of(&stream) {
         Ok(p) => p,
+        // A peer that already hung up (a readiness probe; macOS answers ENOTCONN) is routine.
+        Err(e) if peer_gone(&e) => {
+            tracing::debug!(error = %e, "peer closed before its credentials were read");
+            return;
+        }
         Err(e) => {
             tracing::warn!(error = %e, "no peer credentials; connection closed");
             return;
@@ -269,6 +282,26 @@ mod tests {
         // Group-writable is refused too.
         std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o770)).unwrap();
         assert!(prepare_dir(&open.join("s.sock"), uid(), None).is_err());
+    }
+
+    #[tokio::test]
+    async fn a_peer_gone_before_the_credential_check_is_routine() {
+        assert!(!peer_gone(&std::io::Error::from(
+            std::io::ErrorKind::PermissionDenied
+        )));
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("s.sock");
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        drop(std::os::unix::net::UnixStream::connect(&path).unwrap());
+        let (stream, _) = listener.accept().await.unwrap();
+        // macOS: ENOTCONN once the peer closed. Linux keeps the credentials from connect time.
+        match Peer::of(&stream) {
+            Err(e) => assert!(peer_gone(&e), "{e}"),
+            Ok(_) => assert!(
+                !cfg!(target_os = "macos"),
+                "macOS answered with credentials"
+            ),
+        }
     }
 
     #[tokio::test]
