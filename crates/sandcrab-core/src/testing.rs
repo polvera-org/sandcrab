@@ -198,10 +198,16 @@ impl MockCrabd {
                         protocol_version: self.protocol_version.clone(),
                         tools: TOOL_NAMES.iter().map(|s| (*s).to_owned()).collect(),
                         default_cwd: self.default_cwd.clone(),
+                        features: Vec::new(),
+                        forward_ports: Vec::new(),
                     })),
                 )
             }
             Call::Ping => (Duration::ZERO, Ok(Reply::Ping(PingResult {}))),
+            other @ (Call::ProcessCancel(_) | Call::FsIdentity(_) | Call::ForwardStats) => (
+                Duration::ZERO,
+                Err(ProtocolError::MethodNotFound(other.method().to_owned())),
+            ),
             Call::Tool(tool) => {
                 self.tool_calls.fetch_add(1, Ordering::SeqCst);
                 match tool {

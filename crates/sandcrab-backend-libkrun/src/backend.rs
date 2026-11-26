@@ -707,6 +707,11 @@ pub(crate) fn init_config(
         dns,
         tools_port: TOOLS_PORT,
         host_time_unix_ms: crate::vm::unix_ms(),
+        tmp_exec: false,
+        tmp_size_mb: None,
+        pids_max: None,
+        nofile: None,
+        forward_ports: Vec::new(),
     }
 }
 

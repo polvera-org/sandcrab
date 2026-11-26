@@ -59,7 +59,15 @@ impl ToolError {
             ProtocolError::Unauthorized(_) => {
                 return Self::new("unauthorized", err.to_string(), true);
             }
-            ProtocolError::Other { .. } => "tool_error",
+            // crabd and the host speak different protocol versions: nothing to retry.
+            ProtocolError::UnsupportedVersion { .. } => {
+                return Self::new("unsupported_version", err.to_string(), true);
+            }
+            // process.open errors; a tool call never returns them.
+            ProtocolError::SpawnFailed { .. }
+            | ProtocolError::LimitExceeded { .. }
+            | ProtocolError::Cancelled(_)
+            | ProtocolError::Other { .. } => "tool_error",
         };
         Self::new(code, err.to_string(), false)
     }

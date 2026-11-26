@@ -155,6 +155,10 @@ pub async fn handle_request(ctx: &ToolContext, req: RpcRequest) -> RpcResponse {
     let outcome = match Call::from_request(&req) {
         Ok(Call::Hello(p)) => Ok(Reply::Hello(hello(ctx, &p))),
         Ok(Call::Ping) => Ok(Reply::Ping(PingResult {})),
+        // Protocol 0.3 methods this crabd does not serve yet.
+        Ok(other @ (Call::ProcessCancel(_) | Call::FsIdentity(_) | Call::ForwardStats)) => {
+            Err(ProtocolError::MethodNotFound(other.method().to_owned()))
+        }
         Ok(Call::Tool(call)) => {
             let tool = call.name();
             let res = tools::dispatch(ctx, call).await;
@@ -184,6 +188,8 @@ fn hello(ctx: &ToolContext, p: &HelloParams) -> HelloResult {
         protocol_version: PROTOCOL_VERSION.to_owned(),
         tools: TOOL_NAMES.iter().map(|&t| t.to_owned()).collect(),
         default_cwd: ctx.default_cwd.display().to_string(),
+        features: Vec::new(),
+        forward_ports: Vec::new(),
     }
 }
 

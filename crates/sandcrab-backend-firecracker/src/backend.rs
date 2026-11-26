@@ -491,6 +491,11 @@ impl FirecrackerBackend {
             },
             tools_port: DEFAULT_TOOLS_PORT,
             host_time_unix_ms: unix_ms(),
+            tmp_exec: false,
+            tmp_size_mb: None,
+            pids_max: None,
+            nofile: None,
+            forward_ports: Vec::new(),
         };
         let configured = init_guest(vm, &init, deadline, t).await?;
         vm.meta.guest_boot_ms = Some(configured.boot_ms);

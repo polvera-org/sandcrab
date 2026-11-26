@@ -76,6 +76,11 @@ mod tests {
             dns: vec![],
             tools_port: 2048,
             host_time_unix_ms: None,
+            tmp_exec: false,
+            tmp_size_mb: None,
+            pids_max: None,
+            nofile: None,
+            forward_ports: Vec::new(),
         })
         .unwrap()
     }

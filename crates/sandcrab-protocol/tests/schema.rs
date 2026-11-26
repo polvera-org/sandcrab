@@ -8,14 +8,61 @@ use std::path::PathBuf;
 use sandcrab_protocol::*;
 use serde_json::Value;
 
-fn snapshot_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/snapshots/tool_definitions.json")
+fn snapshot_path(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/snapshots")
+        .join(name)
 }
 
 #[test]
 fn tool_definitions_match_snapshot() {
-    let actual = serde_json::to_string_pretty(&tool_definitions()).unwrap() + "\n";
-    let path = snapshot_path();
+    check_snapshot(
+        "tool_definitions.json",
+        &serde_json::to_string_pretty(&tool_definitions()).unwrap(),
+    );
+}
+
+#[test]
+fn method_schemas_match_snapshot() {
+    check_snapshot(
+        "method_schemas.json",
+        &serde_json::to_string_pretty(&method_schemas()).unwrap(),
+    );
+}
+
+#[test]
+fn method_schemas_cover_the_non_tool_methods() {
+    let names: Vec<_> = method_schemas().iter().map(|m| m.method).collect();
+    for m in [
+        METHOD_HELLO,
+        METHOD_PING,
+        METHOD_PROCESS_CANCEL,
+        METHOD_FS_IDENTITY,
+        METHOD_FORWARD_STATS,
+        METHOD_TUNNEL_OPEN,
+        METHOD_PROCESS_OPEN,
+        METHOD_FORWARD_LISTEN,
+        METHOD_FORWARD_ACCEPT,
+        METHOD_FORWARD_INCOMING,
+        METHOD_FORWARD_REJECT,
+    ] {
+        assert!(names.contains(&m), "{m}");
+        assert!(!TOOL_NAMES.contains(&m), "{m} must not be a tool");
+    }
+    for m in method_schemas() {
+        walk(&m.params, &mut |o| {
+            assert!(!o.contains_key("$ref"), "{}: $ref", m.method);
+        });
+        // Params of requests reject unknown fields.
+        if m.result.is_some() && m.params["type"] == "object" {
+            assert_eq!(m.params["additionalProperties"], false, "{}", m.method);
+        }
+    }
+}
+
+fn check_snapshot(name: &str, actual: &str) {
+    let actual = actual.to_owned() + "\n";
+    let path = snapshot_path(name);
     if std::env::var_os("UPDATE_SNAPSHOTS").is_some() {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, &actual).unwrap();
@@ -29,7 +76,7 @@ fn tool_definitions_match_snapshot() {
     });
     assert!(
         actual == expected,
-        "tool definitions changed; review and re-run with UPDATE_SNAPSHOTS=1"
+        "{name} changed; review and re-run with UPDATE_SNAPSHOTS=1"
     );
 }
 

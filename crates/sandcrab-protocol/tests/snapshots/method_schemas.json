@@ -1,0 +1,588 @@
+[
+  {
+    "method": "hello",
+    "kind": "call",
+    "params": {
+      "additionalProperties": false,
+      "properties": {
+        "client": {
+          "description": "Free-form host client identifier, e.g. `sandcrab-core/0.1.0`.",
+          "type": "string"
+        },
+        "protocol_version": {
+          "description": "Protocol version spoken by the host, for compatibility diagnostics.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "result": {
+      "properties": {
+        "crabd_version": {
+          "description": "`crabd` build version.",
+          "type": "string"
+        },
+        "default_cwd": {
+          "description": "Default working directory for relative paths and commands.",
+          "type": "string"
+        },
+        "features": {
+          "default": [],
+          "description": "What this daemon can do beyond the tools (see [`crate::features`]). Empty from a `crabd` before 0.3.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "forward_ports": {
+          "default": [],
+          "description": "Loopback ports this daemon forwards (`--forward-port`). Empty from a `crabd` before 0.3.",
+          "items": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "protocol_version": {
+          "description": "Protocol version spoken by `crabd` (see [`crate::PROTOCOL_VERSION`]).",
+          "type": "string"
+        },
+        "tools": {
+          "description": "Tool methods this daemon implements.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "crabd_version",
+        "default_cwd",
+        "protocol_version",
+        "tools"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "method": "ping",
+    "kind": "call",
+    "params": {
+      "additionalProperties": false,
+      "properties": {},
+      "type": "object"
+    },
+    "result": {
+      "properties": {},
+      "type": "object"
+    }
+  },
+  {
+    "method": "process.cancel",
+    "kind": "call",
+    "params": {
+      "additionalProperties": false,
+      "properties": {
+        "grace_ms": {
+          "description": "Grace between ask and force. Default 5000; 0 forces at once.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "process_id": {
+          "description": "The `process_id` of a `process.open`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "process_id"
+      ],
+      "type": "object"
+    },
+    "result": {
+      "properties": {
+        "tree_clean": {
+          "description": "False: something of the tree could not be stopped.",
+          "type": "boolean"
+        },
+        "was_running": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "tree_clean",
+        "was_running"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "method": "fs.identity",
+    "kind": "call",
+    "params": {
+      "additionalProperties": false,
+      "properties": {
+        "paths": {
+          "description": "Absolute paths in the sandbox. Not empty. Symlinks are followed, like `stat`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "paths"
+      ],
+      "type": "object"
+    },
+    "result": {
+      "items": {
+        "description": "The identity of one file: device and inode numbers, as `stat` reports them.",
+        "properties": {
+          "dev": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "ino": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "dev",
+          "ino"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  {
+    "method": "forward.stats",
+    "kind": "call",
+    "params": {
+      "additionalProperties": false,
+      "properties": {},
+      "type": "object"
+    },
+    "result": {
+      "items": {
+        "description": "Counters of one forward port.",
+        "properties": {
+          "accepted": {
+            "description": "Connections handed to the host by `forward.accept`.",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "port": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "refused": {
+            "description": "Why connections to a forward port were closed, counted since start.",
+            "properties": {
+              "cap": {
+                "description": "Over a connection cap.",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "no_listener": {
+                "description": "No `forward.listen` connection.",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "rejected": {
+                "description": "`forward.reject` from the host.",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "unclaimed": {
+                "description": "Announced but not accepted within 10 s.",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "cap",
+              "no_listener",
+              "rejected",
+              "unclaimed"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "accepted",
+          "port",
+          "refused"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  {
+    "method": "tunnel.open",
+    "kind": "connection",
+    "params": {
+      "additionalProperties": false,
+      "properties": {
+        "port": {
+          "description": "TCP port on the guest's loopback interface (1..=65535).",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "port"
+      ],
+      "type": "object"
+    },
+    "result": {
+      "properties": {
+        "port": {
+          "description": "Guest loopback port the stream is connected to.",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "port"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "method": "process.open",
+    "kind": "connection",
+    "params": {
+      "additionalProperties": false,
+      "properties": {
+        "argv": {
+          "description": "`argv[0]` is the program. Not empty. No element contains NUL.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "cwd": {
+          "description": "Absolute. Default: the sandbox's default cwd.",
+          "type": "string"
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "The exact environment. Nothing is added, nothing inherited.",
+          "type": "object"
+        },
+        "kill_grace_ms": {
+          "description": "Grace between ask and force at the bound, at the cap and on a closed connection. Default 500.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "limits": {
+          "additionalProperties": false,
+          "description": "Resource limits applied to the program before it starts. Each `None` inherits the sandbox's limit. A value above the sandbox's own hard limit is `-32602`, never clamped.",
+          "properties": {
+            "data_bytes": {
+              "description": "`RLIMIT_DATA`, at least 32 MiB.",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "fsize_bytes": {
+              "description": "`RLIMIT_FSIZE`.",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "nofile": {
+              "description": "`RLIMIT_NOFILE`, at least 64.",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "nproc": {
+              "description": "`RLIMIT_NPROC`. On Docker it counts every process of the uid on the host.",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "oom_score_adj": {
+          "description": "0..=1000. Only raises the score. Default: unchanged.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "output_cap": {
+          "additionalProperties": false,
+          "description": "A bound on stdout (and stderr with [`StderrMode::Merge`]).",
+          "properties": {
+            "max_bytes": {
+              "description": "At least 1. At most 8 MiB with `tail`.",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "on_overflow": {
+              "description": "What happens when stdout passes [`OutputCap::max_bytes`].",
+              "oneOf": [
+                {
+                  "description": "Stream as usual; cut the record at the cap and stop the tree.",
+                  "enum": [
+                    "kill"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "description": "Do not stream; keep the last `max_bytes` and send them when the program has ended.",
+                  "enum": [
+                    "tail"
+                  ],
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "required": [
+            "max_bytes",
+            "on_overflow"
+          ],
+          "type": "object"
+        },
+        "process_id": {
+          "description": "Chosen by the caller: a UUID. Lets a cancel arrive before the ack.",
+          "type": "string"
+        },
+        "stderr": {
+          "default": "tail",
+          "description": "What happens to the program's stderr.",
+          "oneOf": [
+            {
+              "description": "Not streamed; the last `stderr_tail_bytes` are in [`ProcessExit::stderr_tail`].",
+              "enum": [
+                "tail"
+              ],
+              "type": "string"
+            },
+            {
+              "description": "Sent with stdout, on one pipe, as `STDOUT` records. The tail is empty.",
+              "enum": [
+                "merge"
+              ],
+              "type": "string"
+            },
+            {
+              "description": "Streamed as `STDERR` records; the tail is kept too.",
+              "enum": [
+                "stream"
+              ],
+              "type": "string"
+            }
+          ]
+        },
+        "stderr_tail_bytes": {
+          "description": "Bytes of stderr kept for the exit with `tail` and `stream`. Default 4096, max 65536.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "stdin": {
+          "default": "null",
+          "description": "What the program's stdin is.",
+          "oneOf": [
+            {
+              "description": "`/dev/null`.",
+              "enum": [
+                "null"
+              ],
+              "type": "string"
+            },
+            {
+              "description": "A pipe fed by `STDIN` records and closed by `STDIN_EOF`.",
+              "enum": [
+                "pipe"
+              ],
+              "type": "string"
+            }
+          ]
+        },
+        "timeout_ms": {
+          "description": "Wall-clock bound, timed in the guest. None: no bound.",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "argv",
+        "process_id"
+      ],
+      "type": "object"
+    },
+    "result": {
+      "properties": {
+        "pid": {
+          "description": "Guest pid of the program (the leader of its tree).",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "process_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "pid",
+        "process_id"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "method": "forward.listen",
+    "kind": "connection",
+    "params": {
+      "additionalProperties": false,
+      "properties": {},
+      "type": "object"
+    },
+    "result": {
+      "properties": {
+        "ports": {
+          "description": "The forward ports `crabd` listens on.",
+          "items": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "ports"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "method": "forward.accept",
+    "kind": "connection",
+    "params": {
+      "additionalProperties": false,
+      "properties": {
+        "conn_id": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "conn_id"
+      ],
+      "type": "object"
+    },
+    "result": {
+      "properties": {
+        "port": {
+          "description": "The forward port the program connected to.",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "port"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "method": "forward.incoming",
+    "kind": "notification",
+    "params": {
+      "properties": {
+        "conn_id": {
+          "description": "Used once, by one `forward.accept` or `forward.reject`.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "port": {
+          "description": "The forward port the program connected to.",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "conn_id",
+        "port"
+      ],
+      "type": "object"
+    },
+    "result": null
+  },
+  {
+    "method": "forward.reject",
+    "kind": "notification",
+    "params": {
+      "additionalProperties": false,
+      "properties": {
+        "conn_id": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "conn_id"
+      ],
+      "type": "object"
+    },
+    "result": null
+  },
+  {
+    "method": "record:EXIT",
+    "kind": "record",
+    "params": {
+      "properties": {
+        "cancelled": {
+          "type": "boolean"
+        },
+        "code": {
+          "description": "Exit code, or `None` when a signal ended the leader.",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "duration_ms": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "overflow": {
+          "description": "stdout went over `output_cap.max_bytes`.",
+          "type": "boolean"
+        },
+        "signal": {
+          "description": "Signal that ended the leader.",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "stderr_tail": {
+          "description": "Last bytes of stderr, lossy UTF-8, cut at a character boundary. Empty with `merge`.",
+          "type": "string"
+        },
+        "timed_out": {
+          "type": "boolean"
+        },
+        "tree_clean": {
+          "description": "False: something of the tree could not be stopped. The caller should destroy the sandbox.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "cancelled",
+        "duration_ms",
+        "overflow",
+        "stderr_tail",
+        "timed_out",
+        "tree_clean"
+      ],
+      "type": "object"
+    },
+    "result": null
+  }
+]

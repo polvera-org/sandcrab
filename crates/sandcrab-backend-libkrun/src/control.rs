@@ -187,6 +187,11 @@ pub(crate) mod tests {
             dns: vec![],
             tools_port: 1024,
             host_time_unix_ms: Some(1),
+            tmp_exec: false,
+            tmp_size_mb: None,
+            pids_max: None,
+            nofile: None,
+            forward_ports: Vec::new(),
         }
     }
 
