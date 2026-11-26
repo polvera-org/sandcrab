@@ -47,6 +47,16 @@ Things to know:
   symlinks first; use `sandbox.mounts[i].resolvedPath` for `cwd` and env.
 - A lost control connection stops nothing. The client reconnects and serves its forwards
   again. A server restart ends every sandbox.
+- Events on the client: `connect` and `disconnect` (the control connection), `shutdown`
+  (`{ graceMs }`: the server is stopping and will destroy every sandbox; drain now) and
+  `sandboxDestroyed` (`{ sandboxId, reason }`, reason `"destroyed"`, `"ttl"` or
+  `"backend_exit"`: a sandbox of your uid is gone). Events arrive only while the control
+  connection is up; after a reconnect, `listSandboxes()` tells what is left.
+
+  ```ts
+  client.on("shutdown", ({ graceMs }) => drain(graceMs));
+  client.on("sandboxDestroyed", ({ sandboxId, reason }) => forget(sandboxId, reason));
+  ```
 - `sandbox.info()`, `listSandboxes()`, `capabilities()` and `selftest()` return the server's
   own types, with the field names of the wire (`sandbox_id`, `forwards[].refused`, ...).
 

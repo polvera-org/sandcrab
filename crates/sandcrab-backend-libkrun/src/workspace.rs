@@ -124,6 +124,46 @@ pub fn plan_mounts(mounts: &[ResolvedMount], host_mounts: &[ResolvedMount]) -> R
     })
 }
 
+/// Devices libkrun can add to an x86_64 sandbox beyond its own. A sandbox without mounts
+/// already has seven virtio-mmio devices (IRQs 5 to 11 on the kernel command line), and the
+/// x86_64 legacy IRQs end at 15. Directory mounts, extra block volumes and a NIC share the
+/// rest. Measured on Linux KVM with libkrun 1.19.8: four directory mounts boot, a fifth makes
+/// `krun_start_enter` fail with `EINVAL`. aarch64 (Apple Silicon) is not limited this way.
+pub const X86_64_DEVICE_ROOM: usize = 4;
+
+/// The device room on this architecture, `None` where it is not the binding limit.
+#[must_use]
+pub fn device_room() -> Option<usize> {
+    cfg!(target_arch = "x86_64").then_some(X86_64_DEVICE_ROOM)
+}
+
+/// Refuse a plan that needs more devices than `room` (see [`X86_64_DEVICE_ROOM`]) before
+/// anything boots, as a mount refusal naming the cap, instead of a VM that fails to start.
+pub fn check_device_room(plan: &MountPlan, nic: bool, room: Option<usize>) -> Result<()> {
+    let Some(room) = room else { return Ok(()) };
+    let fixed = plan.disks.len() + usize::from(nic);
+    if plan.shares.len() + fixed <= room {
+        return Ok(());
+    }
+    let cap = room.saturating_sub(fixed);
+    let path = plan
+        .shares
+        .get(cap)
+        .or(plan.shares.last())
+        .map_or_else(|| PathBuf::from("/"), |s| s.host_path.clone());
+    Err(SandboxError::MountNotAllowed {
+        path,
+        reason: format!(
+            "too many mounts for libkrun on this architecture: {} directory mounts, {} block \
+             volumes and {} NIC, room for {room} devices",
+            plan.shares.len(),
+            plan.disks.len(),
+            usize::from(nic)
+        ),
+        cap: Some(cap),
+    })
+}
+
 /// [`plan_mounts`] with an injectable root check (pure, for tests).
 pub(crate) fn plan_with(
     mounts: &[ResolvedMount],
@@ -214,6 +254,32 @@ mod tests {
     use sandcrab_protocol::init::MountSource;
 
     use super::*;
+
+    #[test]
+    fn device_room_counts_shares_disks_and_the_nic() {
+        let share = |n: usize| VirtioFsShare {
+            tag: mount_tag(n),
+            host_path: PathBuf::from(format!("/data/m{n}")),
+            read_only: true,
+            identity: None,
+        };
+        let mut plan = MountPlan {
+            shares: (0..4).map(share).collect(),
+            ..MountPlan::default()
+        };
+        assert!(check_device_room(&plan, false, Some(4)).is_ok());
+        assert!(check_device_room(&plan, true, None).is_ok());
+        let err = check_device_room(&plan, true, Some(4)).unwrap_err();
+        assert!(
+            matches!(&err, SandboxError::MountNotAllowed { path, cap: Some(3), .. } if path == Path::new("/data/m3")),
+            "{err}"
+        );
+        plan.shares.push(share(4));
+        assert!(matches!(
+            check_device_room(&plan, false, Some(4)),
+            Err(SandboxError::MountNotAllowed { cap: Some(4), .. })
+        ));
+    }
 
     fn mount(backing: WorkspaceBacking, guest: &str, mode: MountMode) -> ResolvedMount {
         ResolvedMount {

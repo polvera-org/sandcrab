@@ -147,6 +147,22 @@ fn every_line_has_a_case() {
 }
 
 #[test]
+fn an_interface_that_is_down_is_not_a_way_out() {
+    let f = facts();
+    let at = |v: Value| evaluate("net-loopback-only", &ProbeRun::Answer(v), &f).status;
+    assert_eq!(
+        at(json!({ "interfaces": ["lo", "dummy0"], "up": ["lo"] })),
+        Pass
+    );
+    assert_eq!(
+        at(json!({ "interfaces": ["lo", "eth0"], "up": ["lo", "eth0"] })),
+        Fail
+    );
+    // Without `up` (no /sys), any interface besides lo fails.
+    assert_eq!(at(json!({ "interfaces": ["lo", "dummy0"] })), Fail);
+}
+
+#[test]
 fn each_line_passes_fails_and_times_out() {
     for (id, good, bad) in cases() {
         let f = facts();
@@ -371,4 +387,58 @@ async fn an_unknown_template_is_an_error_and_leaves_nothing() {
         .unwrap();
     assert!(run(&sc, config).await.is_err());
     assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+}
+
+/// A run dropped half-way (a server's deadline, a caller that went away) still removes its
+/// scratch directory, and its sandboxes go in the background. The rw scratch is handed to
+/// the configured user (here the current one, so no privilege is needed).
+#[tokio::test]
+async fn a_run_dropped_half_way_leaves_no_scratch() {
+    use std::os::unix::fs::MetadataExt;
+    let env = Env::new();
+    let root = env.tmp.path().join("mounts");
+    std::fs::create_dir(&root).unwrap();
+    let me = std::fs::metadata(&root).unwrap();
+    let backend = FakeBackend::new();
+    let policy = MountPolicy::new(
+        vec![MountRoot {
+            path: root.clone(),
+            max_mode: MountMode::ReadWrite,
+        }],
+        Vec::new(),
+    )
+    .unwrap();
+    let sc = env
+        .builder()
+        .backend(backend.clone())
+        .mount_policy(policy)
+        .build()
+        .unwrap();
+    let mut config = SelftestConfig::new("base");
+    config.user = Some(UserSpec::new(me.uid(), me.gid()));
+
+    let mut fut = Box::pin(run(&sc, config));
+    // Poll until the scratch exists and a sandbox was spawned, then drop the run.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        tokio::select! {
+            r = &mut fut => panic!("the run ended before it could be dropped: {r:?}"),
+            () = tokio::time::sleep(Duration::from_millis(1)) => {}
+        }
+        let spawned = backend
+            .events()
+            .iter()
+            .any(|e| matches!(e, FakeEvent::Spawned(_)));
+        if spawned && std::fs::read_dir(&root).unwrap().count() == 1 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the run never got going");
+    }
+    drop(fut);
+    assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0, "scratch left");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !sc.list_sandboxes().is_empty() {
+        assert!(Instant::now() < deadline, "sandboxes left");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }

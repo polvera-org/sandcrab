@@ -61,7 +61,11 @@ impl Control {
                 json!({"client": "e2e", "api_version": "1.0"}),
             )
             .await;
-        assert_eq!(hello["features"], json!(["forwards", "mounts"]), "{hello}");
+        assert_eq!(
+            hello["features"],
+            json!(["forwards", "mounts", "selftest"]),
+            "{hello}"
+        );
         c
     }
 

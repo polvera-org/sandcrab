@@ -1,4 +1,4 @@
-// One smoke case each for mounts and forwards against a real server on Docker. The full
+// One smoke case each for mounts and forwards against a real server. The full
 // matrix (ro/rw, symlinked roots, TCP and Unix targets, throughput) is the `ts-e2e` step.
 
 import assert from "node:assert/strict";
@@ -6,11 +6,11 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import path from "node:path";
 import { describe, test } from "node:test";
 
-import { NODE, PATH_ENV, SKIP, TEMPLATE, TestServer } from "./harness.ts";
+import { BACKEND, NODE, PATH_ENV, SKIP, TEMPLATE, TestServer } from "./harness.ts";
 
 const ENV = { PATH: PATH_ENV };
 
-describe("mounts and forwards smoke on a real server", { skip: SKIP, timeout: 300_000 }, () => {
+describe(`mounts and forwards smoke on a real server (${BACKEND})`, { skip: SKIP, timeout: 300_000 }, () => {
   test("a mount under an allowed root is at the same path; one forward reaches an in-process handler", async (t) => {
     const base = mkdtempSync(path.join(process.env.SANDCRAB_E2E_DATA ?? process.cwd(), ".e2e-data-"));
     t.after(() => rmSync(base, { recursive: true, force: true }));

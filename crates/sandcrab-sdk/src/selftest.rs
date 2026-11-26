@@ -7,7 +7,8 @@
 //! `crabd` every sandbox contains, so an image without a shell can be tested), plays the host
 //! half of each check (the forward's target, the file canaries, the tree kill) and judges
 //! every answer into a [`SelftestLine`]. Whatever happens, it destroys both sandboxes and
-//! removes the scratch directory before it returns.
+//! removes the scratch directory before it returns, also when the run is dropped half-way (a
+//! deadline, a caller that went away).
 //!
 //! **A timeout is never a pass.** Each probe has a deadline ([`PROBE_DEADLINE`]). A line is
 //! `pass` only when the probe answered with the refusal (the `errno`) the wall must produce;
@@ -37,6 +38,7 @@ use std::time::{Duration, Instant};
 
 use sandcrab_core::{
     BackendKind, MountMode, NetworkConfig, NetworkPolicy, Result, SandboxConfig, SandboxError,
+    UserSpec,
 };
 use sandcrab_protocol::Overflow;
 use sandcrab_protocol::api::SelftestStatus::{Fail, Inconclusive, Pass};
@@ -91,6 +93,10 @@ pub struct SelftestConfig {
     /// Sandbox A's network. `disabled` (the default) is what the claim is about; anything
     /// else makes the network lines fail, which is how a test shows the self-test can fail.
     pub network: NetworkPolicy,
+    /// The uid:gid both sandboxes run as. A server passes its caller's, so the claim is about
+    /// the setup that caller gets. `None`: the template's (or backend's) default user. The
+    /// read-write scratch directory is handed to this user.
+    pub user: Option<UserSpec>,
 }
 
 impl SelftestConfig {
@@ -101,6 +107,7 @@ impl SelftestConfig {
             scratch_root: None,
             hidden_paths: Vec::new(),
             network: NetworkPolicy::Disabled,
+            user: None,
         }
     }
 }
@@ -147,28 +154,40 @@ pub async fn run(sandcrab: &Sandcrab, config: SelftestConfig) -> Result<Selftest
     let start = Instant::now();
     let scratch = Scratch::create(sandcrab, &config)?;
 
+    let base = || {
+        let c = SandboxConfig::from_template(&config.template);
+        match config.user {
+            Some(u) => c.user(u),
+            None => c,
+        }
+    };
     let a_config = SandboxConfig {
         network: Some(NetworkConfig::from(config.network)),
-        ..SandboxConfig::from_template(&config.template)
+        ..base()
             .forward(FORWARD_PORT)
             .host_mount(scratch.ro(), MountMode::ReadOnly)
             .host_mount(scratch.rw(), MountMode::ReadWrite)
     };
     let a = sandcrab.spawn(a_config).await;
     let b = match &a {
-        Ok(_) => Some(
-            sandcrab
-                .spawn(SandboxConfig::from_template(&config.template))
-                .await,
-        ),
+        Ok(_) => Some(sandcrab.spawn(base()).await),
         Err(_) => None,
     };
+    let spawned = start.elapsed();
     let result = match (a, b) {
         (Ok(a), Some(Ok(b))) => {
             let mut hidden = vec![scratch.outside(), sandcrab.state_dir().to_path_buf()];
             hidden.extend(config.hidden_paths.iter().cloned());
             let lines = probe_all(&a, &b, &scratch, &hidden).await;
+            let probed = start.elapsed();
             destroy(a, b).await;
+            // Where the time went, for a run that is slower than expected.
+            tracing::info!(
+                spawn_ms = spawned.as_millis(),
+                probes_ms = (probed - spawned).as_millis(),
+                destroy_ms = (start.elapsed() - probed).as_millis(),
+                "self-test timings"
+            );
             Ok(lines)
         }
         (Ok(a), Some(Err(e))) => {
@@ -178,7 +197,7 @@ pub async fn run(sandcrab: &Sandcrab, config: SelftestConfig) -> Result<Selftest
         (Err(e), _) => Err(e),
         (Ok(_), None) => unreachable!("B is spawned whenever A is"),
     };
-    scratch.remove();
+    drop(scratch);
     let lines = result?;
     Ok(assemble(
         sandcrab.backend_kind().to_string(),
@@ -245,7 +264,8 @@ pub fn status_name(s: SelftestStatus) -> &'static str {
 // ---------------------------------------------------------------------------------------------
 
 /// `<root>/sandcrab-selftest-<id>/{ro/canary, rw/, canary-outside}`; `ro` and `rw` are
-/// mounted, `canary-outside` sits beside them and must not be visible.
+/// mounted, `canary-outside` sits beside them and must not be visible. Removed on drop, so a
+/// run that is dropped half-way leaves nothing behind.
 struct Scratch {
     dir: PathBuf,
     canary: String,
@@ -281,12 +301,20 @@ impl Scratch {
             std::fs::create_dir(s.ro())?;
             std::fs::create_dir(s.rw())?;
             std::fs::write(s.ro().join("canary"), &s.canary)?;
-            std::fs::write(s.outside(), &s.canary)
+            std::fs::write(s.outside(), &s.canary)?;
+            // The sandbox user must be able to write through the rw mount.
+            if let Some(u) = config.user {
+                use std::os::unix::fs::MetadataExt;
+                let rw = s.rw();
+                let meta = std::fs::metadata(&rw)?;
+                if meta.uid() != u.uid || meta.gid() != u.gid {
+                    std::os::unix::fs::chown(&rw, Some(u.uid), Some(u.gid))?;
+                }
+            }
+            Ok(())
         })();
-        if let Err(e) = made {
-            s.remove();
-            return Err(io_at(&s.dir, e));
-        }
+        // On an error `s` drops here and removes what was made.
+        made.map_err(|e| io_at(&s.dir, e))?;
         Ok(s)
     }
 
@@ -301,8 +329,10 @@ impl Scratch {
     fn outside(&self) -> PathBuf {
         self.dir.join("canary-outside")
     }
+}
 
-    fn remove(&self) {
+impl Drop for Scratch {
+    fn drop(&mut self) {
         if let Err(e) = std::fs::remove_dir_all(&self.dir)
             && e.kind() != io::ErrorKind::NotFound
         {
@@ -657,6 +687,22 @@ fn judge(id: &str, v: &Value, f: &HostFacts) -> (SelftestStatus, String, Value) 
         "net-loopback-only" => match v["interfaces"].as_array() {
             Some(i) if i.len() == 1 && i[0] == "lo" => {
                 (Pass, "the only interface is lo".into(), none)
+            }
+            // An interface that is down carries nothing, and with no capabilities (`caps-empty`)
+            // the sandbox cannot bring it up (libkrun's kernel has a `dummy0`, always down).
+            Some(i)
+                if v["up"]
+                    .as_array()
+                    .is_some_and(|u| u.iter().all(|n| n == "lo")) =>
+            {
+                (
+                    Pass,
+                    format!(
+                        "the only interface up is lo (down: {})",
+                        Value::from(i.iter().filter(|n| *n != "lo").cloned().collect::<Vec<_>>())
+                    ),
+                    none,
+                )
             }
             Some(i) => (
                 Fail,

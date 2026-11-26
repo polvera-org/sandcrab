@@ -5,7 +5,7 @@ import { AbortedError, CODE_UNSUPPORTED_VERSION, ConnectionError, InvalidSpecErr
 import { ForwardRegistry } from "./forwards.ts";
 import { encodeFrame, FrameDecoder } from "./framing.ts";
 import { API_VERSION } from "./generated/api.ts";
-import type { Capabilities, Methods, SandboxInfo, SelftestReport, ServerHelloResult, UnsupportedVersionData } from "./generated/api.ts";
+import type { Capabilities, DestroyReason, Methods, SandboxInfo, SelftestReport, ServerHelloResult, UnsupportedVersionData } from "./generated/api.ts";
 import { createSandbox, SandboxImpl, validateLabels } from "./sandbox.ts";
 import type { Labels, Sandbox, SandboxSpec } from "./sandbox.ts";
 import { CapabilityCache } from "./selftest.ts";
@@ -48,11 +48,27 @@ export interface SandcrabClient {
   capabilitiesSnapshot(template: string): CapabilitiesSnapshot;
   selftest(template: string, o?: { maxAgeMs?: number }): Promise<SelftestReport>;
   on(event: "connect" | "disconnect", listener: () => void): this;
+  /** The server stops (`server.shutdown`): every sandbox will be destroyed after `graceMs`. Drain now. */
+  on(event: "shutdown", listener: (e: ServerShutdownEvent) => void): this;
+  /**
+   * A sandbox of this uid is gone (`sandbox.destroyed`): destroyed by a client, its TTL ran out
+   * (`"ttl"`), or the backend lost it. Only seen while the control connection is up.
+   */
+  on(event: "sandboxDestroyed", listener: (e: SandboxDestroyedEvent) => void): this;
   /**
    * Closes the control connection and every forwarded connection, and stops reconnecting.
    * Processes keep their own connections and run on until they exit or are cancelled.
    */
   close(): Promise<void>;
+}
+
+export interface ServerShutdownEvent {
+  graceMs: number;
+}
+
+export interface SandboxDestroyedEvent {
+  sandboxId: string;
+  reason: DestroyReason;
 }
 
 type ControlMethod = { [M in keyof Methods]: Methods[M]["kind"] extends "control" ? M : never }[keyof Methods];
@@ -251,7 +267,23 @@ export class ClientImpl extends EventEmitter implements SandcrabClient {
     if (typeof msg.method !== "string" || "id" in msg) return;
     const params = (msg.params ?? {}) as Record<string, unknown>;
     if (msg.method === "forward.incoming") this._forwards.incoming(params);
-    else if (msg.method === "sandbox.destroyed" && typeof params.sandbox_id === "string") this._forwards.drop(params.sandbox_id);
+    else if (msg.method === "sandbox.destroyed" && typeof params.sandbox_id === "string") {
+      this._forwards.drop(params.sandbox_id);
+      this.#emitSafely("sandboxDestroyed", { sandboxId: params.sandbox_id, reason: params.reason as DestroyReason });
+    } else if (msg.method === "server.shutdown") {
+      this.#emitSafely("shutdown", { graceMs: typeof params.grace_ms === "number" ? params.grace_ms : 0 });
+    }
+  }
+
+  /** A listener that throws must not break the control connection's reader. */
+  #emitSafely(event: string, payload: unknown): void {
+    for (const l of this.listeners(event)) {
+      try {
+        (l as (e: unknown) => void)(payload);
+      } catch {
+        // The caller's bug; the connection goes on.
+      }
+    }
   }
 
   #send(method: string, params: unknown, onResult?: (value: never) => void): Promise<unknown> {

@@ -6,11 +6,11 @@ import { describe, test } from "node:test";
 
 import { connectClient } from "../../src/client.ts";
 import { API_VERSION, ServerError } from "../../src/index.ts";
-import { deadline, NODE, PATH_ENV, SKIP, sleep, TEMPLATE, TestServer } from "./harness.ts";
+import { BACKEND, deadline, NODE, PATH_ENV, SKIP, sleep, TEMPLATE, TestServer } from "./harness.ts";
 
 const ENV = { PATH: PATH_ENV };
 
-describe("server contract on a real server", { skip: SKIP, timeout: 300_000 }, () => {
+describe(`server contract on a real server (${BACKEND})`, { skip: SKIP, timeout: 300_000 }, () => {
   test("hello: the API version and features; a newer or older SDK is told why", async (t) => {
     const server = await TestServer.start();
     t.after(() => server.close());
@@ -21,8 +21,8 @@ describe("server contract on a real server", { skip: SKIP, timeout: 300_000 }, (
     assert.match(client.server?.version ?? "", /^\d+\.\d+\.\d+/);
     for (const f of ["forwards", "mounts"]) assert.ok(client.server?.features.includes(f), `feature ${f} in ${client.server?.features}`);
     const caps = await client.capabilities();
-    assert.equal(caps.backend, "docker");
-    assert.equal(caps.hardware_isolated, false);
+    assert.equal(caps.backend, BACKEND);
+    assert.equal(caps.hardware_isolated, BACKEND === "libkrun");
     assert.equal(caps.supports_forwards, true);
 
     // An SDK that needs a newer server: connect resolves, nothing starts, the reason names both.
