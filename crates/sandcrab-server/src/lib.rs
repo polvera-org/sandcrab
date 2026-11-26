@@ -99,6 +99,24 @@ pub fn fd_caps(nofile: u64) -> (u32, u32) {
     (part(4, MAX_CONNECTIONS), part(8, MAX_FORWARDED_CONNECTIONS))
 }
 
+/// Mounts one sandbox of this backend can take: the core cap, lower where the backend has
+/// less room (libkrun on x86_64 boots at most four directory mounts).
+fn max_mounts(sandcrab: &Sandcrab) -> u32 {
+    #[allow(unused_mut)]
+    let mut max = sandcrab_sdk::core::MAX_SANDBOX_MOUNTS;
+    #[cfg(all(
+        feature = "libkrun",
+        any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))
+    ))]
+    if sandcrab.backend_kind() == sandcrab_sdk::core::BackendKind::Libkrun
+        && let Some(room) = sandcrab_sdk::libkrun::workspace::device_room()
+    {
+        max = max.min(room);
+    }
+    let _ = sandcrab;
+    u32::try_from(max).unwrap_or(u32::MAX)
+}
+
 /// Why the server could not start or stop cleanly.
 #[derive(Debug, thiserror::Error)]
 pub enum ServerError {
@@ -208,7 +226,7 @@ impl Shared {
             max_requests_in_flight: MAX_REQUESTS_IN_FLIGHT,
             max_sandboxes: config.limits.max_sandboxes,
             max_processes_per_sandbox: MAX_PROCESSES_PER_SANDBOX,
-            max_mounts: u32::try_from(sandcrab_sdk::core::MAX_SANDBOX_MOUNTS).unwrap_or(16),
+            max_mounts: max_mounts(&sandcrab),
             max_vcpu: MAX_VCPU,
             max_memory_mb: MAX_MEMORY_MB,
             max_pids: MAX_PIDS,
@@ -319,6 +337,42 @@ mod tests {
             // Two descriptors each at most, with a quarter left for everything else.
             assert!(2 * u64::from(c) + 2 * u64::from(f) <= n * 3 / 4, "{n}");
         }
+    }
+
+    fn sandcrab_of(kind: sandcrab_sdk::core::BackendKind, tmp: &Path) -> Sandcrab {
+        std::fs::create_dir_all(tmp.join("templates")).unwrap();
+        let mut backend = sandcrab_sdk::core::testing::FakeBackend::shared_kernel();
+        backend.kind = kind;
+        Sandcrab::builder()
+            .backend(backend)
+            .state_dir(tmp.join("state"))
+            .templates_dir(tmp.join("templates"))
+            .build()
+            .unwrap()
+    }
+
+    /// `max_mounts` is the backend's real room: libkrun on x86_64 boots four directory
+    /// mounts, not the core's sixteen.
+    #[test]
+    fn max_mounts_is_the_backends_room() {
+        use sandcrab_sdk::core::BackendKind;
+        let tmp = tempfile::tempdir().unwrap();
+        let docker = max_mounts(&sandcrab_of(BackendKind::Docker, tmp.path()));
+        assert_eq!(docker as usize, sandcrab_sdk::core::MAX_SANDBOX_MOUNTS);
+        let krun = max_mounts(&sandcrab_of(BackendKind::Libkrun, tmp.path()));
+        let libkrun_built = cfg!(all(
+            feature = "libkrun",
+            any(
+                target_os = "linux",
+                all(target_os = "macos", target_arch = "aarch64")
+            )
+        ));
+        let want = if libkrun_built && cfg!(target_arch = "x86_64") {
+            4
+        } else {
+            docker
+        };
+        assert_eq!(krun, want);
     }
 
     #[test]
