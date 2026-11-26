@@ -137,7 +137,7 @@ steps:
     title: "Templates from an existing OCI image: manifest with `external = true` and no Dockerfile, crabd injected, pinned host-locally by `sandcrab template pin`; Docker and the rootfs pipeline; unpinned is refused"
     depends_on: [design-rev]
     artifacts: [crates/sandcrab-core/src/template.rs, crates/sandcrab-rootfs/src, crates/sandcrab-cli/src, docs/template-pins.md]
-    status: doing
+    status: done
 
   - id: rust-sdk
     phase: implement
