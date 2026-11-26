@@ -688,6 +688,22 @@ fn judge(id: &str, v: &Value, f: &HostFacts) -> (SelftestStatus, String, Value) 
             Some(i) if i.len() == 1 && i[0] == "lo" => {
                 (Pass, "the only interface is lo".into(), none)
             }
+            // An interface that is down carries nothing, and with no capabilities (`caps-empty`)
+            // the sandbox cannot bring it up (libkrun's kernel has a `dummy0`, always down).
+            Some(i)
+                if v["up"]
+                    .as_array()
+                    .is_some_and(|u| u.iter().all(|n| n == "lo")) =>
+            {
+                (
+                    Pass,
+                    format!(
+                        "the only interface up is lo (down: {})",
+                        Value::from(i.iter().filter(|n| *n != "lo").cloned().collect::<Vec<_>>())
+                    ),
+                    none,
+                )
+            }
             Some(i) => (
                 Fail,
                 format!("interfaces besides lo: {}", Value::from(i.clone())),

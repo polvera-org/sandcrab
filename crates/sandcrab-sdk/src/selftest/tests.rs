@@ -147,6 +147,22 @@ fn every_line_has_a_case() {
 }
 
 #[test]
+fn an_interface_that_is_down_is_not_a_way_out() {
+    let f = facts();
+    let at = |v: Value| evaluate("net-loopback-only", &ProbeRun::Answer(v), &f).status;
+    assert_eq!(
+        at(json!({ "interfaces": ["lo", "dummy0"], "up": ["lo"] })),
+        Pass
+    );
+    assert_eq!(
+        at(json!({ "interfaces": ["lo", "eth0"], "up": ["lo", "eth0"] })),
+        Fail
+    );
+    // Without `up` (no /sys), any interface besides lo fails.
+    assert_eq!(at(json!({ "interfaces": ["lo", "dummy0"] })), Fail);
+}
+
+#[test]
 fn each_line_passes_fails_and_times_out() {
     for (id, good, bad) in cases() {
         let f = facts();

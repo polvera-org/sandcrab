@@ -11,7 +11,7 @@
 //! | --- | --- | --- |
 //! | `caps-empty`, `no-new-privs` | | `status`: the `Cap*` and `NoNewPrivs` fields of `/proc/self/status` |
 //! | `userns-refused` | | `result` of `unshare(CLONE_NEWUSER)` |
-//! | `net-loopback-only` | | `interfaces` from `/proc/net/dev` |
+//! | `net-loopback-only` | | `interfaces` from `/proc/net/dev`; `up`: those whose `/sys/class/net/<name>/flags` has `IFF_UP` (absent when `/sys` cannot be read) |
 //! | `net-external-refused`, `gateway-refused`, `metadata-refused` | | `attempts`: TCP connects |
 //! | `dns-refused` | | `attempts`: one UDP query per resolver in `/etc/resolv.conf` and a public one |
 //! | `forward-reaches-target`, `forward-only-declared`, `forward-fails-closed` | `<port> [<nonce>]` | `attempt` on `127.0.0.1:<port>`; with a nonce: sent, `reply`, `end` |
@@ -206,7 +206,21 @@ fn interfaces() -> Value {
                 .skip(2)
                 .filter_map(|l| l.split_once(':').map(|(n, _)| n.trim()))
                 .collect();
-            json!({ "tried": "read /proc/net/dev", "interfaces": names })
+            // IFF_UP per interface; any flags file that cannot be read drops `up` entirely,
+            // so the host judges on the names alone.
+            let up: Option<Vec<&str>> = names
+                .iter()
+                .map(|n| {
+                    let f = std::fs::read_to_string(format!("/sys/class/net/{n}/flags")).ok()?;
+                    let flags = u32::from_str_radix(f.trim().trim_start_matches("0x"), 16).ok()?;
+                    Some((flags & 1 != 0).then_some(*n))
+                })
+                .collect::<Option<Vec<_>>>()
+                .map(|v| v.into_iter().flatten().collect());
+            match up {
+                Some(up) => json!({ "tried": "read /proc/net/dev", "interfaces": names, "up": up }),
+                None => json!({ "tried": "read /proc/net/dev", "interfaces": names }),
+            }
         }
         Err(e) => json!({ "tried": "read /proc/net/dev", "result": error_name(&e) }),
     }
