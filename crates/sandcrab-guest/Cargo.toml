@@ -42,7 +42,8 @@ base64 = "0.22"
 tempfile = "3"
 # guest-exec deps
 # Safe killpg for process-group teardown; PTY allocation (+ setsid/controlling tty) for process_start.
-rustix = { version = "1", features = ["process", "fs"] }
+# `stdio`: `crabd supervise` puts /dev/null over the descriptors it takes over.
+rustix = { version = "1", features = ["process", "fs", "stdio"] }
 pty-process = { version = "0.5", features = ["async"] }
 # guest-search deps
 ignore = "0.4"
