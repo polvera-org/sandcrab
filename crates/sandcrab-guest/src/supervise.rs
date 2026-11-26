@@ -39,12 +39,31 @@
 //! No parent-death signal is used: it follows the thread that started the child, which is
 //! wrong under a multi-thread runtime. The closed connection covers a dead host.
 //!
-//! # What this step honours
+//! # Limits, timeout, output cap, stderr
 //!
-//! `process_id`, `argv`, `env`, `cwd`, `stdin`, `kill_grace_ms`. `stderr` is always sent as
-//! `STDERR` records (the `stream` behaviour) and `stderr_tail` is empty, whatever the mode.
-//! `stderr_tail_bytes`, `limits`, `oom_score_adj`, `timeout_ms` and `output_cap` are accepted
-//! and not applied yet: they are the `guest-caps` step (see the `guest-caps` markers below).
+//! - **rlimits and OOM score** (`limits`, `oom_score_adj`): the supervisor sets them on
+//!   itself, soft and hard alike, right before the spawn, so the program inherits them with no
+//!   `pre_exec` hook. A value above the sandbox's hard limit is `-32602` and nothing is
+//!   changed. What that does to the supervisor: it opens a handful of descriptors (well under
+//!   the minimum `nofile` of 64), keeps at most 8 MiB of output in memory (under the minimum
+//!   `data_bytes` of 32 MiB), never forks again after the spawn and runs one thread (`nproc`),
+//!   and catches `SIGXFSZ`, so a log line written to a full file cannot kill it (`fsize`); a
+//!   caught signal is reset to its default at exec, so the program still dies of it. The OOM
+//!   score is only ever raised, and the supervisor puts its own score back after the spawn.
+//! - **timeout** (`timeout_ms`): at the bound the tree is stopped like a closed connection
+//!   (ask, `kill_grace_ms`, force) and `EXIT` says `timed_out`.
+//! - **output cap** (`output_cap`): `kill` streams stdout, cuts the record at the cap and
+//!   stops the tree (`overflow`); `tail` streams nothing, keeps the last `max_bytes` in a
+//!   bounded ring and sends them as `STDOUT` records when the program has ended (`overflow`
+//!   when bytes were dropped). The program gets one 64 KiB read buffer per pipe either way.
+//! - **stderr**: `tail` keeps the last `stderr_tail_bytes` for `EXIT` and streams nothing;
+//!   `stream` sends `STDERR` records with no cap and keeps the tail too; `merge` gives the
+//!   program one pipe for stdout and stderr, so the order is the order of its writes.
+//!
+//! # Logging
+//!
+//! Env values, stdin bytes and argv beyond `argv[0]` never appear in a log line or in error
+//! `data`, at any level. The spec frame is never logged.
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -61,20 +80,23 @@ use std::{
 
 use rustix::{
     io::Errno,
-    process::{Pid, Signal, WaitOptions, WaitStatus},
+    process::{Pid, Resource, Rlimit, Signal, WaitOptions, WaitStatus},
 };
 use sandcrab_protocol::{
     HEADER_LEN, MAX_FRAME_LEN, ProcessCancelParams, ProcessCancelResult, ProcessExit,
     ProcessOpenAck, ProcessOpenParams, ProtocolError, RECORD_HEADER_LEN, RecordChannel, RecordKind,
     RequestId, RpcRequest, RpcResponse, SpawnTarget, StdinMode, encode_frame, encode_record_header,
     parse_header, parse_record_header,
-    process::{DEFAULT_MAX_PROCESSES, DRAIN_AFTER_EXIT_MS, FORCE_LOOP_MS},
+    process::{
+        DEFAULT_MAX_PROCESSES, DRAIN_AFTER_EXIT_MS, FORCE_LOOP_MS, OutputCap, Overflow, StderrMode,
+    },
     record::MAX_RECORD_DATA_LEN,
 };
 use serde::{Deserialize, Serialize};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, Interest},
     net::unix::pipe,
+    signal::unix::{SignalKind, signal},
     sync::{OwnedMutexGuard, mpsc, watch},
 };
 use tracing::{debug, error, info, warn};
@@ -519,21 +541,32 @@ enum Event {
     ControlClosed,
     /// The host closed the connection (or sent something invalid).
     ConnClosed,
+    /// stdout passed a `kill` output cap.
+    Overflow,
 }
 
 /// Returns whether the tree ended clean.
 async fn supervise() -> io::Result<bool> {
     let control = take_stdin()?;
     let conn = take_stdout()?;
+    let oom = open_oom_score();
     harden()?;
     let (spec, control) = read_spec(control)?;
     let Spec { request_id, params } = spec;
     let conn = Arc::new(Conn::new(conn)?);
 
     // Before the spawn, so no SIGCHLD of the leader is missed.
-    let mut sigchld = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::child())?;
+    let mut sigchld = signal(SignalKind::child())?;
+    // With `limits.fsize_bytes` set on ourselves, a log write to a full file would raise
+    // SIGXFSZ here; caught, it is only an `EFBIG`. Exec resets it to the default for the
+    // program, which dies of it as it should.
+    let _sigxfsz = signal(SignalKind::from_raw(Signal::XFSZ.as_raw()))?;
     let started = Instant::now();
-    let mut child = match start_program(&params) {
+    let Program {
+        mut child,
+        stdout,
+        stderr,
+    } = match start_program(&params, oom.as_ref()) {
         Ok(c) => c,
         Err(e) => {
             info!(process_id = %params.process_id, error = %e, "process.open: could not start");
@@ -549,7 +582,13 @@ async fn supervise() -> io::Result<bool> {
         .ok_or_else(|| io::Error::other("invalid child pid"))?;
     let mut tree = Tree::new(leader);
     let grace = Duration::from_millis(params.effective_kill_grace_ms());
-    debug!(process_id = %params.process_id, pid = leader.as_raw_nonzero().get(), "program started");
+    // argv[0] only: the rest of argv may carry secrets, like env and stdin.
+    debug!(
+        process_id = %params.process_id,
+        program = %params.argv[0],
+        pid = leader.as_raw_nonzero().get(),
+        "program started"
+    );
 
     let (events_tx, mut events) = mpsc::channel::<Event>(16);
     let (stop_reading, stop_rx) = watch::channel(false);
@@ -557,8 +596,6 @@ async fn supervise() -> io::Result<bool> {
         Some(s) => Some(pipe::Sender::from_owned_fd(OwnedFd::from(s))?),
         None => None,
     };
-    let stdout = child.stdout.take().map(OwnedFd::from);
-    let stderr = child.stderr.take().map(OwnedFd::from);
     // Dropping a std `Child` neither waits nor kills: the reaper collects the leader.
     drop(child);
 
@@ -576,30 +613,65 @@ async fn supervise() -> io::Result<bool> {
         return Ok(clean);
     }
 
-    // guest-caps: stderr modes (tail, merge), the output cap and the timeout hook in here.
-    let mut pumps = Vec::new();
-    for (fd, kind) in [(stdout, RecordKind::Stdout), (stderr, RecordKind::Stderr)] {
-        if let Some(fd) = fd {
-            let rx = pipe::Receiver::from_owned_fd(fd)?;
-            pumps.push(tokio::spawn(pump(
-                rx,
-                kind,
+    // stdout: streamed (cut and stopped at a `kill` cap), or only its tail kept (`tail` cap).
+    let stdout_sink = match params.output_cap {
+        None => Sink::stream(RecordKind::Stdout, None),
+        Some(OutputCap {
+            max_bytes,
+            on_overflow: Overflow::Kill,
+        }) => Sink::stream(RecordKind::Stdout, Some(max_bytes)),
+        Some(OutputCap {
+            max_bytes,
+            on_overflow: Overflow::Tail,
+        }) => Sink::tail(usize::try_from(max_bytes).unwrap_or(usize::MAX)),
+    };
+    let tail_bytes = params.effective_stderr_tail_bytes() as usize;
+    let stdout_pump = tokio::spawn(pump(
+        pipe::Receiver::from_owned_fd(stdout)?,
+        stdout_sink,
+        Arc::clone(&conn),
+        stop_rx.clone(),
+        events_tx.clone(),
+    ));
+    // `None` with `merge`: stderr shares the stdout pipe.
+    let stderr_pump = match stderr {
+        Some(fd) => {
+            let sink = match params.stderr {
+                StderrMode::Stream => Sink {
+                    tail: Some(Tail::new(tail_bytes)),
+                    ..Sink::stream(RecordKind::Stderr, None)
+                },
+                StderrMode::Tail | StderrMode::Merge => Sink::tail(tail_bytes),
+            };
+            Some(tokio::spawn(pump(
+                pipe::Receiver::from_owned_fd(fd)?,
+                sink,
                 Arc::clone(&conn),
                 stop_rx.clone(),
                 events_tx.clone(),
-            )));
+            )))
         }
-    }
+        None => None,
+    };
     tokio::spawn(read_input(Arc::clone(&conn), stdin, events_tx.clone()));
     tokio::spawn(read_control(control, events_tx));
 
+    let deadline = params
+        .timeout_ms
+        .map(|ms| tokio::time::Instant::from_std(started) + Duration::from_millis(ms));
     let mut tick = tokio::time::interval(Duration::from_millis(100));
     let mut cancelled = false;
+    let mut timed_out = false;
     let mut conn_closed = false;
     let clean = loop {
         tokio::select! {
             _ = sigchld.recv() => {}
             _ = tick.tick() => {}
+            () = sleep_until(deadline) => {
+                timed_out = true;
+                debug!(process_id = %params.process_id, "timeout: stopping the tree");
+                break tree.stop(grace, &mut events).await;
+            }
             ev = events.recv() => match ev {
                 Some(Event::Ask) => {
                     cancelled = true;
@@ -608,6 +680,10 @@ async fn supervise() -> io::Result<bool> {
                 Some(Event::Force) => {
                     cancelled = true;
                     break tree.force().await;
+                }
+                Some(Event::Overflow) => {
+                    debug!(process_id = %params.process_id, "output cap: stopping the tree");
+                    break tree.stop(grace, &mut events).await;
                 }
                 Some(Event::ConnClosed) => {
                     conn_closed = true;
@@ -632,40 +708,70 @@ async fn supervise() -> io::Result<bool> {
     // Exit after the last byte: wait for both pipes to reach EOF. A process outside the tree
     // that still holds a pipe cannot delay the exit beyond the drain bound.
     let drain = Duration::from_millis(DRAIN_AFTER_EXIT_MS);
-    let mut all_pumps = std::pin::pin!(async {
-        for p in pumps {
-            let _ = p.await;
-        }
+    let mut ends = std::pin::pin!(async {
+        let out = stdout_pump.await.unwrap_or_default();
+        let err = match stderr_pump {
+            Some(p) => p.await.unwrap_or_default(),
+            None => PumpEnd::default(),
+        };
+        (out, err)
     });
-    if tokio::time::timeout(drain, &mut all_pumps).await.is_err() {
-        let _ = stop_reading.send(true);
-        all_pumps.await;
-    }
+    let (out, err) = match tokio::time::timeout(drain, &mut ends).await {
+        Ok(v) => v,
+        Err(_) => {
+            let _ = stop_reading.send(true);
+            ends.await
+        }
+    };
     let status = tree.leader_status;
     let exit = ProcessExit {
         code: status.and_then(WaitStatus::exit_status),
         signal: status.and_then(WaitStatus::terminating_signal),
-        stderr_tail: String::new(),
-        timed_out: false,
+        stderr_tail: match params.stderr {
+            StderrMode::Merge => String::new(),
+            StderrMode::Tail | StderrMode::Stream => {
+                err.tail.as_ref().map(Tail::text).unwrap_or_default()
+            }
+        },
+        timed_out,
         cancelled,
-        overflow: false,
+        overflow: out.overflow || out.tail.as_ref().is_some_and(|t| t.dropped),
         tree_clean: clean,
         duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
     };
-    let exit = exit.encode_record();
-    let write = conn.write_all(&exit);
+    let finish = async {
+        // `tail` cap: the kept stdout goes out now that the program has ended.
+        if let Some(t) = &out.tail {
+            let (a, b) = t.buf.as_slices();
+            for chunk in a
+                .chunks(MAX_RECORD_DATA_LEN)
+                .chain(b.chunks(MAX_RECORD_DATA_LEN))
+            {
+                conn.send_record(RecordKind::Stdout, chunk).await?;
+            }
+        }
+        conn.write_all(&exit.encode_record()).await
+    };
     // After a cancel nobody may be reading: do not let the answer to the cancel hang on it.
     let written = if cancelled {
-        tokio::time::timeout(drain, write)
+        tokio::time::timeout(drain, finish)
             .await
             .unwrap_or_else(|_| Err(io::ErrorKind::TimedOut.into()))
     } else {
-        write.await
+        finish.await
     };
     if let Err(e) = written {
         debug!(error = %e, "EXIT not delivered");
     }
     Ok(clean)
+}
+
+/// Sleep until `deadline`; forever when there is none.
+async fn sleep_until(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(d) => tokio::time::sleep_until(d).await,
+        None => std::future::pending().await,
+    }
 }
 
 /// Take stdin (the control pipe) and put `/dev/null` in its place.
@@ -709,15 +815,28 @@ fn read_spec(control: OwnedFd) -> io::Result<(Spec, pipe::Receiver)> {
     Ok((spec, control))
 }
 
-/// Change into the cwd and start the program: exact env, exact argv, no shell, its own
-/// process group. A failure is `SPAWN_FAILED` naming the cwd or the program.
-fn start_program(p: &ProcessOpenParams) -> Result<std::process::Child, ProtocolError> {
+/// The started program and the read ends of its output pipes.
+struct Program {
+    child: std::process::Child,
+    /// stdout, and stderr too with `merge`.
+    stdout: OwnedFd,
+    /// `None` with `merge`.
+    stderr: Option<OwnedFd>,
+}
+
+/// Change into the cwd, apply the limits to ourselves, and start the program: exact env,
+/// exact argv, no shell, its own process group, one pipe for stdout and stderr with `merge`.
+/// A failure is `SPAWN_FAILED` naming the cwd or the program; a limit above the sandbox's is
+/// `-32602`.
+fn start_program(
+    p: &ProcessOpenParams,
+    oom: Option<&std::fs::File>,
+) -> Result<Program, ProtocolError> {
     if let Some(cwd) = &p.cwd {
         // Our own cwd: the supervisor runs nothing else, and the error is exact (a `chdir`
         // in the child would report the same errno as a missing program).
         std::env::set_current_dir(cwd).map_err(|e| spawn_failed(&e, SpawnTarget::Cwd))?;
     }
-    // guest-caps: rlimits and oom_score_adj are applied to ourselves here, before the spawn.
     let mut cmd = std::process::Command::new(&p.argv[0]);
     cmd.args(&p.argv[1..])
         .env_clear()
@@ -726,11 +845,128 @@ fn start_program(p: &ProcessOpenParams) -> Result<std::process::Child, ProtocolE
         .stdin(match p.stdin {
             StdinMode::Null => Stdio::null(),
             StdinMode::Pipe => Stdio::piped(),
-        })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    cmd.spawn()
-        .map_err(|e| spawn_failed(&e, SpawnTarget::Program))
+        });
+    // Created before the limits: they count against `nofile`.
+    let merged = match p.stderr {
+        StderrMode::Merge => {
+            let (rd, wr) = std::io::pipe().map_err(internal)?;
+            let wr2 = wr.try_clone().map_err(internal)?;
+            cmd.stdout(wr).stderr(wr2);
+            Some(rd)
+        }
+        StderrMode::Tail | StderrMode::Stream => {
+            cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+            None
+        }
+    };
+    let oom_before = apply_limits(p, oom)?;
+    let spawned = cmd.spawn();
+    // `cmd` holds our copies of the merged pipe's write end: close them, or no EOF.
+    drop(cmd);
+    if let Some(before) = oom_before {
+        restore_oom_score(oom, before);
+    }
+    let mut child = spawned.map_err(|e| spawn_failed(&e, SpawnTarget::Program))?;
+    let (stdout, stderr) = match merged {
+        Some(rd) => (OwnedFd::from(rd), None),
+        None => (
+            child
+                .stdout
+                .take()
+                .map(OwnedFd::from)
+                .ok_or_else(|| ProtocolError::Internal("no stdout pipe".into()))?,
+            child.stderr.take().map(OwnedFd::from),
+        ),
+    };
+    Ok(Program {
+        child,
+        stdout,
+        stderr,
+    })
+}
+
+/// Set `limits` (soft and hard) and raise `oom_score_adj` on ourselves, for the program to
+/// inherit. Every limit is checked against the sandbox's hard limit first, so a refusal
+/// changes nothing. Returns the OOM score to put back after the spawn, if it was raised.
+fn apply_limits(
+    p: &ProcessOpenParams,
+    oom: Option<&std::fs::File>,
+) -> Result<Option<i32>, ProtocolError> {
+    if let Some(l) = &p.limits {
+        let wanted: Vec<(&str, Resource, u64)> = [
+            ("nproc", Resource::Nproc, l.nproc),
+            ("data_bytes", Resource::Data, l.data_bytes),
+            ("fsize_bytes", Resource::Fsize, l.fsize_bytes),
+            ("nofile", Resource::Nofile, l.nofile),
+        ]
+        .into_iter()
+        .filter_map(|(name, res, v)| Some((name, res, v?)))
+        .collect();
+        for &(name, res, v) in &wanted {
+            if let Some(hard) = rustix::process::getrlimit(res).maximum
+                && v > hard
+            {
+                return Err(ProtocolError::InvalidParams(format!(
+                    "`limits.{name}` {v} is above the sandbox's limit {hard}"
+                )));
+            }
+        }
+        for (name, res, v) in wanted {
+            let v = (v != u64::MAX).then_some(v);
+            rustix::process::setrlimit(
+                res,
+                Rlimit {
+                    current: v,
+                    maximum: v,
+                },
+            )
+            .map_err(|e| ProtocolError::Internal(format!("setrlimit `limits.{name}`: {e}")))?;
+        }
+    }
+    match p.oom_score_adj {
+        Some(score) => raise_oom_score(oom, score),
+        None => Ok(None),
+    }
+}
+
+/// Our own `/proc/self/oom_score_adj`, opened while we were still dumpable: once not
+/// dumpable, our `/proc/self` files belong to root and opening it for writing is refused. The
+/// kernel checks the permission at open, not at write. `None` where there is no such file.
+fn open_oom_score() -> Option<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/proc/self/oom_score_adj")
+        .ok()
+}
+
+/// Raise our OOM score to `score`; never lower it. Returns the score before, if changed.
+fn raise_oom_score(oom: Option<&std::fs::File>, score: u16) -> Result<Option<i32>, ProtocolError> {
+    use std::os::unix::fs::FileExt;
+    let err = |e: io::Error| ProtocolError::Internal(format!("`oom_score_adj`: {e}"));
+    let oom = oom.ok_or_else(|| err(io::ErrorKind::NotFound.into()))?;
+    let mut buf = [0u8; 16];
+    let n = oom.read_at(&mut buf, 0).map_err(err)?;
+    let before: i32 = std::str::from_utf8(&buf[..n])
+        .ok()
+        .and_then(|t| t.trim().parse().ok())
+        .ok_or_else(|| err(io::ErrorKind::InvalidData.into()))?;
+    if i32::from(score) <= before {
+        return Ok(None);
+    }
+    oom.write_at(score.to_string().as_bytes(), 0).map_err(err)?;
+    Ok(Some(before))
+}
+
+/// Put our own OOM score back after the spawn (lowering back to a value we had needs no
+/// privilege). Best effort: the program has its score either way.
+fn restore_oom_score(oom: Option<&std::fs::File>, before: i32) {
+    use std::os::unix::fs::FileExt;
+    if let Some(oom) = oom
+        && let Err(e) = oom.write_at(before.to_string().as_bytes(), 0)
+    {
+        debug!(error = %e, "could not restore the supervisor's oom_score_adj");
+    }
 }
 
 fn spawn_failed(e: &io::Error, what: SpawnTarget) -> ProtocolError {
@@ -850,16 +1086,107 @@ impl Conn {
     }
 }
 
-/// Read one output pipe; each read becomes one record. The next read happens only after the
-/// record was written (backpressure).
+/// What a pump does with what it reads.
+struct Sink {
+    /// Send each read as one record of this kind.
+    stream: Option<RecordKind>,
+    /// With `stream`: send at most this many bytes, then [`Event::Overflow`] and discard.
+    kill_at: Option<u64>,
+    /// Keep the last bytes.
+    tail: Option<Tail>,
+}
+
+impl Sink {
+    fn stream(kind: RecordKind, kill_at: Option<u64>) -> Self {
+        Self {
+            stream: Some(kind),
+            kill_at,
+            tail: None,
+        }
+    }
+
+    fn tail(cap: usize) -> Self {
+        Self {
+            stream: None,
+            kill_at: None,
+            tail: Some(Tail::new(cap)),
+        }
+    }
+}
+
+/// What a pump leaves behind.
+#[derive(Default)]
+struct PumpEnd {
+    tail: Option<Tail>,
+    /// The `kill` cap was passed.
+    overflow: bool,
+}
+
+/// The last `cap` bytes of a stream, in at most `cap` bytes of memory.
+struct Tail {
+    cap: usize,
+    buf: VecDeque<u8>,
+    /// Some bytes were dropped.
+    dropped: bool,
+}
+
+impl Tail {
+    fn new(cap: usize) -> Self {
+        Self {
+            cap,
+            buf: VecDeque::new(),
+            dropped: false,
+        }
+    }
+
+    fn push(&mut self, mut data: &[u8]) {
+        if data.len() > self.cap {
+            self.dropped = true;
+            data = &data[data.len() - self.cap..];
+        }
+        let over = (self.buf.len() + data.len()).saturating_sub(self.cap);
+        if over > 0 {
+            self.dropped = true;
+            self.buf.drain(..over);
+        }
+        let need = self.buf.len() + data.len();
+        if need > self.buf.capacity() {
+            // Grow by doubling, but never past the cap.
+            let target = need.max(self.buf.capacity() * 2).min(self.cap);
+            self.buf.reserve_exact(target - self.buf.len());
+        }
+        self.buf.extend(data);
+    }
+
+    /// Lossy UTF-8; when the front was dropped, a character cut in half there is skipped.
+    fn text(&self) -> String {
+        let bytes: Vec<u8> = self.buf.iter().copied().collect();
+        let skip = if self.dropped {
+            bytes
+                .iter()
+                .take(3)
+                .take_while(|b| **b & 0xC0 == 0x80)
+                .count()
+        } else {
+            0
+        };
+        String::from_utf8_lossy(&bytes[skip..]).into_owned()
+    }
+}
+
+/// Read one output pipe into its sink. A streamed read becomes one record, and the next read
+/// happens only after the record was written (backpressure). Memory: one 64 KiB buffer plus
+/// the tail.
 async fn pump(
     mut rx: pipe::Receiver,
-    kind: RecordKind,
+    mut sink: Sink,
     conn: Arc<Conn>,
     mut stop: watch::Receiver<bool>,
     events: mpsc::Sender<Event>,
-) {
+) -> PumpEnd {
     let mut buf = vec![0u8; MAX_RECORD_DATA_LEN];
+    let mut sent: u64 = 0;
+    let mut overflow = false;
     loop {
         // `biased`: data already in the pipe is read even after `stop`.
         let n = tokio::select! {
@@ -867,15 +1194,37 @@ async fn pump(
             r = rx.read(&mut buf) => r,
             _ = stop.wait_for(|s| *s) => break,
         };
-        match n {
+        let data = match n {
             Ok(0) | Err(_) => break,
-            Ok(n) => {
-                if conn.send_record(kind, &buf[..n]).await.is_err() {
-                    let _ = events.send(Event::ConnClosed).await;
-                    break;
-                }
+            Ok(n) => &buf[..n],
+        };
+        if let Some(t) = sink.tail.as_mut() {
+            t.push(data);
+        }
+        // Past a `kill` cap the rest is read and dropped until the tree is gone.
+        let Some(kind) = sink.stream.filter(|_| !overflow) else {
+            continue;
+        };
+        let mut take = data.len();
+        if let Some(cap) = sink.kill_at {
+            let room = cap.saturating_sub(sent);
+            if take as u64 > room {
+                take = usize::try_from(room).unwrap_or(take);
+                overflow = true;
             }
         }
+        if take > 0 && conn.send_record(kind, &data[..take]).await.is_err() {
+            let _ = events.send(Event::ConnClosed).await;
+            break;
+        }
+        sent += take as u64;
+        if overflow {
+            let _ = events.send(Event::Overflow).await;
+        }
+    }
+    PumpEnd {
+        tail: sink.tail,
+        overflow,
     }
 }
 
@@ -1140,6 +1489,37 @@ mod tests {
         let res = t.start(ID, control, || panic!("must not spawn"));
         assert!(matches!(res, Err(ProtocolError::Cancelled(_))));
         assert!(t.is_empty());
+    }
+
+    #[test]
+    fn tail_keeps_the_last_bytes_in_bounded_memory() {
+        let mut t = Tail::new(10);
+        t.push(b"hello");
+        assert!(!t.dropped);
+        assert_eq!(t.text(), "hello");
+        t.push(b" world");
+        assert!(t.dropped);
+        assert_eq!(t.text(), "ello world");
+        t.push(&[b'x'; 1000]);
+        assert_eq!(t.buf.len(), 10);
+        assert!(t.buf.capacity() < 64, "{}", t.buf.capacity());
+        assert_eq!(t.text(), "xxxxxxxxxx");
+
+        let mut big = Tail::new(1000);
+        for _ in 0..100 {
+            big.push(&[7; 77]);
+        }
+        assert_eq!(big.buf.len(), 1000);
+        assert!(big.buf.capacity() < 2048, "{}", big.buf.capacity());
+
+        // A character cut in half at the front is skipped, only when the front was dropped.
+        let mut t = Tail::new(3);
+        t.push("xéé".as_bytes());
+        assert_eq!(t.text(), "é");
+        let mut t = Tail::new(0);
+        t.push(b"abc");
+        assert!(t.dropped);
+        assert_eq!(t.text(), "");
     }
 
     #[test]
