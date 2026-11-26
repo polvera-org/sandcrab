@@ -165,6 +165,26 @@ impl PinStore {
         Ok(Some(pin))
     }
 
+    /// `sandcrab template pin`: record `image_id` (the image's current local id) as the pin of
+    /// `manifest` on `arch`, the same for a built and an external template. Trusts whatever
+    /// the reference resolves to now; callers warn about that.
+    pub fn adopt(
+        &self,
+        manifest: &TemplateManifest,
+        arch: ImageArch,
+        image_id: &str,
+    ) -> Result<Adopted> {
+        let previous = self.get(manifest, arch)?;
+        if previous.as_ref().is_some_and(|p| p.image_id == image_id) {
+            return Ok(Adopted::Unchanged);
+        }
+        let pin = TemplatePin::new(manifest, arch, manifest.image(), image_id, PinSource::Adopt);
+        Ok(Adopted::Recorded {
+            path: self.record(&pin)?,
+            replaced: previous.map(|p| p.image_id),
+        })
+    }
+
     /// Write `pin` atomically (temp file + rename); returns its path.
     pub fn record(&self, pin: &TemplatePin) -> Result<PathBuf> {
         pin.validate()?;
@@ -187,6 +207,18 @@ impl PinStore {
         })?;
         Ok(path)
     }
+}
+
+/// Outcome of [`PinStore::adopt`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Adopted {
+    /// The pin already held this image id; nothing was written.
+    Unchanged,
+    /// A pin was written; `replaced` is the image id of the pin it replaced.
+    Recorded {
+        path: PathBuf,
+        replaced: Option<String>,
+    },
 }
 
 fn create_private_dirs(dir: &Path) -> Result<()> {
@@ -267,6 +299,17 @@ pub fn unpinned_message(
     let t = &manifest.template;
     let arch = arch.map_or_else(|| "this host's arch".to_owned(), |a| a.to_string());
     let local = actual.map_or_else(String::new, |d| format!(" (local image {d})"));
+    if t.external {
+        return format!(
+            "UnpinnedImage: external template `{name}` {version} has no host-local pin for \
+             {arch}; image `{image}`{local} is not trusted until this host pins it. Pull it \
+             (`docker pull {image}`), then adopt it with `sandcrab template pin {name}`. Pins \
+             are a local integrity check (unchanged since this host adopted it), not provenance",
+            name = t.name,
+            version = t.version,
+            image = manifest.image(),
+        );
+    }
     format!(
         "UnpinnedImage: template `{name}` {version} has no host-local pin for {arch}; image \
          `{image}`{local} is not trusted until this host pins it. Build and pin it with \
@@ -277,6 +320,19 @@ pub fn unpinned_message(
         version = t.version,
         image = manifest.image(),
     )
+}
+
+/// How to get a template's image onto this host: build it, or pull it when it is external.
+#[must_use]
+pub fn obtain_hint(manifest: &TemplateManifest) -> String {
+    if manifest.template.external {
+        format!("pull it with `docker pull {}`", manifest.image())
+    } else {
+        format!(
+            "build it with `sandcrab template build {}`",
+            manifest.template.name
+        )
+    }
 }
 
 /// Hint appended to a pin mismatch.
@@ -440,6 +496,70 @@ mod tests {
         );
         // Unknown host arch: only the legacy single-arch pin can apply.
         assert_eq!(effective_pin(Some(&store), &bare, None).unwrap(), None);
+    }
+
+    #[test]
+    fn adopt_records_replaces_and_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = PinStore::open(tmp.path());
+        let m = manifest("external = true\n");
+        let arch = ImageArch::Amd64;
+        let Adopted::Recorded { path, replaced } = store.adopt(&m, arch, &digest('a')).unwrap()
+        else {
+            panic!("first adopt records");
+        };
+        assert_eq!(replaced, None);
+        assert_eq!(path, tmp.path().join("base/0.1.0/amd64.json"));
+        let pin = store.get(&m, arch).unwrap().unwrap();
+        assert_eq!(
+            (pin.image_id.as_str(), pin.source, pin.image.as_str()),
+            (
+                digest('a').as_str(),
+                PinSource::Adopt,
+                "sandcrab/base:0.1.0"
+            )
+        );
+        // Same id again: nothing written.
+        assert_eq!(
+            store.adopt(&m, arch, &digest('a')).unwrap(),
+            Adopted::Unchanged
+        );
+        // A new id replaces the pin, and the spawn-time pin follows it.
+        assert!(matches!(
+            store.adopt(&m, arch, &digest('b')).unwrap(),
+            Adopted::Recorded { replaced: Some(r), .. } if r == digest('a')
+        ));
+        let p = effective_pin(Some(&store), &m, Some(arch))
+            .unwrap()
+            .unwrap();
+        assert_eq!(p.digest, digest('b'));
+        // A malformed id is refused, not recorded.
+        assert!(store.adopt(&m, arch, "sha256:abc").is_err());
+        assert_eq!(store.get(&m, arch).unwrap().unwrap().image_id, digest('b'));
+    }
+
+    #[test]
+    fn external_unpinned_error_says_pull_then_pin() {
+        let m = manifest("external = true\n");
+        let e = unpinned_error(&m, Some(ImageArch::Amd64), None).to_string();
+        for needle in [
+            "UnpinnedImage",
+            "external template `base`",
+            "docker pull sandcrab/base:0.1.0",
+            "sandcrab template pin base",
+            "not provenance",
+        ] {
+            assert!(e.contains(needle), "{needle}: {e}");
+        }
+        assert!(!e.contains("build.sh"), "{e}");
+        assert_eq!(
+            obtain_hint(&m),
+            "pull it with `docker pull sandcrab/base:0.1.0`"
+        );
+        assert_eq!(
+            obtain_hint(&manifest("")),
+            "build it with `sandcrab template build base`"
+        );
     }
 
     #[test]

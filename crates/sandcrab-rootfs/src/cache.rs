@@ -492,7 +492,8 @@ struct ExportContainer {
 
 impl ExportContainer {
     fn create(image: &str, arch: Arch) -> Result<Self> {
-        // Images carry no CMD (see templates/base); the command is never run. `--platform` selects
+        // The command is never run, so the image needs no shell, CMD or working ENTRYPOINT, and
+        // its USER does not matter (an export reads the files). `--platform` selects
         // the arch from a multi-arch image and fails (rather than silently exporting the wrong
         // arch) when the local image only has another platform.
         let id = mkfs::run(Command::new("docker").args([
@@ -515,7 +516,8 @@ impl ExportContainer {
 impl Drop for ExportContainer {
     fn drop(&mut self) {
         let _ = Command::new("docker")
-            .args(["rm", "-f", &self.id])
+            // `-v`: also the anonymous volumes `docker create` made for the image's `VOLUME`s.
+            .args(["rm", "-f", "-v", &self.id])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

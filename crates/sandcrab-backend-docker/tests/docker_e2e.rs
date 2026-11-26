@@ -822,3 +822,100 @@ async fn timing_smoke_base_w0() {
         .collect();
     println!("last-run phases: {}", phases.join(" "));
 }
+
+/// A third-party image with no shell whose `USER` is not root (`distroless/static-debian12:
+/// nonroot`), pinned by multi-arch index digest and pulled when missing.
+const EXTERNAL_NOSHELL_IMAGE: &str = "gcr.io/distroless/static-debian12@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab";
+
+/// An external template whose image has no shell: refused until pinned; once pinned, `crabd`
+/// (bind-mounted, the pinned entrypoint) serves the file tools without anything from the image.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Docker, network access to pull a public image, and a static crabd"]
+async fn external_noshell_template_after_pin() {
+    let _serial = SERIAL.lock().await;
+    let pull = Command::new("docker")
+        .args(["pull", "-q", EXTERNAL_NOSHELL_IMAGE])
+        .status()
+        .unwrap();
+    assert!(pull.success(), "docker pull {EXTERNAL_NOSHELL_IMAGE}");
+    let tmp = tempfile::tempdir().unwrap();
+    let backend = Arc::new(
+        DockerBackend::new(DockerConfig {
+            crabd_path: crabd().to_path_buf(),
+            state_dir: tmp.path().join("run"),
+            ..DockerConfig::default()
+        })
+        .unwrap(),
+    );
+    let tdir = tmp.path().join("templates/noshell-ext");
+    std::fs::create_dir_all(&tdir).unwrap();
+    std::fs::write(
+        tdir.join("sandcrab.toml"),
+        format!(
+            "[template]\nname = \"noshell-ext\"\nversion = \"1.0.0\"\n\
+             image = \"{EXTERNAL_NOSHELL_IMAGE}\"\nexternal = true\n\n[tools]\ntiers = [\"core\"]\n"
+        ),
+    )
+    .unwrap();
+    let templates = TemplateRegistry::load(&[tmp.path().join("templates")]).unwrap();
+    let pins = sandcrab_core::PinStore::open(tmp.path().join("pins"));
+    let manager = SandboxManager::new(
+        backend,
+        WorkspaceRegistry::open(tmp.path().join("state")).unwrap(),
+        templates.clone(),
+        ManagerConfig {
+            template_pins: Some(pins.clone()),
+            ..ManagerConfig::default()
+        },
+    )
+    .unwrap();
+
+    let err = manager
+        .spawn(SandboxConfig::from_template("noshell-ext"))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("UnpinnedImage"), "{err}");
+    assert!(err.contains("sandcrab template pin noshell-ext"), "{err}");
+
+    // What `sandcrab template pin` does.
+    let t = templates.get("noshell-ext").unwrap();
+    let id = local_image_id(t.image());
+    pins.adopt(&t.manifest, sandcrab_core::ImageArch::host().unwrap(), &id)
+        .unwrap();
+
+    let sb = manager
+        .spawn(SandboxConfig::from_template("noshell-ext"))
+        .await
+        .unwrap();
+    let w = sb
+        .call::<FileWriteResult>(FileWriteParams {
+            path: "/tmp/hello.txt".into(),
+            content: "no shell needed\n".into(),
+            append: false,
+        })
+        .await;
+    assert!(w.is_ok(), "{w:?}");
+    let r = sb
+        .call::<sandcrab_protocol::FileReadResult>(sandcrab_protocol::FileReadParams {
+            path: "/tmp/hello.txt".into(),
+            offset: None,
+            limit: None,
+        })
+        .await
+        .unwrap();
+    assert!(r.content.contains("no shell needed"), "{r:?}");
+    let id = sb.id();
+    sb.destroy().await.unwrap();
+    assert!(!container_exists(&container_name(id)).await);
+}
+
+/// `docker image inspect --format {{.Id}}`, as `sandcrab template pin` records it.
+fn local_image_id(image: &str) -> String {
+    let out = Command::new("docker")
+        .args(["image", "inspect", "--format", "{{.Id}}", image])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "inspect {image}");
+    String::from_utf8(out.stdout).unwrap().trim().to_owned()
+}

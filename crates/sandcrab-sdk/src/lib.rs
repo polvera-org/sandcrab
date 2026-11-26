@@ -573,6 +573,7 @@ pub(crate) mod test_support {
             let tmp = tempfile::tempdir().unwrap();
             let d = tmp.path().join("templates/base");
             fs::create_dir_all(&d).unwrap();
+            fs::write(d.join("Dockerfile"), "FROM scratch\n").unwrap();
             fs::write(
                 d.join("sandcrab.toml"),
                 "[template]\nname = \"base\"\nversion = \"0.1.0\"\nimage = \"sandcrab/base:0.1.0\"\n\

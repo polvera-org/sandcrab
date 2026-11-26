@@ -1584,3 +1584,119 @@ fn vm_survives_the_thread_that_spawned_it() {
     assert!(leftovers(&env).is_empty());
     assert!(no_helper_left());
 }
+
+/// Third-party images for external templates, pinned by multi-arch index digest: Node, git and
+/// Python (`node:24-bookworm`), and one with no shell whose `USER` is not root
+/// (`distroless/static-debian12:nonroot`).
+const EXTERNAL_NODE_IMAGE: &str =
+    "node@sha256:49f7adaf9f1574bc45c20ea317139b39a59d7e758d0e93745e112fd85cb42623";
+const EXTERNAL_NOSHELL_IMAGE: &str = "gcr.io/distroless/static-debian12@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab";
+
+/// External templates (bring your own image) boot through the rootfs pipeline: refused until
+/// this host pins them, then a Node + git + Python image runs its programs, and an image with
+/// no shell still serves the file tools.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "real libkrun: signed helper, pinned libkrun, static crabd, network to pull public images"]
+async fn external_templates_boot_after_pin() {
+    let tmp = tempfile::Builder::new()
+        .prefix("sclk")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let (cfg, libs) = config(tmp.path(), false, false);
+    let backend = Arc::new(LibkrunBackend::new(cfg, libs).unwrap());
+    let tdir = tmp.path().join("templates");
+    for (name, image, tiers) in [
+        ("node-ext", EXTERNAL_NODE_IMAGE, r#"["core", "process"]"#),
+        ("noshell-ext", EXTERNAL_NOSHELL_IMAGE, r#"["core"]"#),
+    ] {
+        let pull = std::process::Command::new("docker")
+            .args(["pull", "-q", image])
+            .status()
+            .unwrap();
+        assert!(pull.success(), "docker pull {image}");
+        std::fs::create_dir_all(tdir.join(name)).unwrap();
+        std::fs::write(
+            tdir.join(name).join("sandcrab.toml"),
+            format!(
+                "[template]\nname = \"{name}\"\nversion = \"1.0.0\"\nimage = \"{image}\"\n\
+                 external = true\n\n[resources]\nvcpu = 1\nmemory_mb = 512\ndisk_mb = 2048\n\n\
+                 [tools]\ntiers = {tiers}\n"
+            ),
+        )
+        .unwrap();
+    }
+    let templates = TemplateRegistry::load(&[&tdir]).unwrap();
+    let pins = sandcrab_core::PinStore::open(tmp.path().join("pins"));
+    let manager = SandboxManager::new(
+        backend,
+        WorkspaceRegistry::open(tmp.path().join("state")).unwrap(),
+        templates.clone(),
+        ManagerConfig {
+            template_pins: Some(pins.clone()),
+            ..ManagerConfig::default()
+        },
+    )
+    .unwrap();
+
+    // Unpinned: refused before anything boots, naming the fix.
+    let err = manager
+        .spawn(SandboxConfig::from_template("node-ext"))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("UnpinnedImage"), "{err}");
+    assert!(err.contains("sandcrab template pin node-ext"), "{err}");
+    assert!(no_helper_left());
+
+    // What `sandcrab template pin` does.
+    let arch = sandcrab_core::ImageArch::host().unwrap();
+    for name in ["node-ext", "noshell-ext"] {
+        let t = templates.get(name).unwrap();
+        let id = sandcrab_rootfs::docker_image_id(t.image()).unwrap();
+        pins.adopt(&t.manifest, arch, &id).unwrap();
+    }
+
+    let sb = manager
+        .spawn(SandboxConfig::from_template("node-ext").require_hardware_isolation(true))
+        .await
+        .unwrap();
+    let r = bash(
+        &sb,
+        "node --version && git --version && python3 --version && cat /proc/1/comm",
+    )
+    .await;
+    assert_eq!(r.exit_code, Some(0), "{r:?}");
+    let lines: Vec<_> = r.stdout.lines().collect();
+    assert!(lines[0].starts_with('v'), "{}", r.stdout);
+    assert!(lines[1].starts_with("git version"), "{}", r.stdout);
+    assert!(lines[2].starts_with("Python 3"), "{}", r.stdout);
+    assert_eq!(lines[3], "crabd", "crabd is PID 1");
+    sb.destroy().await.unwrap();
+
+    let sb = manager
+        .spawn(SandboxConfig::from_template("noshell-ext"))
+        .await
+        .unwrap();
+    let w = sb
+        .call::<FileWriteResult>(FileWriteParams {
+            path: "/tmp/hello.txt".into(),
+            content: "no shell needed\n".into(),
+            append: false,
+        })
+        .await;
+    assert!(w.is_ok(), "{w:?}");
+    let l = sb
+        .call::<ListDirResult>(ListDirParams {
+            path: Some("/tmp".into()),
+            depth: Some(1),
+            respect_gitignore: false,
+        })
+        .await
+        .unwrap();
+    assert!(
+        l.entries.iter().any(|e| e.path.ends_with("hello.txt")),
+        "{l:?}"
+    );
+    sb.destroy().await.unwrap();
+    assert!(no_helper_left());
+}

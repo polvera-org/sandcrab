@@ -12,6 +12,8 @@ use crate::{NetworkConfig, NetworkPolicy, Result, SandboxError, UserSpec};
 
 /// File name of a template manifest inside its template directory.
 pub const MANIFEST_FILE: &str = "sandcrab.toml";
+/// Build recipe of a built (non-external) template, next to its manifest.
+pub const DOCKERFILE: &str = "Dockerfile";
 
 /// Manifest parsed from `templates/<name>/sandcrab.toml`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,6 +44,29 @@ impl TemplateManifest {
         manifest
             .validate()
             .map_err(|e| SandboxError::Template(format!("{}: {e}", path.display())))?;
+        let dockerfile = dir.join(DOCKERFILE).exists();
+        match (manifest.template.external, dockerfile) {
+            (true, true) => {
+                return Err(SandboxError::Template(format!(
+                    "{}: template `{}` is `external = true` but its directory has a {DOCKERFILE}; \
+                     an external template names an image built elsewhere: remove the \
+                     {DOCKERFILE}, or drop `external` to build the image from it",
+                    path.display(),
+                    manifest.template.name
+                )));
+            }
+            (false, false) => {
+                return Err(SandboxError::Template(format!(
+                    "{}: template `{}` has no {DOCKERFILE} next to its manifest; set \
+                     `external = true` in `[template]` to use an image built elsewhere (pull \
+                     it, then pin it with `sandcrab template pin {}`)",
+                    path.display(),
+                    manifest.template.name,
+                    manifest.template.name
+                )));
+            }
+            _ => {}
+        }
         let dir_name = dir.file_name().and_then(|n| n.to_str()).unwrap_or_default();
         if manifest.template.name != dir_name {
             return Err(SandboxError::Template(format!(
@@ -118,6 +143,11 @@ pub struct TemplateMeta {
     /// OCI image reference. Required.
     #[serde(default)]
     pub image: Option<String>,
+    /// The image is built elsewhere (bring your own image): the template directory has no
+    /// Dockerfile, `templates/build.sh` and `sandcrab template build` skip it, and the operator
+    /// pulls the image and adopts it with `sandcrab template pin`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub external: bool,
     /// **Deprecated** legacy in-manifest image pin, `sha256:<64 hex>`. Template images are
     /// pinned host-locally now ([`crate::pins`]); committed manifests carry no image IDs because
     /// local image IDs do not reproduce across hosts. Still parsed and honored as a fallback
@@ -504,6 +534,77 @@ tiers = ["core", "process"]
         let d = root.join(dir);
         fs::create_dir_all(&d).unwrap();
         fs::write(d.join(MANIFEST_FILE), body).unwrap();
+        fs::write(d.join(DOCKERFILE), "FROM scratch\n").unwrap();
+    }
+
+    const EXTERNAL: &str = r#"
+[template]
+name = "myapp"
+version = "1.4.0"
+image = "registry.example/myapp:1.4.0@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+external = true
+
+[tools]
+tiers = ["core"]
+"#;
+
+    #[test]
+    fn external_template_parses_and_round_trips() {
+        let m = TemplateManifest::from_toml_str(EXTERNAL).unwrap();
+        m.validate().unwrap();
+        assert!(m.template.external);
+        assert!(
+            m.image()
+                .starts_with("registry.example/myapp:1.4.0@sha256:")
+        );
+        assert_eq!(
+            TemplateManifest::from_toml_str(&toml::to_string(&m).unwrap()).unwrap(),
+            m
+        );
+        // Built templates default to `external = false` and do not serialize the key.
+        let b = TemplateManifest::from_toml_str(BASE).unwrap();
+        assert!(!b.template.external);
+        assert!(!toml::to_string(&b).unwrap().contains("external"));
+        // An external template still needs an image.
+        let no_image = EXTERNAL
+            .lines()
+            .filter(|l| !l.starts_with("image"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let m = TemplateManifest::from_toml_str(&no_image).unwrap();
+        assert!(
+            m.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("image` is required")
+        );
+    }
+
+    #[test]
+    fn dockerfile_must_match_external() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path().join("myapp");
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join(MANIFEST_FILE), EXTERNAL).unwrap();
+        // External, no Dockerfile: ok.
+        assert!(TemplateManifest::load_dir(&d).unwrap().template.external);
+        // External with a Dockerfile: refused.
+        fs::write(d.join(DOCKERFILE), "FROM scratch\n").unwrap();
+        let e = TemplateManifest::load_dir(&d).unwrap_err().to_string();
+        assert!(
+            e.contains("`external = true` but its directory has a Dockerfile"),
+            "{e}"
+        );
+        // Built (not external) with a Dockerfile: ok.
+        let built = EXTERNAL.replace("external = true\n", "");
+        fs::write(d.join(MANIFEST_FILE), &built).unwrap();
+        assert!(!TemplateManifest::load_dir(&d).unwrap().template.external);
+        // Built without a Dockerfile: refused, naming the fix.
+        fs::remove_file(d.join(DOCKERFILE)).unwrap();
+        let e = TemplateManifest::load_dir(&d).unwrap_err().to_string();
+        assert!(e.contains("has no Dockerfile"), "{e}");
+        assert!(e.contains("external = true"), "{e}");
+        assert!(e.contains("sandcrab template pin myapp"), "{e}");
     }
 
     #[test]

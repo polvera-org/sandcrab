@@ -742,6 +742,7 @@ mod tests {
             } else {
                 (extra, "")
             };
+            fs::write(d.join("Dockerfile"), "FROM scratch\n").unwrap();
             fs::write(
                 d.join("sandcrab.toml"),
                 format!(

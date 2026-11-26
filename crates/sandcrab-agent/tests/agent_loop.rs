@@ -19,6 +19,7 @@ use serde_json::{Value, json};
 fn setup(dir: &Path) -> (Sandcrab, FakeBackend) {
     let t = dir.join("templates/base");
     std::fs::create_dir_all(&t).unwrap();
+    std::fs::write(t.join("Dockerfile"), "FROM scratch\n").unwrap();
     std::fs::write(
         t.join("sandcrab.toml"),
         "[template]\nname = \"base\"\nversion = \"0.1.0\"\nimage = \"sandcrab/base:0.1.0\"\n\

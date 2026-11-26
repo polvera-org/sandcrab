@@ -312,13 +312,22 @@ async fn docker(g: &Global, r: &mut Report, reap: Reap) {
             Ok(PinStatus::Unpinned { digest }) => r.add(
                 name,
                 Status::Warn,
-                format!(
-                    "{} present ({digest}) but not pinned on this host: spawns are refused; \
-                     `sandcrab template build {n}` rebuilds and pins it, \
-                     `sandcrab template pin {n}` adopts the existing image",
-                    t.image(),
-                    n = t.name()
-                ),
+                if t.manifest.template.external {
+                    format!(
+                        "{} present ({digest}) but not pinned on this host: spawns are \
+                         refused; `sandcrab template pin {}` adopts it",
+                        t.image(),
+                        t.name()
+                    )
+                } else {
+                    format!(
+                        "{} present ({digest}) but not pinned on this host: spawns are refused; \
+                         `sandcrab template build {n}` rebuilds and pins it, \
+                         `sandcrab template pin {n}` adopts the existing image",
+                        t.image(),
+                        n = t.name()
+                    )
+                },
             ),
             Err(SandboxError::DigestMismatch {
                 expected, actual, ..
@@ -335,9 +344,9 @@ async fn docker(g: &Global, r: &mut Report, reap: Reap) {
                 name,
                 Status::Fail,
                 format!(
-                    "{} not built; run `sandcrab template build {}`",
+                    "{} not present; {}",
                     t.image(),
-                    t.name()
+                    sandcrab_sdk::core::pins::obtain_hint(&t.manifest)
                 ),
             ),
             Err(e) => r.add(name, Status::Fail, e.to_string()),
