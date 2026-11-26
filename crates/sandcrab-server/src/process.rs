@@ -65,6 +65,8 @@ const MAX_EARLY_CANCELS: usize = 1024;
 pub(crate) const SHUTDOWN_GRACE_MS: u64 = 5000;
 /// How often a stdin write that waits on the program looks for a client that went away.
 const PEER_POLL: Duration = Duration::from_millis(100);
+/// After `EXIT`, how long the server waits for the client to close before it closes.
+const EXIT_LINGER: Duration = Duration::from_secs(2);
 
 struct Entry {
     uid: u32,
@@ -264,7 +266,7 @@ fn refusal(id: &RequestId, uid: u32, e: &ApiError) -> Vec<u8> {
 
 /// Serve a connection whose first frame was `process.spawn`.
 pub(crate) async fn run(shared: &Shared, peer: Peer, stream: UnixStream, req: RpcRequest) {
-    let (rd, mut wr) = stream.into_split();
+    let (mut rd, mut wr) = stream.into_split();
     let id = req.id.clone();
     let params = match ProcessSpawnParams::from_request(&req) {
         Ok(p) => p,
@@ -293,7 +295,7 @@ pub(crate) async fn run(shared: &Shared, peer: Peer, stream: UnixStream, req: Rp
         let reg = shared.processes.register(peer.uid, &pid, &sb)?;
         Ok((sb, reg))
     };
-    let (sandbox, _reg) = match setup() {
+    let (sandbox, reg) = match setup() {
         Ok(v) => v,
         Err(e) => {
             let _ = write_frame(&mut wr, &refusal(&id, peer.uid, &e)).await;
@@ -331,14 +333,20 @@ pub(crate) async fn run(shared: &Shared, peer: Peer, stream: UnixStream, req: Rp
         return;
     }
     let (stdin, output) = stream.into_split();
-    let end = relay(rd, wr, stdin, output, pipe).await;
+    let end = relay(&mut rd, wr, stdin, output, pipe).await;
+    drop(reg);
+    if end == "exit" {
+        // The client may still be writing stdin. Closing under that write would fail it
+        // (`EPIPE`) before it read `EXIT`; discard until it closes, briefly.
+        let _ = tokio::time::timeout(EXIT_LINGER, discard(&mut rd)).await;
+    }
     tracing::debug!(process = %pid, sandbox = %sandbox.id(), end, "process connection closed");
 }
 
 /// Relay until `EXIT` was written (then close) or either side failed (then drop both, which
 /// stops the tree). Returns how it ended, for the log.
 async fn relay(
-    mut rd: OwnedReadHalf,
+    rd: &mut OwnedReadHalf,
     mut wr: OwnedWriteHalf,
     mut stdin: ProcessStdin,
     mut output: ProcessOutput,
@@ -391,11 +399,19 @@ async fn relay(
             // away meanwhile still stops it.
             let written = tokio::select! {
                 r = write => r,
-                () = peer_gone(&rd) => return "client closed",
+                () = peer_gone(rd) => return "client closed",
             };
-            if written.is_err() {
-                // stdin `null`, a record after `STDIN_EOF`, or the guest connection failed.
-                return "stdin refused";
+            match written {
+                Ok(()) => {}
+                // The guest connection failed: the program ended without reading all of its
+                // stdin, and its `EXIT` may be on the way. Keep relaying the output; discard
+                // what the client still sends.
+                Err(SandboxError::Lost(_)) => {
+                    discard(rd).await;
+                    return "client closed";
+                }
+                // A record after `STDIN_EOF`.
+                Err(_) => return "stdin refused",
             }
         }
     };
@@ -403,6 +419,12 @@ async fn relay(
         r = to_client => r.unwrap_or("client closed"),
         r = from_client => r,
     }
+}
+
+/// Read and drop what the client sends until it closes.
+async fn discard(rd: &mut OwnedReadHalf) {
+    let mut buf = vec![0u8; MAX_RECORD_DATA_LEN];
+    while matches!(rd.read(&mut buf).await, Ok(n) if n > 0) {}
 }
 
 async fn write_record(
