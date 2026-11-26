@@ -542,6 +542,11 @@ impl LibkrunBackend {
 
         // Workspaces and host mounts: re-verify each root, then plan the shares.
         let plan = workspace::plan_mounts(&spec.mounts, &spec.host_mounts)?;
+        workspace::check_device_room(
+            &plan,
+            network == HelperNetwork::Userspace,
+            workspace::device_room(),
+        )?;
         t.mark_custom("ws_attach_done");
 
         let netstack = match (network, &self.libs.netstack) {
